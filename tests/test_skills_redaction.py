@@ -1,7 +1,12 @@
+"""Tests for skills redaction."""
+
+from __future__ import annotations
+
 from penguiflow.skills.redaction import redact_pii, redact_tool_references
 
 
 def test_redact_pii_masks_common_patterns() -> None:
+    """Redact pii masks common patterns."""
     text = (
         "Email me at foo@example.com or call (555) 123-4567. "
         "Use token sk-testtoken123 and visit https://example.com?secret=1"
@@ -16,6 +21,7 @@ def test_redact_pii_masks_common_patterns() -> None:
 
 
 def test_redact_tool_references_replaces_disallowed_tools() -> None:
+    """Redact tool references replaces disallowed tools."""
     text = "Use browser.open and browser.click to proceed"
     redacted = redact_tool_references(
         text,
@@ -25,4 +31,6 @@ def test_redact_tool_references_replaces_disallowed_tools() -> None:
     assert "browser.open" not in redacted
     assert "browser.click" not in redacted
     assert "a suitable tool (use tool_search)" in redacted
-    assert redact_tool_references(text, [], tool_search_available=False) == text
+    assert (
+        redact_tool_references(text, [], tool_search_available=False) == text
+    )

@@ -28,10 +28,13 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from types import ModuleType
 
 logger = logging.getLogger("penguiflow.llm.tracing")
 
@@ -71,7 +74,9 @@ class LLMCallSpan:
             "error_type": self.error_type,
             "error_message": self.error_message,
         }
-        return {key: value for key, value in pairs.items() if value is not None}
+        return {
+            key: value for key, value in pairs.items() if value is not None
+        }
 
 
 @runtime_checkable
@@ -85,7 +90,7 @@ class LLMTraceSink(Protocol):
 
 @contextmanager
 def _measured(call: LLMCallSpan) -> Iterator[None]:
-    """Record latency and error metadata on ``call`` around the wrapped block."""
+    """Record latency and error metadata on ``call`` around the block."""
     started = time.perf_counter()
     try:
         yield
@@ -106,11 +111,13 @@ class LoggingLLMTraceSink:
         level: int = logging.INFO,
         logger_name: str = "penguiflow.llm.trace",
     ) -> None:
+        """Configure the logger name and level for trace records."""
         self._logger = logging.getLogger(logger_name)
         self._level = level
 
     @contextmanager
     def span(self, call: LLMCallSpan) -> Iterator[None]:
+        """Log the call's latency and outcome when the block exits."""
         try:
             with _measured(call):
                 yield
@@ -122,7 +129,10 @@ class LoggingLLMTraceSink:
                     "llm_provider": call.provider,
                     "llm_model": call.model,
                     "llm_stream": call.stream,
-                    **{f"llm_{key}": value for key, value in call.outcome_attributes().items()},
+                    **{
+                        f"llm_{key}": value
+                        for key, value in call.outcome_attributes().items()
+                    },
                 },
             )
 
@@ -138,11 +148,17 @@ class MlflowLLMTraceSink:
     """
 
     def __init__(self, *, span_name: str = "llm.complete") -> None:
+        """Configure the MLflow span name."""
         self._span_name = span_name
-        self._mlflow: Any | None = None
+        self._mlflow: ModuleType | None = None
         self._unavailable = False
 
-    def _module(self) -> Any | None:
+    @property
+    def available(self) -> bool:
+        """False once mlflow proved missing or too old to trace."""
+        return not self._unavailable
+
+    def _module(self) -> ModuleType | None:
         if self._unavailable:
             return None
         if self._mlflow is None:
@@ -151,14 +167,16 @@ class MlflowLLMTraceSink:
             except ImportError as exc:
                 self._unavailable = True
                 logger.warning(
-                    "MlflowLLMTraceSink disabled: mlflow is not installed (%s)",
+                    "MlflowLLMTraceSink disabled: mlflow is not "
+                    "installed (%s)",
                     exc,
                 )
                 return None
             if not hasattr(mlflow, "start_span"):
                 self._unavailable = True
                 logger.warning(
-                    "MlflowLLMTraceSink disabled: mlflow %s lacks the tracing API (need >= 2.14)",
+                    "MlflowLLMTraceSink disabled: mlflow %s lacks the "
+                    "tracing API (need >= 2.14)",
                     getattr(mlflow, "__version__", "unknown"),
                 )
                 return None
@@ -167,6 +185,7 @@ class MlflowLLMTraceSink:
 
     @contextmanager
     def span(self, call: LLMCallSpan) -> Iterator[Any]:
+        """Record the call as an MLflow span, or just measure it."""
         mlflow = self._module()
         if mlflow is None:
             with _measured(call):

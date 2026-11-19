@@ -1,10 +1,18 @@
-from pathlib import Path
+"""Tests for skills local store."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from penguiflow.skills.local_store import LocalSkillStore
 from penguiflow.skills.models import SkillDefinition
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 def test_local_store_search_and_rankings(tmp_path: Path) -> None:
+    """Local store search and rankings."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     alpha = SkillDefinition(
         name="pack.core.alpha",
@@ -16,8 +24,12 @@ def test_local_store_search_and_rankings(tmp_path: Path) -> None:
         trigger="Beta flow",
         steps=["Step B"],
     )
-    store.upsert_pack_skill(alpha, pack_name="core", scope_mode="project", update_existing=True)
-    store.upsert_pack_skill(beta, pack_name="core", scope_mode="project", update_existing=True)
+    store.upsert_pack_skill(
+        alpha, pack_name="core", scope_mode="project", update_existing=True
+    )
+    store.upsert_pack_skill(
+        beta, pack_name="core", scope_mode="project", update_existing=True
+    )
 
     results, effective = store.search(
         "alpha",
@@ -62,7 +74,10 @@ def test_local_store_search_and_rankings(tmp_path: Path) -> None:
     assert any(record.name == "pack.core.beta" for record in recent)
 
 
-def test_local_store_round_trips_skill_applicability_metadata(tmp_path: Path) -> None:
+def test_local_store_round_trips_skill_applicability_metadata(
+    tmp_path: Path,
+) -> None:
+    """Local store round trips skill applicability metadata."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(
@@ -79,7 +94,9 @@ def test_local_store_round_trips_skill_applicability_metadata(tmp_path: Path) ->
         update_existing=True,
     )
 
-    records = store.get_by_name(["pack.core.mail_triage"], scope_clause="", scope_params=())
+    records = store.get_by_name(
+        ["pack.core.mail_triage"], scope_clause="", scope_params=()
+    )
     assert len(records) == 1
     assert records[0].required_tool_names == ["mail.search"]
     assert records[0].required_namespaces == ["mail"]

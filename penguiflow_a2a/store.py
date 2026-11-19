@@ -1,11 +1,14 @@
+"""Task storage and event fan-out for the A2A service."""
+
 from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+from typing_extensions import override
 
 from .models import (
     Artifact,
@@ -20,6 +23,9 @@ from .models import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine, Mapping
 
 
 def _utc_now() -> datetime:
@@ -40,7 +46,8 @@ def _decode_page_token(token: str | None) -> int:
         raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
         return int(raw)
     except Exception as exc:  # pragma: no cover - validated by caller
-        raise ValueError("invalid page token") from exc
+        msg = "invalid page token"
+        raise ValueError(msg) from exc
 
 
 def _apply_history_length(task: Task, history_length: int | None) -> Task:
@@ -49,7 +56,9 @@ def _apply_history_length(task: Task, history_length: int | None) -> Task:
     history = list(task.history or [])
     if history_length <= 0:
         return task.model_copy(update={"history": None}, deep=True)
-    return task.model_copy(update={"history": history[-history_length:]}, deep=True)
+    return task.model_copy(
+        update={"history": history[-history_length:]}, deep=True
+    )
 
 
 def _omit_artifacts(task: Task) -> Task:
@@ -59,13 +68,19 @@ def _omit_artifacts(task: Task) -> Task:
 
 
 class TaskEventBroker:
+    """Fans task events out to their subscribers."""
+
     def __init__(self) -> None:
+        """Create a broker with no subscribers."""
         self._subscribers: dict[str, set[asyncio.Queue[StreamResponse]]] = {}
         self._lock = asyncio.Lock()
 
     async def subscribe(
         self, task_id: str
-    ) -> tuple[asyncio.Queue[StreamResponse], Callable[[], Coroutine[Any, Any, None]]]:
+    ) -> tuple[
+        asyncio.Queue[StreamResponse], Callable[[], Coroutine[Any, Any, None]]
+    ]:
+        """Subscribe to a task; return its event queue and unsubscribe call."""
         queue: asyncio.Queue[StreamResponse] = asyncio.Queue()
         async with self._lock:
             self._subscribers.setdefault(task_id, set()).add(queue)
@@ -82,6 +97,7 @@ class TaskEventBroker:
         return queue, _unsubscribe
 
     def publish(self, task_id: str, event: StreamResponse) -> None:
+        """Send ``event`` to the task's subscribers."""
         subscribers = self._subscribers.get(task_id)
         if not subscribers:
             return
@@ -94,15 +110,23 @@ class TaskEventBroker:
 
 @dataclass(slots=True)
 class StoredTask:
+    """A task with its stream subscribers and push configs."""
+
     task: Task
     created_at: datetime
     updated_at: datetime
 
 
 class TaskStore(Protocol):
-    async def create_task(self, task: Task) -> Task: ...
+    """Storage of A2A tasks, their events and push configs."""
 
-    async def add_history(self, task_id: str, message: Message) -> None: ...
+    async def create_task(self, task: Task) -> Task:
+        """Store a new task."""
+        ...
+
+    async def add_history(self, task_id: str, message: Message) -> None:
+        """Append a message to a task's history."""
+        ...
 
     async def update_status(
         self,
@@ -111,7 +135,9 @@ class TaskStore(Protocol):
         *,
         final: bool,
         metadata: Mapping[str, Any] | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Update a task's status, notifying its subscribers."""
+        ...
 
     async def add_artifact(
         self,
@@ -121,9 +147,15 @@ class TaskStore(Protocol):
         append: bool,
         last_chunk: bool,
         metadata: Mapping[str, Any] | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Add or extend a task artifact, notifying its subscribers."""
+        ...
 
-    async def get_task(self, task_id: str, history_length: int | None = None) -> Task: ...
+    async def get_task(
+        self, task_id: str, history_length: int | None = None
+    ) -> Task:
+        """Return a task, with at most ``history_length`` messages."""
+        ...
 
     async def list_tasks(
         self,
@@ -135,20 +167,32 @@ class TaskStore(Protocol):
         history_length: int | None,
         status_timestamp_after: datetime | None,
         include_artifacts: bool,
-    ) -> ListTasksResponse: ...
+    ) -> ListTasksResponse:
+        """Return a page of tasks, optionally filtered."""
+        ...
 
     async def subscribe(
         self, task_id: str
-    ) -> tuple[asyncio.Queue[StreamResponse], Callable[[], Coroutine[Any, Any, None]]]: ...
+    ) -> tuple[
+        asyncio.Queue[StreamResponse], Callable[[], Coroutine[Any, Any, None]]
+    ]:
+        """Subscribe to a task; return its event queue and unsubscribe call."""
+        ...
 
     async def set_push_config(
         self,
         task_id: str,
         config_id: str,
         config: TaskPushNotificationConfig,
-    ) -> TaskPushNotificationConfig: ...
+    ) -> TaskPushNotificationConfig:
+        """Store a push notification config of a task."""
+        ...
 
-    async def get_push_config(self, task_id: str, config_id: str) -> TaskPushNotificationConfig: ...
+    async def get_push_config(
+        self, task_id: str, config_id: str
+    ) -> TaskPushNotificationConfig:
+        """Return a push notification config of a task."""
+        ...
 
     async def list_push_configs(
         self,
@@ -156,28 +200,40 @@ class TaskStore(Protocol):
         *,
         page_size: int,
         page_token: str | None,
-    ) -> ListTaskPushNotificationConfigResponse: ...
+    ) -> ListTaskPushNotificationConfigResponse:
+        """Return a page of the push notification configs of a task."""
+        ...
 
-    async def delete_push_config(self, task_id: str, config_id: str) -> None: ...
+    async def delete_push_config(self, task_id: str, config_id: str) -> None:
+        """Delete a push notification config of a task."""
+        ...
 
 
-class InMemoryTaskStore:
+class InMemoryTaskStore(TaskStore):
+    """Task store that keeps everything in memory."""
+
     def __init__(self) -> None:
+        """Create an empty store."""
         self._tasks: dict[str, StoredTask] = {}
         self._lock = asyncio.Lock()
         self._events = TaskEventBroker()
-        self._push_configs: dict[str, dict[str, TaskPushNotificationConfig]] = {}
+        self._push_configs: dict[
+            str, dict[str, TaskPushNotificationConfig]
+        ] = {}
 
+    @override
     async def create_task(self, task: Task) -> Task:
         now = _utc_now()
         async with self._lock:
             if task.id in self._tasks:
-                raise ValueError(f"Task '{task.id}' already exists")
+                msg = f"Task '{task.id}' already exists"
+                raise ValueError(msg)
             stored = StoredTask(task=task, created_at=now, updated_at=now)
             self._tasks[task.id] = stored
             self._push_configs.setdefault(task.id, {})
         return task.model_copy(deep=True)
 
+    @override
     async def add_history(self, task_id: str, message: Message) -> None:
         async with self._lock:
             stored = self._tasks.get(task_id)
@@ -185,9 +241,12 @@ class InMemoryTaskStore:
                 raise KeyError(task_id)
             history = list(stored.task.history or [])
             history.append(message)
-            stored.task = stored.task.model_copy(update={"history": history}, deep=True)
+            stored.task = stored.task.model_copy(
+                update={"history": history}, deep=True
+            )
             stored.updated_at = _utc_now()
 
+    @override
     async def update_status(
         self,
         task_id: str,
@@ -200,7 +259,9 @@ class InMemoryTaskStore:
             stored = self._tasks.get(task_id)
             if stored is None:
                 raise KeyError(task_id)
-            stored.task = stored.task.model_copy(update={"status": status}, deep=True)
+            stored.task = stored.task.model_copy(
+                update={"status": status}, deep=True
+            )
             stored.updated_at = _utc_now()
             event = TaskStatusUpdateEvent(
                 task_id=stored.task.id,
@@ -211,6 +272,7 @@ class InMemoryTaskStore:
             )
         self._events.publish(task_id, StreamResponse(status_update=event))
 
+    @override
     async def add_artifact(
         self,
         task_id: str,
@@ -228,20 +290,27 @@ class InMemoryTaskStore:
             if append:
                 for idx, existing in enumerate(artifacts):
                     if existing.artifact_id == artifact.artifact_id:
-                        combined_parts = list(existing.parts) + list(artifact.parts)
-                        artifacts[idx] = existing.model_copy(update={"parts": combined_parts}, deep=True)
+                        combined_parts = list(existing.parts) + list(
+                            artifact.parts
+                        )
+                        artifacts[idx] = existing.model_copy(
+                            update={"parts": combined_parts}, deep=True
+                        )
                         break
                 else:
                     artifacts.append(artifact)
             else:
-                # A non-append update replaces any artifact previously sent with the same id.
+                # A non-append update replaces any artifact previously sent
+                # with the same id.
                 for idx, existing in enumerate(artifacts):
                     if existing.artifact_id == artifact.artifact_id:
                         artifacts[idx] = artifact
                         break
                 else:
                     artifacts.append(artifact)
-            stored.task = stored.task.model_copy(update={"artifacts": artifacts}, deep=True)
+            stored.task = stored.task.model_copy(
+                update={"artifacts": artifacts}, deep=True
+            )
             stored.updated_at = _utc_now()
             event = TaskArtifactUpdateEvent(
                 task_id=stored.task.id,
@@ -253,15 +322,18 @@ class InMemoryTaskStore:
             )
         self._events.publish(task_id, StreamResponse(artifact_update=event))
 
-    async def get_task(self, task_id: str, history_length: int | None = None) -> Task:
+    @override
+    async def get_task(
+        self, task_id: str, history_length: int | None = None
+    ) -> Task:
         async with self._lock:
             stored = self._tasks.get(task_id)
             if stored is None:
                 raise KeyError(task_id)
             task = stored.task.model_copy(deep=True)
-        task = _apply_history_length(task, history_length)
-        return task
+        return _apply_history_length(task, history_length)
 
+    @override
     async def list_tasks(
         self,
         *,
@@ -277,11 +349,23 @@ class InMemoryTaskStore:
         async with self._lock:
             records = list(self._tasks.values())
         if context_id:
-            records = [record for record in records if record.task.context_id == context_id]
+            records = [
+                record
+                for record in records
+                if record.task.context_id == context_id
+            ]
         if status is not None:
-            records = [record for record in records if record.task.status.state == status]
+            records = [
+                record
+                for record in records
+                if record.task.status.state == status
+            ]
         if status_timestamp_after is not None:
-            records = [record for record in records if record.updated_at > status_timestamp_after]
+            records = [
+                record
+                for record in records
+                if record.updated_at > status_timestamp_after
+            ]
         records.sort(key=lambda record: record.updated_at, reverse=True)
         total_size = len(records)
         page = records[offset : offset + page_size]
@@ -293,7 +377,9 @@ class InMemoryTaskStore:
                 task = _omit_artifacts(task)
             processed.append(task)
         next_offset = offset + len(page)
-        next_token = _encode_page_token(next_offset) if next_offset < total_size else ""
+        next_token = (
+            _encode_page_token(next_offset) if next_offset < total_size else ""
+        )
         return ListTasksResponse(
             tasks=processed,
             next_page_token=next_token,
@@ -301,14 +387,18 @@ class InMemoryTaskStore:
             total_size=total_size,
         )
 
+    @override
     async def subscribe(
         self, task_id: str
-    ) -> tuple[asyncio.Queue[StreamResponse], Callable[[], Coroutine[Any, Any, None]]]:
+    ) -> tuple[
+        asyncio.Queue[StreamResponse], Callable[[], Coroutine[Any, Any, None]]
+    ]:
         async with self._lock:
             if task_id not in self._tasks:
                 raise KeyError(task_id)
         return await self._events.subscribe(task_id)
 
+    @override
     async def set_push_config(
         self,
         task_id: str,
@@ -322,7 +412,10 @@ class InMemoryTaskStore:
             configs[config_id] = config
         return config.model_copy(deep=True)
 
-    async def get_push_config(self, task_id: str, config_id: str) -> TaskPushNotificationConfig:
+    @override
+    async def get_push_config(
+        self, task_id: str, config_id: str
+    ) -> TaskPushNotificationConfig:
         async with self._lock:
             if task_id not in self._tasks:
                 raise KeyError(task_id)
@@ -331,6 +424,7 @@ class InMemoryTaskStore:
                 raise KeyError(config_id)
         return config.model_copy(deep=True)
 
+    @override
     async def list_push_configs(
         self,
         task_id: str,
@@ -339,7 +433,8 @@ class InMemoryTaskStore:
         page_token: str | None,
     ) -> ListTaskPushNotificationConfigResponse:
         if page_size < 1:
-            raise ValueError("page_size must be >= 1")
+            msg = "page_size must be >= 1"
+            raise ValueError(msg)
         offset = _decode_page_token(page_token)
         async with self._lock:
             if task_id not in self._tasks:
@@ -349,9 +444,14 @@ class InMemoryTaskStore:
         total_size = len(configs)
         page = configs[offset : offset + page_size]
         next_offset = offset + len(page)
-        next_token = _encode_page_token(next_offset) if next_offset < total_size else ""
-        return ListTaskPushNotificationConfigResponse(configs=page, next_page_token=next_token)
+        next_token = (
+            _encode_page_token(next_offset) if next_offset < total_size else ""
+        )
+        return ListTaskPushNotificationConfigResponse(
+            configs=page, next_page_token=next_token
+        )
 
+    @override
     async def delete_push_config(self, task_id: str, config_id: str) -> None:
         async with self._lock:
             if task_id not in self._tasks:

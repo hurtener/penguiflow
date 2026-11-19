@@ -1,14 +1,29 @@
 """Base JSON schema transformer for the LLM layer.
 
-Provides recursive schema walking and transformation capabilities.
-Adapted from PydanticAI patterns.
+Provides recursive schema walking and transformation capabilities. Adapted from
+PydanticAI patterns.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+# Keys whose value is a mapping of names to subschemas.
+_SCHEMA_MAP_KEYS = frozenset({"properties", "$defs", "patternProperties"})
+# Keys whose value is a single subschema.
+_SCHEMA_KEYS = frozenset(
+    {"items", "additionalProperties", "if", "then", "else", "not"}
+)
+# Keys whose value is a list of subschemas.
+_SCHEMA_LIST_KEYS = frozenset(
+    {"items", "anyOf", "oneOf", "allOf", "prefixItems"}
+)
 
 
 class JsonSchemaTransformer(ABC):
@@ -28,9 +43,9 @@ class JsonSchemaTransformer(ABC):
     """
 
     # Keywords that should be removed by default (can be overridden)
-    UNSUPPORTED_KEYWORDS: set[str] = set()
+    UNSUPPORTED_KEYWORDS: ClassVar[frozenset[str]] = frozenset()
 
-    def __init__(self, schema: dict[str, Any], *, strict: bool = True):
+    def __init__(self, schema: dict[str, Any], *, strict: bool = True) -> None:
         """Initialize the transformer.
 
         Args:
@@ -45,6 +60,21 @@ class JsonSchemaTransformer(ABC):
         self._recursive_refs: set[str] = set()
         self._transformed_defs: dict[str, dict[str, Any]] = {}
         self._warnings: list[str] = []
+
+    @property
+    def warnings(self) -> list[str]:
+        """Warnings collected while transforming the schema."""
+        return list(self._warnings)
+
+    @property
+    def transformed_defs(self) -> dict[str, dict[str, Any]]:
+        """``$defs`` entries already inlined, by definition name."""
+        return dict(self._transformed_defs)
+
+    @property
+    def recursive_refs(self) -> frozenset[str]:
+        """``$ref`` targets found to be recursive."""
+        return frozenset(self._recursive_refs)
 
     def transform(self) -> dict[str, Any]:
         """Transform the schema for this provider.
@@ -64,43 +94,26 @@ class JsonSchemaTransformer(ABC):
         Returns:
             The transformed node.
         """
-        if not isinstance(node, dict):
-            return node
-
         if "$ref" in node:
             return self._handle_ref(node)
-
-        result: dict[str, Any] = {}
-
-        for key, value in node.items():
-            if key == "properties" and isinstance(value, dict):
-                result[key] = {k: self._walk(v) for k, v in value.items()}
-            elif key == "items" and isinstance(value, dict):
-                result[key] = self._walk(value)
-            elif key == "items" and isinstance(value, list):
-                result[key] = [self._walk(v) if isinstance(v, dict) else v for v in value]
-            elif key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
-                result[key] = [self._walk(v) if isinstance(v, dict) else v for v in value]
-            elif key == "$defs" and isinstance(value, dict):
-                result[key] = {k: self._walk(v) for k, v in value.items()}
-            elif key == "additionalProperties" and isinstance(value, dict):
-                result[key] = self._walk(value)
-            elif key == "patternProperties" and isinstance(value, dict):
-                result[key] = {k: self._walk(v) for k, v in value.items()}
-            elif key == "prefixItems" and isinstance(value, list):
-                result[key] = [self._walk(v) if isinstance(v, dict) else v for v in value]
-            elif key == "if" and isinstance(value, dict):
-                result[key] = self._walk(value)
-            elif key == "then" and isinstance(value, dict):
-                result[key] = self._walk(value)
-            elif key == "else" and isinstance(value, dict):
-                result[key] = self._walk(value)
-            elif key == "not" and isinstance(value, dict):
-                result[key] = self._walk(value)
-            else:
-                result[key] = value
-
+        result = {
+            key: self._walk_value(key, value) for key, value in node.items()
+        }
         return self._transform_node(result)
+
+    def _walk_value(self, key: str, value: object) -> object:
+        """Walk the subschemas held by ``key``; other values pass through."""
+        if isinstance(value, dict):
+            if key in _SCHEMA_MAP_KEYS:
+                return {
+                    name: self._walk(sub) if isinstance(sub, dict) else sub
+                    for name, sub in value.items()
+                }
+            if key in _SCHEMA_KEYS:
+                return self._walk(value)
+        elif isinstance(value, list) and key in _SCHEMA_LIST_KEYS:
+            return [self._walk(v) if isinstance(v, dict) else v for v in value]
+        return value
 
     @abstractmethod
     def _transform_node(self, node: dict[str, Any]) -> dict[str, Any]:
@@ -167,12 +180,18 @@ class JsonSchemaTransformer(ABC):
             The finalized schema.
         """
         # Remove $defs if all refs were inlined and no recursive refs exist
-        if self._prefer_inline_refs and not self._recursive_refs and "$defs" in schema:
+        if (
+            self._prefer_inline_refs
+            and not self._recursive_refs
+            and "$defs" in schema
+        ):
             del schema["$defs"]
 
         return schema
 
-    def _remove_unsupported_keywords(self, node: dict[str, Any]) -> dict[str, Any]:
+    def _remove_unsupported_keywords(
+        self, node: dict[str, Any]
+    ) -> dict[str, Any]:
         """Remove keywords that aren't supported by this provider.
 
         Args:
@@ -201,7 +220,9 @@ class JsonSchemaTransformer(ABC):
             node["required"] = list(node["properties"].keys())
         return node
 
-    def _add_additional_properties_false(self, node: dict[str, Any]) -> dict[str, Any]:
+    def _add_additional_properties_false(
+        self, node: dict[str, Any]
+    ) -> dict[str, Any]:
         """Add additionalProperties: false for object types (strict mode).
 
         Args:
@@ -220,6 +241,20 @@ class JsonSchemaTransformer(ABC):
 # ---------------------------------------------------------------------------
 
 
+def _nested_schemas(schema: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Yield the subschemas under ``items``, compositions and ``$defs``."""
+    items = schema.get("items")
+    if isinstance(items, dict):
+        yield items
+    for key in ("anyOf", "oneOf", "allOf"):
+        options = schema.get(key)
+        if isinstance(options, list):
+            yield from (v for v in options if isinstance(v, dict))
+    defs = schema.get("$defs")
+    if isinstance(defs, dict):
+        yield from (v for v in defs.values() if isinstance(v, dict))
+
+
 def estimate_object_key_count(schema: dict[str, Any]) -> int:
     """Best-effort count of object property keys (heuristic).
 
@@ -232,28 +267,17 @@ def estimate_object_key_count(schema: dict[str, Any]) -> int:
         Estimated total key count.
     """
     count = 0
-
-    if schema.get("type") == "object" and isinstance(schema.get("properties"), dict):
-        count += len(schema["properties"])
-        for v in schema["properties"].values():
-            if isinstance(v, dict):
-                count += estimate_object_key_count(v)
-
-    if isinstance(schema.get("items"), dict):
-        count += estimate_object_key_count(schema["items"])
-
-    for k in ("anyOf", "oneOf", "allOf"):
-        if isinstance(schema.get(k), list):
-            for v in schema[k]:
-                if isinstance(v, dict):
-                    count += estimate_object_key_count(v)
-
-    if isinstance(schema.get("$defs"), dict):
-        for v in schema["$defs"].values():
-            if isinstance(v, dict):
-                count += estimate_object_key_count(v)
-
-    return count
+    properties = schema.get("properties")
+    if schema.get("type") == "object" and isinstance(properties, dict):
+        count += len(properties)
+        count += sum(
+            estimate_object_key_count(v)
+            for v in properties.values()
+            if isinstance(v, dict)
+        )
+    return count + sum(
+        estimate_object_key_count(child) for child in _nested_schemas(schema)
+    )
 
 
 def has_composition_keywords(schema: dict[str, Any]) -> bool:
@@ -266,25 +290,20 @@ def has_composition_keywords(schema: dict[str, Any]) -> bool:
         True if composition keywords are present.
     """
 
-    def _check(node: dict[str, Any]) -> bool:
+    def _check(node: object) -> bool:
         if not isinstance(node, dict):
             return False
-
         if any(k in node for k in ("anyOf", "oneOf", "allOf")):
             return True
-
-        for key, value in node.items():
-            if key == "properties" and isinstance(value, dict):
-                if any(_check(v) for v in value.values()):
-                    return True
-            elif key == "items" and isinstance(value, dict):
-                if _check(value):
-                    return True
-            elif key == "$defs" and isinstance(value, dict):
-                if any(_check(v) for v in value.values()):
-                    return True
-
-        return False
+        children: list[object] = []
+        for key in ("properties", "$defs"):
+            value = node.get(key)
+            if isinstance(value, dict):
+                children.extend(value.values())
+        items = node.get("items")
+        if isinstance(items, dict):
+            children.append(items)
+        return any(_check(child) for child in children)
 
     return _check(schema)
 
@@ -299,7 +318,7 @@ def has_refs(schema: dict[str, Any]) -> bool:
         True if $ref is present.
     """
 
-    def _check(node: Any) -> bool:
+    def _check(node: object) -> bool:
         if not isinstance(node, dict):
             return False
 

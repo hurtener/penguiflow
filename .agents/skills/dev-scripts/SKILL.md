@@ -14,7 +14,7 @@ Write a Python dev tool that lives outside the package as a named command of the
 - A shell dev script rewritten in Python becomes a workspace command too.
 - Never use `sys.path.insert(...)` or `sys.path.append(...)` to import `penguiflow` or a sibling script. Both are installed in the environment, so imports work without it.
 - Add the member to `[dependency-groups] dev` only. Never to `[project.optional-dependencies]`: those are published extras.
-- Add `scripts/src` to `files` in the root `[tool.mypy]`, so `uv run mypy` checks it.
+- Add `scripts/src` to `src` in the root `[tool.ruff]`, and to `files` and `mypy_path` in the root `[tool.mypy]`, so the quality gates check it (see quality-gates).
 
 ## Setup (first script only)
 
@@ -35,7 +35,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 ```
 
-Declare the member in the root `pyproject.toml`, add it to the dev group and to mypy:
+Declare the member in the root `pyproject.toml`, and add it to the dev group, ruff and mypy:
 
 ```toml
 # pyproject.toml
@@ -51,9 +51,14 @@ members = ["scripts"]
 [tool.uv.sources]
 penguiflow-scripts = { workspace = true }
 
+[tool.ruff]
+# ...existing settings; only `src` changes
+src = [".", "tests", "scripts/src"]
+
 [tool.mypy]
-# ...existing settings; only `files` changes
-files = ["penguiflow", "penguiflow_a2a", "scripts/src"]
+# ...existing settings; only `files` and `mypy_path` change
+files = ["penguiflow", "penguiflow_a2a", "examples", "tests", "scripts/src"]
+mypy_path = [".", "scripts/src"]
 ```
 
 Then run `uv sync` and `uv run <command>`. Each later script is one module in `scripts/src/penguiflow_scripts/` plus one line in `[project.scripts]`.

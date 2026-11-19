@@ -1,3 +1,5 @@
+"""Tests for enterprise telemetry auto seq."""
+
 from __future__ import annotations
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
@@ -6,6 +8,7 @@ from penguiflow.planner import PlannerEvent
 
 
 def test_agent_telemetry_counts_auto_seq_events() -> None:
+    """Agent telemetry counts auto seq events."""
     config = AgentConfig.from_env()
     telemetry = AgentTelemetry(config)
 

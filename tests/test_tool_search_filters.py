@@ -6,8 +6,7 @@ These exercises cover the back-compatible filter args added to
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel
@@ -17,6 +16,11 @@ from penguiflow.node import Node
 from penguiflow.planner.tool_search_cache import ToolSearchCache
 from penguiflow.planner.tool_search_tool import ToolSearchArgs
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from penguiflow.planner.context import ToolContext
 
 
 class _Args(BaseModel):
@@ -28,26 +32,26 @@ class _Out(BaseModel):
 
 
 @tool(desc="Send a mail message via Microsoft 365.", tags=["mail", "write"])
-async def microsoft_send_mail(args: _Args, ctx: Any) -> _Out:
-    del ctx
+async def microsoft_send_mail(args: _Args, _ctx: ToolContext) -> _Out:
+    """Send a mail (Microsoft 365)."""
     return _Out(text=args.text)
 
 
 @tool(desc="Search Microsoft 365 mail.", tags=["mail", "read"])
-async def microsoft_search_mail(args: _Args, ctx: Any) -> _Out:
-    del ctx
+async def microsoft_search_mail(args: _Args, _ctx: ToolContext) -> _Out:
+    """Search mail (Microsoft 365)."""
     return _Out(text=args.text)
 
 
 @tool(desc="List BigQuery datasets.", tags=["bigquery", "read"])
-async def explorer_list_datasets(args: _Args, ctx: Any) -> _Out:
-    del ctx
+async def explorer_list_datasets(args: _Args, _ctx: ToolContext) -> _Out:
+    """List datasets (explorer)."""
     return _Out(text=args.text)
 
 
 @tool(desc="Terminate the task.", tags=[], loading_mode=ToolLoadingMode.ALWAYS)
-async def finish_tool(args: _Args, ctx: Any) -> _Out:
-    del ctx
+async def finish_tool(args: _Args, _ctx: ToolContext) -> _Out:
+    """Finish the task."""
     return _Out(text=args.text)
 
 
@@ -91,6 +95,7 @@ def _search(
 
 
 def test_tags_filter_single(tmp_path: Path) -> None:
+    """Tags filter single."""
     cache = _build_cache(tmp_path)
     results = _search(cache, "mail", tags=("mail",))
     assert {item["name"] for item in results} == {
@@ -100,12 +105,14 @@ def test_tags_filter_single(tmp_path: Path) -> None:
 
 
 def test_tags_filter_and_match(tmp_path: Path) -> None:
+    """Tags filter and match."""
     cache = _build_cache(tmp_path)
     results = _search(cache, "mail", tags=("mail", "write"))
     assert [item["name"] for item in results] == ["microsoft_365.send_mail"]
 
 
 def test_tags_filter_unknown_tag_returns_empty(tmp_path: Path) -> None:
+    """Tags filter unknown tag returns empty."""
     cache = _build_cache(tmp_path)
     results = _search(cache, "mail", tags=("mail", "doesnotexist"))
     assert results == []
@@ -123,6 +130,7 @@ def test_tags_filter_ignores_auto_expanded_name_tokens(tmp_path: Path) -> None:
 
 
 def test_namespace_filter_dot_prefix(tmp_path: Path) -> None:
+    """Namespace filter dot prefix."""
     cache = _build_cache(tmp_path)
     results = _search(cache, "mail", namespace="microsoft_365")
     assert {item["name"] for item in results} == {
@@ -131,7 +139,9 @@ def test_namespace_filter_dot_prefix(tmp_path: Path) -> None:
     }
 
 
-def test_namespace_filter_does_not_match_underscore_prefix(tmp_path: Path) -> None:
+def test_namespace_filter_does_not_match_underscore_prefix(
+    tmp_path: Path,
+) -> None:
     """Namespace is dot-prefix only; underscore is NOT a separator."""
     cache = _build_cache(tmp_path)
     results = _search(cache, "datasets", namespace="explorer")
@@ -143,13 +153,16 @@ def test_namespace_filter_does_not_match_underscore_prefix(tmp_path: Path) -> No
 
 
 def test_namespace_filter_exact_bare_name(tmp_path: Path) -> None:
+    """Namespace filter exact bare name."""
     cache = _build_cache(tmp_path)
-    # Bare-name tool: namespace="finish" matches via the name==namespace branch.
+    # Bare-name tool: namespace="finish" matches via the name==namespace
+    # branch.
     results = _search(cache, "finish", namespace="finish", search_type="exact")
     assert [item["name"] for item in results] == ["finish"]
 
 
 def test_filters_default_is_back_compat(tmp_path: Path) -> None:
+    """Filters default is back compat."""
     cache = _build_cache(tmp_path)
     baseline, _ = cache.search(
         "mail",
@@ -171,6 +184,7 @@ def test_filters_default_is_back_compat(tmp_path: Path) -> None:
 
 
 def test_filters_compose_as_and(tmp_path: Path) -> None:
+    """Filters compose as and."""
     cache = _build_cache(tmp_path)
     results = _search(
         cache,
@@ -203,11 +217,17 @@ def test_filters_apply_before_paging(tmp_path: Path) -> None:
     # With limit=1 we still get exactly 1 matching tool (not pruned to 0).
     results = _search(cache, "mail", tags=("mail",), limit=1)
     assert len(results) == 1
-    assert results[0]["name"] in {"microsoft_365.send_mail", "microsoft_365.search_mail"}
+    assert results[0]["name"] in {
+        "microsoft_365.send_mail",
+        "microsoft_365.search_mail",
+    }
 
 
 def test_tool_search_args_accepts_new_fields() -> None:
-    args = ToolSearchArgs(query="mail", tags=["mail", "write"], namespace="microsoft_365")
+    """Tool search args accepts new fields."""
+    args = ToolSearchArgs(
+        query="mail", tags=["mail", "write"], namespace="microsoft_365"
+    )
     assert args.tags == ["mail", "write"]
     assert args.namespace == "microsoft_365"
     # Defaults remain back-compat.
@@ -224,7 +244,6 @@ def test_schema_migrates_from_v1_to_v2(tmp_path: Path) -> None:
     The migration path must add the column, re-populate declared_tags for the
     surviving row, and keep the new tag filter working.
     """
-
     import sqlite3
 
     db_path = tmp_path / "tool_cache.db"
@@ -270,12 +289,16 @@ def test_schema_migrates_from_v1_to_v2(tmp_path: Path) -> None:
                 VALUES (new.rowid, new.name, new.description, new.tags);
             END;
             CREATE TRIGGER tools_ad AFTER DELETE ON tools BEGIN
-                INSERT INTO tools_fts(tools_fts, rowid, name, description, tags)
-                VALUES('delete', old.rowid, old.name, old.description, old.tags);
+                INSERT INTO tools_fts(tools_fts, rowid, name, description, \
+tags)
+                VALUES('delete', old.rowid, old.name, old.description, \
+old.tags);
             END;
             CREATE TRIGGER tools_au AFTER UPDATE ON tools BEGIN
-                INSERT INTO tools_fts(tools_fts, rowid, name, description, tags)
-                VALUES('delete', old.rowid, old.name, old.description, old.tags);
+                INSERT INTO tools_fts(tools_fts, rowid, name, description, \
+tags)
+                VALUES('delete', old.rowid, old.name, old.description, \
+old.tags);
                 INSERT INTO tools_fts(rowid, name, description, tags)
                 VALUES (new.rowid, new.name, new.description, new.tags);
             END;
@@ -283,7 +306,8 @@ def test_schema_migrates_from_v1_to_v2(tmp_path: Path) -> None:
         )
         # Surviving row (same name as the new sync below).
         conn.execute(
-            "INSERT INTO tools (name, description, tags, side_effects, loading_mode, record_hash) "
+            "INSERT INTO tools (name, description, tags, "
+            "side_effects, loading_mode, record_hash) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "microsoft_365.send_mail",
@@ -322,7 +346,10 @@ def test_schema_migrates_from_v1_to_v2(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("search_type", ["fts", "regex", "exact"])
-def test_filters_apply_across_search_types(search_type: str, tmp_path: Path) -> None:
+def test_filters_apply_across_search_types(
+    search_type: str, tmp_path: Path
+) -> None:
+    """Filters apply across search types."""
     cache = _build_cache(tmp_path)
     query = "microsoft_365.send_mail" if search_type == "exact" else "mail"
     results = _search(

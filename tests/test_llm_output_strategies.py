@@ -8,7 +8,10 @@ import pytest
 from pydantic import BaseModel
 
 from penguiflow.llm.output.native import NativeOutputStrategy
-from penguiflow.llm.output.prompted import PromptedOutputStrategy
+from penguiflow.llm.output.prompted import (
+    PromptedOutputStrategy,
+    _extract_json,
+)
 from penguiflow.llm.output.tool import ToolsOutputStrategy
 from penguiflow.llm.types import (
     CompletionResponse,
@@ -20,12 +23,17 @@ from penguiflow.llm.types import (
 
 
 class SampleModel(BaseModel):
+    """Structured output used by the tests."""
+
     name: str
     value: int
 
 
 class TestNativeOutputStrategy:
+    """Tests for native output strategy."""
+
     def test_build_request_standard(self) -> None:
+        """Build request standard."""
         strategy = NativeOutputStrategy()
 
         # Create mock profile for standard provider
@@ -34,7 +42,10 @@ class TestNativeOutputStrategy:
 
         # Create mock plan
         plan = MagicMock()
-        plan.transformed_schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        plan.transformed_schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }
         plan.strict_applied = True
 
         messages = [LLMMessage(role="user", parts=[TextPart(text="Hello")])]
@@ -54,6 +65,7 @@ class TestNativeOutputStrategy:
         assert request.tools is None
 
     def test_build_request_anthropic(self) -> None:
+        """Build request Anthropic."""
         strategy = NativeOutputStrategy()
 
         profile = MagicMock()
@@ -79,6 +91,7 @@ class TestNativeOutputStrategy:
         assert request.structured_output is None
 
     def test_build_request_bedrock(self) -> None:
+        """Build request Bedrock."""
         strategy = NativeOutputStrategy()
 
         profile = MagicMock()
@@ -102,6 +115,7 @@ class TestNativeOutputStrategy:
         assert request.tool_choice == "SampleModel"
 
     def test_parse_response_text(self) -> None:
+        """Parse response text."""
         strategy = NativeOutputStrategy()
 
         response = CompletionResponse(
@@ -117,6 +131,7 @@ class TestNativeOutputStrategy:
         assert result.value == 42
 
     def test_parse_response_tool_call(self) -> None:
+        """Parse response tool call."""
         strategy = NativeOutputStrategy()
 
         response = CompletionResponse(
@@ -138,7 +153,10 @@ class TestNativeOutputStrategy:
 
 
 class TestToolsOutputStrategy:
+    """Tests for tools output strategy."""
+
     def test_build_request(self) -> None:
+        """Build request."""
         strategy = ToolsOutputStrategy()
 
         profile = MagicMock()
@@ -161,6 +179,7 @@ class TestToolsOutputStrategy:
         assert request.tool_choice == "structured_output"
 
     def test_parse_response(self) -> None:
+        """Parse response."""
         strategy = ToolsOutputStrategy()
 
         response = CompletionResponse(
@@ -181,6 +200,7 @@ class TestToolsOutputStrategy:
         assert result.value == 50
 
     def test_parse_response_wrong_tool_raises(self) -> None:
+        """Parse response wrong tool raises."""
         strategy = ToolsOutputStrategy()
 
         response = CompletionResponse(
@@ -201,14 +221,19 @@ class TestToolsOutputStrategy:
 
 
 class TestPromptedOutputStrategy:
+    """Tests for prompted output strategy."""
+
     def test_build_request_no_system(self) -> None:
+        """Build request no system."""
         strategy = PromptedOutputStrategy()
 
         profile = MagicMock()
         plan = MagicMock()
         plan.transformed_schema = {"type": "object"}
 
-        messages = [LLMMessage(role="user", parts=[TextPart(text="Give me data")])]
+        messages = [
+            LLMMessage(role="user", parts=[TextPart(text="Give me data")])
+        ]
 
         request = strategy.build_request(
             model="gpt-4o",
@@ -224,6 +249,7 @@ class TestPromptedOutputStrategy:
         assert "JSON" in request.messages[0].text
 
     def test_build_request_with_system(self) -> None:
+        """Build request with system."""
         strategy = PromptedOutputStrategy()
 
         profile = MagicMock()
@@ -231,7 +257,9 @@ class TestPromptedOutputStrategy:
         plan.transformed_schema = {"type": "object"}
 
         messages = [
-            LLMMessage(role="system", parts=[TextPart(text="You are helpful.")]),
+            LLMMessage(
+                role="system", parts=[TextPart(text="You are helpful.")]
+            ),
             LLMMessage(role="user", parts=[TextPart(text="Give me data")]),
         ]
 
@@ -249,6 +277,7 @@ class TestPromptedOutputStrategy:
         assert "JSON" in request.messages[0].text
 
     def test_parse_response_clean_json(self) -> None:
+        """Parse response clean JSON."""
         strategy = PromptedOutputStrategy()
 
         response = CompletionResponse(
@@ -264,12 +293,17 @@ class TestPromptedOutputStrategy:
         assert result.value == 10
 
     def test_parse_response_with_markdown_fence(self) -> None:
+        """Parse response with markdown fence."""
         strategy = PromptedOutputStrategy()
 
         response = CompletionResponse(
             message=LLMMessage(
                 role="assistant",
-                parts=[TextPart(text='```json\n{"name": "fenced", "value": 20}\n```')],
+                parts=[
+                    TextPart(
+                        text='```json\n{"name": "fenced", "value": 20}\n```'
+                    )
+                ],
             ),
             usage=Usage.zero(),
         )
@@ -279,12 +313,20 @@ class TestPromptedOutputStrategy:
         assert result.value == 20
 
     def test_parse_response_with_surrounding_text(self) -> None:
+        """Parse response with surrounding text."""
         strategy = PromptedOutputStrategy()
 
         response = CompletionResponse(
             message=LLMMessage(
                 role="assistant",
-                parts=[TextPart(text='Here is the data: {"name": "extracted", "value": 30} as requested.')],
+                parts=[
+                    TextPart(
+                        text=(
+                            'Here is the data: {"name": "extracted", '
+                            '"value": 30} as requested.'
+                        )
+                    )
+                ],
             ),
             usage=Usage.zero(),
         )
@@ -294,22 +336,19 @@ class TestPromptedOutputStrategy:
         assert result.value == 30
 
     def test_extract_json_array(self) -> None:
-        strategy = PromptedOutputStrategy()
-
-        text = 'Here is an array: [1, 2, 3] done.'
-        result = strategy._extract_json(text)
+        """Extract JSON array."""
+        text = "Here is an array: [1, 2, 3] done."
+        result = _extract_json(text)
         assert result == "[1, 2, 3]"
 
     def test_extract_json_clean(self) -> None:
-        strategy = PromptedOutputStrategy()
-
+        """Extract JSON clean."""
         text = '{"key": "value"}'
-        result = strategy._extract_json(text)
+        result = _extract_json(text)
         assert result == text
 
     def test_extract_json_no_json(self) -> None:
-        strategy = PromptedOutputStrategy()
-
+        """Extract JSON no JSON."""
         text = "No JSON here"
-        result = strategy._extract_json(text)
+        result = _extract_json(text)
         assert result == text  # Returns as-is for validation to fail

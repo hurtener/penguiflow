@@ -6,18 +6,27 @@ Subagents should not receive these tools in their catalog.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 
 from penguiflow.catalog import NodeSpec, build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ToolContext
 from penguiflow.registry import ModelRegistry
 
 from .models import GroupReportStrategy, MergeStrategy, TaskGroup, TaskStatus
-from .task_service import ContextDepth, TaskDetails, TaskService, TaskSpawnResult, TaskSummary
+from .task_service import (
+    ContextDepth,
+    TaskDetails,
+    TaskService,
+    TaskSpawnResult,
+    TaskSummary,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from penguiflow.planner import ToolContext
 
 TASK_SERVICE_KEY = "task_service"
 SUBAGENT_FLAG_KEY = "is_subagent"
@@ -27,13 +36,15 @@ _PROACTIVE_HOPS_KEY = "proactive_hops_remaining"
 def _get_service(ctx: ToolContext) -> TaskService:
     service = ctx.tool_context.get(TASK_SERVICE_KEY)
     if service is None:
-        raise RuntimeError("task_service_unavailable")
-    return cast(TaskService, service)
+        msg = "task_service_unavailable"
+        raise RuntimeError(msg)
+    return cast("TaskService", service)
 
 
 def _ensure_foreground(ctx: ToolContext) -> None:
     if bool(ctx.tool_context.get(SUBAGENT_FLAG_KEY)):
-        raise RuntimeError("subagent_task_management_disabled")
+        msg = "subagent_task_management_disabled"
+        raise RuntimeError(msg)
 
 
 def _coerce_proactive_hops(ctx: ToolContext) -> int | None:
@@ -50,12 +61,14 @@ class TasksSpawnArgs(BaseModel):
     """Arguments for spawning a background task, optionally into a task group.
 
     Task Group Support:
-    - `group`: Display name for the group. Turn-scoped resolution:
-      joins an OPEN group with this name created earlier in the same foreground turn,
+    - `group`: Display name for the group. Turn-scoped resolution: joins an
+      OPEN group with this name created earlier in the same foreground turn,
       otherwise creates a new group.
-    - `group_id`: Optional stable group identifier. If provided, joins that exact group.
+    - `group_id`: Optional stable group identifier. If provided, joins that
+      exact group.
     - `group_sealed`: If True, seals the group after this spawn.
-    - `retain_turn`: If True, foreground agent waits for task/group instead of yielding.
+    - `retain_turn`: If True, foreground agent waits for task/group instead of
+      yielding.
     - `group_merge_strategy`: Merge strategy for the group (only on creation).
     - `group_report`: When to generate proactive report (only on creation).
     """
@@ -75,51 +88,70 @@ class TasksSpawnArgs(BaseModel):
     # Task Group Support
     group: str | None = Field(
         default=None,
-        description="Group display name. Turn-scoped: joins OPEN group with this name "
+        description="Group display name. Turn-scoped: "
+        "joins OPEN group with this "
+        "name "
         "created earlier in same turn, or creates new group.",
     )
     group_id: str | None = Field(
         default=None,
-        description="Stable group identifier. If provided, joins that exact group.",
+        description=(
+            "Stable group identifier. If provided, joins that exact group."
+        ),
     )
     group_sealed: bool = Field(
         default=False,
-        description="If True, seal group after this spawn (no more tasks can join).",
+        description=(
+            "If True, seal group after this spawn (no more tasks can join)."
+        ),
     )
     retain_turn: bool = Field(
         default=False,
-        description="If True, foreground agent waits for task/group instead of yielding. "
+        description="If True, foreground agent waits for "
+        "task/group instead of "
+        "yielding. "
         "Requires group_merge_strategy in {APPEND, REPLACE}, not HUMAN_GATED.",
     )
     group_merge_strategy: MergeStrategy | None = Field(
         default=None,
-        description="Merge strategy for the group. Uses config default if not specified. "
+        description="Merge strategy for the group. Uses config default if not "
+        "specified. "
         "Only applies on group creation.",
     )
     group_report: GroupReportStrategy | None = Field(
         default=None,
-        description="When to generate proactive report: 'all' (default for groups), "
-        "'any' (each task), 'none' (agent polls). Only applies on group creation.",
+        description="When to generate proactive report: 'all' (default for "
+        "groups), "
+        "'any' (each task), 'none' (agent polls). Only applies on "
+        "group creation.",
     )
 
     @model_validator(mode="after")
     def _validate_mode(self) -> TasksSpawnArgs:
         if self.mode == "subagent":
             if not isinstance(self.query, str) or not self.query.strip():
-                raise ValueError("query is required for subagent mode")
+                msg = "query is required for subagent mode"
+                raise ValueError(msg)
         else:
             if not self.tool_name or not isinstance(self.tool_name, str):
-                raise ValueError("tool_name is required for job mode")
+                msg = "tool_name is required for job mode"
+                raise ValueError(msg)
             if not isinstance(self.tool_args, dict):
-                raise ValueError("tool_args must be an object for job mode")
+                msg = "tool_args must be an object for job mode"
+                raise ValueError(msg)
         # Validate retain_turn constraints
         if self.retain_turn:
-            effective_strategy = self.group_merge_strategy or self.merge_strategy
+            effective_strategy = (
+                self.group_merge_strategy or self.merge_strategy
+            )
             if effective_strategy == MergeStrategy.HUMAN_GATED:
-                raise ValueError(
-                    "retain_turn=True requires group_merge_strategy in {APPEND, REPLACE}, "
-                    "not HUMAN_GATED (results must auto-merge for inline injection)"
+                msg = (
+                    "retain_turn=True requires group_merge_strategy "
+                    "in {APPEND, REPLACE}, "
+                    "not HUMAN_GATED (results must auto-merge for "
+                    "inline injection)"
                 )
+                raise ValueError(msg)
         return self
 
 
@@ -168,7 +200,9 @@ class TasksApplyPatchResult(BaseModel):
 class TasksAcknowledgeBackgroundArgs(BaseModel):
     """Arguments for acknowledging background task results."""
 
-    task_ids: list[str] = Field(description="List of background task IDs to acknowledge as used.")
+    task_ids: list[str] = Field(
+        description="List of background task IDs to acknowledge as used."
+    )
 
 
 class TasksAcknowledgeBackgroundResult(BaseModel):
@@ -186,11 +220,16 @@ class TasksSealGroupArgs(BaseModel):
 
     group_id: str | None = Field(
         default=None,
-        description="Stable group identifier. If provided, seals that exact group.",
+        description=(
+            "Stable group identifier. If provided, seals that exact group."
+        ),
     )
     group: str | None = Field(
         default=None,
-        description="Group display name. Resolves to current OPEN group with this name.",
+        description=(
+            "Group display name. Resolves to current OPEN group with this "
+            "name."
+        ),
     )
 
 
@@ -245,23 +284,33 @@ class TasksGetGroupArgs(BaseModel):
 
 
 @tool(
-    desc="Spawn a background subagent for long-running work. Returns immediately with a task_id. "
-    "Use group parameter to coordinate multiple related tasks for cohesive reporting.",
+    desc="Spawn a background subagent for long-running work. Returns "
+    "immediately with a task_id. "
+    "Use group parameter to coordinate multiple related tasks for "
+    "cohesive reporting.",
     tags=["tasks", "background"],
     side_effects="stateful",
 )
-async def tasks_spawn(args: TasksSpawnArgs, ctx: ToolContext) -> TaskSpawnResult:
+async def tasks_spawn(
+    args: TasksSpawnArgs, ctx: ToolContext
+) -> TaskSpawnResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     parent_task_id = ctx.tool_context.get("task_id")
     turn_id = ctx.tool_context.get("turn_id")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     proactive_hops = _coerce_proactive_hops(ctx)
     if proactive_hops is not None and proactive_hops <= 0:
-        raise RuntimeError("proactive_hops_exhausted")
-    context_tool_context = {_PROACTIVE_HOPS_KEY: proactive_hops} if proactive_hops is not None else None
+        msg = "proactive_hops_exhausted"
+        raise RuntimeError(msg)
+    context_tool_context = (
+        {_PROACTIVE_HOPS_KEY: proactive_hops}
+        if proactive_hops is not None
+        else None
+    )
     if parent_task_id is not None and not isinstance(parent_task_id, str):
         parent_task_id = None
     if args.mode == "job":
@@ -286,7 +335,8 @@ async def tasks_spawn(args: TasksSpawnArgs, ctx: ToolContext) -> TaskSpawnResult
             turn_id=str(turn_id) if turn_id else None,
         )
     if not isinstance(args.query, str):
-        raise RuntimeError("query_missing")
+        msg = "query_missing"
+        raise TypeError(msg)
     return await service.spawn(
         session_id=session_id,
         query=args.query,
@@ -310,59 +360,99 @@ async def tasks_spawn(args: TasksSpawnArgs, ctx: ToolContext) -> TaskSpawnResult
     )
 
 
-@tool(desc="List tasks in the current session.", tags=["tasks", "background"], side_effects="read")
+@tool(
+    desc="List tasks in the current session.",
+    tags=["tasks", "background"],
+    side_effects="read",
+)
 async def tasks_list(args: TasksListArgs, ctx: ToolContext) -> TasksListResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     tasks = await service.list(session_id=session_id, status=args.status)
     return TasksListResult(tasks=tasks)
 
 
-@tool(desc="Get status/digest for a task by task_id.", tags=["tasks", "background"], side_effects="read")
+@tool(
+    desc="Get status/digest for a task by task_id.",
+    tags=["tasks", "background"],
+    side_effects="read",
+)
 async def tasks_get(args: TasksGetArgs, ctx: ToolContext) -> TaskDetails:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
-    task = await service.get(session_id=session_id, task_id=args.task_id, include_result=args.include_result)
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
+    task = await service.get(
+        session_id=session_id,
+        task_id=args.task_id,
+        include_result=args.include_result,
+    )
     if task is None:
-        raise RuntimeError("task_not_found")
+        msg = "task_not_found"
+        raise RuntimeError(msg)
     return task
 
 
-@tool(desc="Cancel a task by task_id.", tags=["tasks", "background"], side_effects="stateful")
-async def tasks_cancel(args: TasksCancelArgs, ctx: ToolContext) -> TasksCancelResult:
+@tool(
+    desc="Cancel a task by task_id.",
+    tags=["tasks", "background"],
+    side_effects="stateful",
+)
+async def tasks_cancel(
+    args: TasksCancelArgs, ctx: ToolContext
+) -> TasksCancelResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
-    ok = await service.cancel(session_id=session_id, task_id=args.task_id, reason=args.reason)
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
+    ok = await service.cancel(
+        session_id=session_id, task_id=args.task_id, reason=args.reason
+    )
     return TasksCancelResult(ok=ok)
 
 
-@tool(desc="Change a task priority.", tags=["tasks", "background"], side_effects="stateful")
-async def tasks_prioritize(args: TasksPrioritizeArgs, ctx: ToolContext) -> TasksPrioritizeResult:
+@tool(
+    desc="Change a task priority.",
+    tags=["tasks", "background"],
+    side_effects="stateful",
+)
+async def tasks_prioritize(
+    args: TasksPrioritizeArgs, ctx: ToolContext
+) -> TasksPrioritizeResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
-    ok = await service.prioritize(session_id=session_id, task_id=args.task_id, priority=args.priority)
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
+    ok = await service.prioritize(
+        session_id=session_id, task_id=args.task_id, priority=args.priority
+    )
     return TasksPrioritizeResult(ok=ok)
 
 
-@tool(desc="Apply or reject a pending background context patch.", tags=["tasks", "background"], side_effects="stateful")
-async def tasks_apply_patch(args: TasksApplyPatchArgs, ctx: ToolContext) -> TasksApplyPatchResult:
+@tool(
+    desc="Apply or reject a pending background context patch.",
+    tags=["tasks", "background"],
+    side_effects="stateful",
+)
+async def tasks_apply_patch(
+    args: TasksApplyPatchArgs, ctx: ToolContext
+) -> TasksApplyPatchResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     ok = await service.apply_patch(
         session_id=session_id,
         patch_id=args.patch_id,
@@ -373,7 +463,10 @@ async def tasks_apply_patch(args: TasksApplyPatchArgs, ctx: ToolContext) -> Task
 
 
 @tool(
-    desc="Acknowledge that you have used background task results and clean them up from context.",
+    desc=(
+        "Acknowledge that you have used background task results and clean "
+        "them up from context."
+    ),
     tags=["tasks", "background"],
     side_effects="stateful",
 )
@@ -384,33 +477,42 @@ async def tasks_acknowledge_background(
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     cleaned = await service.acknowledge_background(
         session_id=session_id,
         task_ids=list(args.task_ids),
     )
-    return TasksAcknowledgeBackgroundResult(acknowledged=list(args.task_ids), cleaned_up=cleaned)
+    return TasksAcknowledgeBackgroundResult(
+        acknowledged=list(args.task_ids), cleaned_up=cleaned
+    )
 
 
-# ─────────────────────────────────────────────────────────────
-# Task Group Tools
-# ─────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────── Task Group
+# Tools ─────────────────────────────────────────────────────────────
 
 
 @tool(
-    desc="Seal a task group (no more tasks can join). Use when done adding tasks to a group.",
+    desc=(
+        "Seal a task group (no more tasks can join). Use when done adding "
+        "tasks to a group."
+    ),
     tags=["tasks", "background", "groups"],
     side_effects="stateful",
 )
-async def tasks_seal_group(args: TasksSealGroupArgs, ctx: ToolContext) -> TasksSealGroupResult:
+async def tasks_seal_group(
+    args: TasksSealGroupArgs, ctx: ToolContext
+) -> TasksSealGroupResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     turn_id = ctx.tool_context.get("turn_id")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     if not args.group_id and not args.group:
-        raise RuntimeError("group_id or group name required")
+        msg = "group_id or group name required"
+        raise RuntimeError(msg)
     result = await service.seal_group(
         session_id=session_id,
         group_id=args.group_id,
@@ -425,16 +527,21 @@ async def tasks_seal_group(args: TasksSealGroupArgs, ctx: ToolContext) -> TasksS
 
 
 @tool(
-    desc="Cancel a task group by group_id, terminating all tasks in the group.",
+    desc=(
+        "Cancel a task group by group_id, terminating all tasks in the group."
+    ),
     tags=["tasks", "background", "groups"],
     side_effects="stateful",
 )
-async def tasks_cancel_group(args: TasksCancelGroupArgs, ctx: ToolContext) -> TasksCancelGroupResult:
+async def tasks_cancel_group(
+    args: TasksCancelGroupArgs, ctx: ToolContext
+) -> TasksCancelGroupResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     result = await service.cancel_group(
         session_id=session_id,
         group_id=args.group_id,
@@ -448,16 +555,22 @@ async def tasks_cancel_group(args: TasksCancelGroupArgs, ctx: ToolContext) -> Ta
 
 
 @tool(
-    desc="Apply or reject all pending patches for a task group (bundled approval for HUMAN_GATED).",
+    desc=(
+        "Apply or reject all pending patches for a task group (bundled "
+        "approval for HUMAN_GATED)."
+    ),
     tags=["tasks", "background", "groups"],
     side_effects="stateful",
 )
-async def tasks_apply_group(args: TasksApplyGroupArgs, ctx: ToolContext) -> TasksApplyGroupResult:
+async def tasks_apply_group(
+    args: TasksApplyGroupArgs, ctx: ToolContext
+) -> TasksApplyGroupResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     result = await service.apply_group(
         session_id=session_id,
         group_id=args.group_id,
@@ -476,13 +589,18 @@ async def tasks_apply_group(args: TasksApplyGroupArgs, ctx: ToolContext) -> Task
     tags=["tasks", "background", "groups"],
     side_effects="read",
 )
-async def tasks_list_groups(args: TasksListGroupsArgs, ctx: ToolContext) -> TasksListGroupsResult:
+async def tasks_list_groups(
+    args: TasksListGroupsArgs, ctx: ToolContext
+) -> TasksListGroupsResult:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     if not session_id:
-        raise RuntimeError("session_id_missing")
-    groups = await service.list_groups(session_id=session_id, status=args.status)
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
+    groups = await service.list_groups(
+        session_id=session_id, status=args.status
+    )
     return TasksListGroupsResult(groups=groups)
 
 
@@ -491,15 +609,19 @@ async def tasks_list_groups(args: TasksListGroupsArgs, ctx: ToolContext) -> Task
     tags=["tasks", "background", "groups"],
     side_effects="read",
 )
-async def tasks_get_group(args: TasksGetGroupArgs, ctx: ToolContext) -> TaskGroup:
+async def tasks_get_group(
+    args: TasksGetGroupArgs, ctx: ToolContext
+) -> TaskGroup:
     _ensure_foreground(ctx)
     service = _get_service(ctx)
     session_id = str(ctx.tool_context.get("session_id") or "")
     turn_id = ctx.tool_context.get("turn_id")
     if not session_id:
-        raise RuntimeError("session_id_missing")
+        msg = "session_id_missing"
+        raise RuntimeError(msg)
     if not args.group_id and not args.group:
-        raise RuntimeError("group_id or group name required")
+        msg = "group_id or group name required"
+        raise RuntimeError(msg)
     group = await service.get_group(
         session_id=session_id,
         group_id=args.group_id,
@@ -507,7 +629,8 @@ async def tasks_get_group(args: TasksGetGroupArgs, ctx: ToolContext) -> TaskGrou
         turn_id=str(turn_id) if turn_id else None,
     )
     if group is None:
-        raise RuntimeError("group_not_found")
+        msg = "group_not_found"
+        raise RuntimeError(msg)
     return group
 
 
@@ -519,18 +642,30 @@ def build_task_tool_specs() -> list[NodeSpec]:
     registry.register("tasks.list", TasksListArgs, TasksListResult)
     registry.register("tasks.get", TasksGetArgs, TaskDetails)
     registry.register("tasks.cancel", TasksCancelArgs, TasksCancelResult)
-    registry.register("tasks.prioritize", TasksPrioritizeArgs, TasksPrioritizeResult)
-    registry.register("tasks.apply_patch", TasksApplyPatchArgs, TasksApplyPatchResult)
+    registry.register(
+        "tasks.prioritize", TasksPrioritizeArgs, TasksPrioritizeResult
+    )
+    registry.register(
+        "tasks.apply_patch", TasksApplyPatchArgs, TasksApplyPatchResult
+    )
     registry.register(
         "tasks.acknowledge_background",
         TasksAcknowledgeBackgroundArgs,
         TasksAcknowledgeBackgroundResult,
     )
     # Group tools
-    registry.register("tasks.seal_group", TasksSealGroupArgs, TasksSealGroupResult)
-    registry.register("tasks.cancel_group", TasksCancelGroupArgs, TasksCancelGroupResult)
-    registry.register("tasks.apply_group", TasksApplyGroupArgs, TasksApplyGroupResult)
-    registry.register("tasks.list_groups", TasksListGroupsArgs, TasksListGroupsResult)
+    registry.register(
+        "tasks.seal_group", TasksSealGroupArgs, TasksSealGroupResult
+    )
+    registry.register(
+        "tasks.cancel_group", TasksCancelGroupArgs, TasksCancelGroupResult
+    )
+    registry.register(
+        "tasks.apply_group", TasksApplyGroupArgs, TasksApplyGroupResult
+    )
+    registry.register(
+        "tasks.list_groups", TasksListGroupsArgs, TasksListGroupsResult
+    )
     registry.register("tasks.get_group", TasksGetGroupArgs, TaskGroup)
     nodes: Sequence[Node] = [
         # Task tools
@@ -540,7 +675,9 @@ def build_task_tool_specs() -> list[NodeSpec]:
         Node(tasks_cancel, name="tasks.cancel"),
         Node(tasks_prioritize, name="tasks.prioritize"),
         Node(tasks_apply_patch, name="tasks.apply_patch"),
-        Node(tasks_acknowledge_background, name="tasks.acknowledge_background"),
+        Node(
+            tasks_acknowledge_background, name="tasks.acknowledge_background"
+        ),
         # Group tools
         Node(tasks_seal_group, name="tasks.seal_group"),
         Node(tasks_cancel_group, name="tasks.cancel_group"),

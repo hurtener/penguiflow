@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from penguiflow.planner import ReactPlanner
 
-from .models import ProactiveReportContext, ProactiveReportRequest, StateUpdate, UpdateType
-from .session import StreamingSession
+from .models import (
+    ProactiveReportContext,
+    ProactiveReportRequest,
+    StateUpdate,
+    UpdateType,
+)
+
+if TYPE_CHECKING:
+    from .session import StreamingSession
 
 _PROACTIVE_HOPS_KEY = "proactive_hops_remaining"
 _PROACTIVE_MODE_KEY = "proactive_mode"
@@ -23,18 +30,19 @@ Results received:
 {results_summary}
 
 Based on your short-term memory summary and these results, write a natural,
-conversational update to inform the user. If the results suggest further action,
+conversational update to inform the user. If the results suggest further \
+action,
 use your tools.
 """
 
 
 def create_default_proactive_generator(
-    planner_factory: Callable[[], Any],
+    planner_factory: Callable[[], object],
     session: StreamingSession,
     *,
     max_hops: int = 2,
 ) -> Callable[[ProactiveReportRequest], Awaitable[None]]:
-    """Create a default proactive report generator using a full planner loop."""
+    """Create a proactive report generator that runs a full planner loop."""
 
     async def _generator(request: ProactiveReportRequest) -> None:
         hops_remaining = request.proactive_hops_remaining
@@ -64,9 +72,9 @@ def create_default_proactive_generator(
         tool_context[_PROACTIVE_HOPS_KEY] = next_hops
 
         if isinstance(planner, ReactPlanner) and next_hops <= 0:
-            background_cfg = getattr(planner, "_background_tasks", None)
+            background_cfg = getattr(planner, "background_tasks", None)
             if background_cfg is not None:
-                planner._background_tasks = background_cfg.model_copy(
+                planner.background_tasks = background_cfg.model_copy(
                     update={
                         "enabled": False,
                         "allow_tool_background": False,
@@ -85,7 +93,7 @@ def create_default_proactive_generator(
         artifacts = _collect_artifact_refs(request)
         ui_components = _collect_ui_component_chunks(metadata)
 
-        session._publish(
+        session.publish(
             StateUpdate(
                 session_id=request.session_id,
                 task_id=request.task_id,
@@ -104,7 +112,11 @@ def create_default_proactive_generator(
             )
         )
 
-        task_ids = request.group_task_ids if request.is_group_report else [request.task_id]
+        task_ids = (
+            request.group_task_ids
+            if request.is_group_report
+            else [request.task_id]
+        )
         await session.mark_background_consumed(task_ids=task_ids)
 
     return _generator
@@ -112,7 +124,7 @@ def create_default_proactive_generator(
 
 def setup_proactive_reporting(
     session: StreamingSession,
-    planner_factory: Callable[[], Any],
+    planner_factory: Callable[[], object],
     *,
     enabled: bool,
     strategies: list[str] | None = None,
@@ -140,13 +152,31 @@ def setup_proactive_reporting(
     )
 
 
-def _unwrap_planner(planner_or_bundle: Any) -> Any:
-    if hasattr(planner_or_bundle, "planner"):
-        return planner_or_bundle.planner
-    return planner_or_bundle
+@runtime_checkable
+class ProactivePlanner(Protocol):
+    """The planner surface the proactive report generator drives."""
+
+    async def run(
+        self,
+        query: str,
+        *,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+    ) -> object:
+        """Run the planner on ``query`` and return its result."""
+        ...
 
 
-def _extract_answer(payload: Any) -> str | None:
+def _unwrap_planner(planner_or_bundle: object) -> ProactivePlanner:
+    """Return the planner itself, or the ``.planner`` of a bundle."""
+    planner = getattr(planner_or_bundle, "planner", planner_or_bundle)
+    if not isinstance(planner, ProactivePlanner):
+        msg = "planner_factory must return a planner or a bundle with .planner"
+        raise TypeError(msg)
+    return planner
+
+
+def _extract_answer(payload: object) -> str | None:
     if payload is None:
         return None
     if isinstance(payload, str):
@@ -164,7 +194,9 @@ def _extract_answer(payload: Any) -> str | None:
     return None
 
 
-def _build_proactive_context(request: ProactiveReportRequest) -> dict[str, Any]:
+def _build_proactive_context(
+    request: ProactiveReportRequest,
+) -> dict[str, Any]:
     patch = request.patch
     context = ProactiveReportContext(
         task_id=request.task_id,
@@ -180,7 +212,9 @@ def _build_proactive_context(request: ProactiveReportRequest) -> dict[str, Any]:
     return context.model_dump(mode="json")
 
 
-def _collect_artifact_refs(request: ProactiveReportRequest) -> list[dict[str, Any]]:
+def _collect_artifact_refs(
+    request: ProactiveReportRequest,
+) -> list[dict[str, Any]]:
     patches = [request.patch]
     if request.is_group_report and request.combined_patches:
         patches.extend(request.combined_patches)
@@ -201,7 +235,7 @@ def _collect_artifact_refs(request: ProactiveReportRequest) -> list[dict[str, An
     return collected
 
 
-def _extract_artifact_ref(item: Any) -> dict[str, Any] | None:
+def _extract_artifact_ref(item: object) -> dict[str, Any] | None:
     if isinstance(item, Mapping):
         payload = item.get("artifact")
         if isinstance(payload, Mapping):
@@ -215,7 +249,9 @@ def _extract_artifact_ref(item: Any) -> dict[str, Any] | None:
     return None
 
 
-def _normalize_artifact_ref(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+def _normalize_artifact_ref(
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
     artifact_id = payload.get("id") or payload.get("artifact_id")
     if not isinstance(artifact_id, str) or not artifact_id:
         return None
@@ -234,11 +270,16 @@ def _normalize_artifact_ref(payload: Mapping[str, Any]) -> dict[str, Any] | None
 
 def _format_results_summary(request: ProactiveReportRequest) -> str:
     if request.is_group_report and request.combined_patches:
-        group_parts = [f"{len(request.combined_patches)} related tasks completed:"]
+        group_parts = [
+            f"{len(request.combined_patches)} related tasks completed:"
+        ]
         for idx, patch in enumerate(request.combined_patches, 1):
             summary = " ".join(patch.digest or [])
             if patch.facts:
-                summary = f"{summary} | Facts: {json.dumps(patch.facts, ensure_ascii=False)}"
+                summary = (
+                    f"{summary} | Facts: "
+                    f"{json.dumps(patch.facts, ensure_ascii=False)}"
+                )
             group_parts.append(f"{idx}. {summary or 'Completed'}")
         return "\n".join(group_parts)
 
@@ -247,38 +288,56 @@ def _format_results_summary(request: ProactiveReportRequest) -> str:
     if patch.digest:
         summary_parts.append("Summary: " + " ".join(patch.digest))
     if patch.facts:
-        summary_parts.append("Facts: " + json.dumps(patch.facts, ensure_ascii=False))
+        summary_parts.append(
+            "Facts: " + json.dumps(patch.facts, ensure_ascii=False)
+        )
     if patch.artifacts:
-        summary_parts.append(f"Artifacts produced: {len(patch.artifacts)} items")
+        summary_parts.append(
+            f"Artifacts produced: {len(patch.artifacts)} items"
+        )
     if patch.recommended_next_steps:
-        summary_parts.append("Suggested next steps: " + ", ".join(patch.recommended_next_steps))
+        summary_parts.append(
+            "Suggested next steps: " + ", ".join(patch.recommended_next_steps)
+        )
     return "\n".join(summary_parts) or "Task completed successfully."
 
 
-def _collect_ui_component_chunks(metadata: Any) -> list[dict[str, Any]]:
+def _collect_ui_component_chunks(metadata: object) -> list[dict[str, Any]]:
     """Extract ui_component artifact chunks from planner metadata.
 
-    When proactive reporting runs a planner loop, rich UI tools emit `artifact_chunk`
-    events that end up stored under trajectory steps as `streams`.
+    When proactive reporting runs a planner loop, rich UI tools emit
+    `artifact_chunk` events that end up stored under trajectory steps as
+    `streams`.
 
-    Session stream consumers don't follow planner event streams for these proactive
-    runs, so we include the ui_component chunks in the proactive RESULT payload for
-    the frontend to render.
+    Session stream consumers don't follow planner event streams for these
+    proactive runs, so we include the ui_component chunks in the proactive
+    RESULT payload for the frontend to render.
     """
-
-    if not isinstance(metadata, Mapping):
-        return []
-    steps = metadata.get("steps")
-    if not isinstance(steps, Sequence):
-        return []
-
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
-
-    for step in steps:
-        if not isinstance(step, Mapping):
+    for stream_id, item in _iter_stream_items(metadata):
+        entry = _ui_component_payload(stream_id, item)
+        if entry is None:
             continue
-        streams = step.get("streams")
+        dedupe_key, payload = entry
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        collected.append(payload)
+    return collected
+
+
+def _iter_stream_items(
+    metadata: object,
+) -> Iterator[tuple[str, Mapping[str, Any]]]:
+    """Yield ``(stream_id, chunk)`` pairs from the trajectory's streams."""
+    if not isinstance(metadata, Mapping):
+        return
+    steps = metadata.get("steps")
+    if not isinstance(steps, Sequence):
+        return
+    for step in steps:
+        streams = step.get("streams") if isinstance(step, Mapping) else None
         if not isinstance(streams, Mapping):
             continue
         for stream_id, stream_chunks in streams.items():
@@ -287,50 +346,51 @@ def _collect_ui_component_chunks(metadata: Any) -> list[dict[str, Any]]:
             if not isinstance(stream_chunks, Sequence):
                 continue
             for item in stream_chunks:
-                if not isinstance(item, Mapping):
-                    continue
-                if item.get("artifact_type") != "ui_component":
-                    continue
-                chunk_value = item.get("chunk")
-                if not isinstance(chunk_value, Mapping):
-                    continue
-                component = chunk_value.get("component")
-                props = chunk_value.get("props")
-                if not isinstance(component, str) or not component:
-                    continue
-                if not isinstance(props, Mapping):
-                    continue
+                if isinstance(item, Mapping):
+                    yield stream_id, item
 
-                # Dedupe by stable fingerprint of component+props.
-                try:
-                    dedupe_raw = json.dumps(
-                        {"component": component, "props": dict(props)},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                except Exception:
-                    dedupe_raw = f"{component}:{repr(props)}"
-                if dedupe_raw in seen:
-                    continue
-                seen.add(dedupe_raw)
 
-                payload: dict[str, Any] = {
-                    "stream_id": stream_id,
-                    "seq": item.get("seq"),
-                    "done": bool(item.get("done", True)),
-                    "artifact_type": "ui_component",
-                    "chunk": dict(chunk_value),
-                }
-                meta = item.get("meta")
-                if isinstance(meta, Mapping):
-                    payload["meta"] = dict(meta)
-                ts = item.get("ts")
-                if isinstance(ts, (int, float)):
-                    payload["ts"] = float(ts)
-                collected.append(payload)
+def _ui_component_payload(
+    stream_id: str, item: Mapping[str, Any]
+) -> tuple[str, dict[str, Any]] | None:
+    """Return a ui_component chunk's dedupe key and RESULT payload."""
+    if item.get("artifact_type") != "ui_component":
+        return None
+    chunk_value = item.get("chunk")
+    if not isinstance(chunk_value, Mapping):
+        return None
+    component = chunk_value.get("component")
+    props = chunk_value.get("props")
+    if not isinstance(component, str) or not component:
+        return None
+    if not isinstance(props, Mapping):
+        return None
 
-    return collected
+    # Dedupe by stable fingerprint of component+props.
+    try:
+        dedupe_key = json.dumps(
+            {"component": component, "props": dict(props)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except Exception:
+        dedupe_key = f"{component}:{props!r}"
+
+    payload: dict[str, Any] = {
+        "stream_id": stream_id,
+        "seq": item.get("seq"),
+        "done": bool(item.get("done", True)),
+        "artifact_type": "ui_component",
+        "chunk": dict(chunk_value),
+    }
+    meta = item.get("meta")
+    if isinstance(meta, Mapping):
+        payload["meta"] = dict(meta)
+    ts = item.get("ts")
+    if isinstance(ts, (int, float)):
+        payload["ts"] = float(ts)
+    return dedupe_key, payload
 
 
 __all__ = [

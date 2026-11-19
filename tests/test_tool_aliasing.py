@@ -1,3 +1,5 @@
+"""Tests for tool aliasing."""
+
 from __future__ import annotations
 
 from pydantic import BaseModel
@@ -20,9 +22,22 @@ async def _noop_tool(_: _Args, __: object) -> dict[str, object]:
 
 
 def test_build_aliased_tool_catalog_aliases_reserved_names() -> None:
+    """Build aliased tool catalog aliases reserved names."""
     specs = [
-        NodeSpec(node=Node(_noop_tool, name="parallel"), name="parallel", desc="x", args_model=_Args, out_model=_Out),
-        NodeSpec(node=Node(_noop_tool, name="search"), name="search", desc="y", args_model=_Args, out_model=_Out),
+        NodeSpec(
+            node=Node(_noop_tool, name="parallel"),
+            name="parallel",
+            desc="x",
+            args_model=_Args,
+            out_model=_Out,
+        ),
+        NodeSpec(
+            node=Node(_noop_tool, name="search"),
+            name="search",
+            desc="y",
+            args_model=_Args,
+            out_model=_Out,
+        ),
     ]
 
     spec_by_name, records, alias_to_real = build_aliased_tool_catalog(specs)
@@ -34,8 +49,15 @@ def test_build_aliased_tool_catalog_aliases_reserved_names() -> None:
 
 
 def test_build_aliased_tool_catalog_avoids_alias_collisions() -> None:
+    """Build aliased tool catalog avoids alias collisions."""
     specs = [
-        NodeSpec(node=Node(_noop_tool, name="parallel"), name="parallel", desc="x", args_model=_Args, out_model=_Out),
+        NodeSpec(
+            node=Node(_noop_tool, name="parallel"),
+            name="parallel",
+            desc="x",
+            args_model=_Args,
+            out_model=_Out,
+        ),
         NodeSpec(
             node=Node(_noop_tool, name="parallel__tool"),
             name="parallel__tool",
@@ -48,6 +70,7 @@ def test_build_aliased_tool_catalog_avoids_alias_collisions() -> None:
     spec_by_name, _, alias_to_real = build_aliased_tool_catalog(specs)
 
     assert "parallel__tool" in spec_by_name  # existing tool keeps name
-    assert "parallel__tool_2" in spec_by_name  # colliding reserved tool gets a unique alias
+    assert (
+        "parallel__tool_2" in spec_by_name
+    )  # colliding reserved tool gets a unique alias
     assert alias_to_real["parallel__tool_2"] == "parallel"
-

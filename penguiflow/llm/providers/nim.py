@@ -15,7 +15,9 @@ import asyncio
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+
+from typing_extensions import override
 
 from ..errors import (
     LLMAuthError,
@@ -33,37 +35,72 @@ from ..types import (
     CompletionResponse,
     LLMMessage,
     LLMRequest,
-    StreamEvent,
     TextPart,
-    ToolCallPart,
     Usage,
 )
 from ._params import resolve_temperature
-from .base import OpenAICompatibleProvider
+from .base import (
+    OpenAICompatibleProvider,
+    OpenAIStreamAccumulator,
+    _extract_openai_delta_reasoning,
+    _extract_openai_reasoning_content,
+    _from_openai_response,
+    _to_openai_messages,
+    _to_openai_response_format,
+    _to_openai_tools,
+)
 
 if TYPE_CHECKING:
+    from openai import AsyncOpenAI
+
     from ..types import CancelToken, StreamCallback
 
 logger = logging.getLogger("penguiflow.llm.providers.nim")
+
+
+_ControlT = TypeVar("_ControlT")
 
 
 class NIMProvider(OpenAICompatibleProvider):
     """NVIDIA NIM provider using OpenAI-compatible chat completions."""
 
     DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
-    _REASONING_OFF_VALUES = {"off", "none", "disabled", "false", "0"}
-    _REASONING_ON_VALUES = {"minimal", "low", "medium", "high", "max", "default"}
-    _UNSUPPORTED_BUDGET_KEYS = {
-        "reasoning_budget_tokens",
-        "thinking_budget",
-        "thinking_budget_tokens",
-    }
+    _REASONING_OFF_VALUES: ClassVar[frozenset[str]] = frozenset(
+        {"off", "none", "disabled", "false", "0"}
+    )
+    _REASONING_ON_VALUES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "max",
+            "default",
+        }
+    )
+    _UNSUPPORTED_BUDGET_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "reasoning_budget_tokens",
+            "thinking_budget",
+            "thinking_budget_tokens",
+        }
+    )
     _MODEL_REASONING_CONTROL_MAP: tuple[tuple[str, str, Any, Any], ...] = (
-        ("qwen/qwen3.5-397b-a17b", "thinking_mode", "thinking", "non-thinking"),
+        (
+            "qwen/qwen3.5-397b-a17b",
+            "thinking_mode",
+            "thinking",
+            "non-thinking",
+        ),
         ("stepfun-ai/step-3.5-flash", "reasoning_mode", "thinking", "none"),
         ("z-ai/glm5", "reasoning_mode", "thinking", "none"),
         ("moonshotai/kimi-k2.5", "reasoning_mode", "thinking", "none"),
-        ("deepseek-ai/deepseek-v3.1-terminus", "reasoning_mode", "thinking", "none"),
+        (
+            "deepseek-ai/deepseek-v3.1-terminus",
+            "reasoning_mode",
+            "thinking",
+            "none",
+        ),
         ("minimaxai/minimax-m2.1", "enable_thinking", True, False),
     )
 
@@ -75,49 +112,79 @@ class NIMProvider(OpenAICompatibleProvider):
         base_url: str | None = None,
         profile: ModelProfile | None = None,
         timeout: float = 360.0,
+        client: AsyncOpenAI | None = None,
     ) -> None:
         """Initialize the NIM provider.
 
         Args:
             model: Model identifier (e.g., "nim/qwen/qwen3.5-397b-a17b").
-            api_key: NIM API key (env fallback: NIM_API_KEY, then NVIDIA_API_KEY).
+            api_key: NIM API key (env fallback: NIM_API_KEY, then
+                NVIDIA_API_KEY).
             base_url: Base URL override for OpenAI-compatible NIM endpoint.
             profile: Model profile override.
             timeout: Default timeout in seconds.
+            client: Pre-built SDK client to use instead of creating one.
         """
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
-            raise ImportError("OpenAI SDK not installed. Install with: pip install openai>=2.0.0") from e
+            msg = (
+                "OpenAI SDK not installed. Install with: pip install "
+                "openai>=2.0.0"
+            )
+            raise ImportError(msg) from e
 
         self._original_model = model
         self._model = self._normalize_model(model)
         self._profile = profile or get_profile(self._model)
         self._timeout = timeout
 
-        api_key = api_key or os.environ.get("NIM_API_KEY") or os.environ.get("NVIDIA_API_KEY")
+        api_key = (
+            api_key
+            or os.environ.get("NIM_API_KEY")
+            or os.environ.get("NVIDIA_API_KEY")
+        )
         if not api_key:
-            raise ValueError(
-                "NIM API key required. Set NIM_API_KEY (or NVIDIA_API_KEY) environment variable or pass api_key."
+            msg = (
+                "NIM API key required. Set NIM_API_KEY (or "
+                "NVIDIA_API_KEY) environment variable or pass api_key."
             )
+            raise ValueError(msg)
 
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url or self.DEFAULT_BASE_URL,
-            timeout=timeout,
+        self._client = (
+            client
+            if client is not None
+            else AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url or self.DEFAULT_BASE_URL,
+                timeout=timeout,
+            )
         )
 
     @property
+    @override
     def provider_name(self) -> str:
         return "nim"
 
     @property
+    @override
     def profile(self) -> ModelProfile:
         return self._profile
 
     @property
+    @override
     def model(self) -> str:
         return self._model
+
+    @property
+    def client(self) -> AsyncOpenAI:
+        """The SDK client the provider sends requests with."""
+        return self._client
+
+    @property
+    def timeout(self) -> float:
+        """The default request timeout, in seconds."""
+        return self._timeout
 
     def _normalize_model(self, model: str) -> str:
         if model.startswith("nim/"):
@@ -131,6 +198,7 @@ class NIMProvider(OpenAICompatibleProvider):
             return model
         return model
 
+    @override
     async def complete(
         self,
         request: LLMRequest,
@@ -142,21 +210,37 @@ class NIMProvider(OpenAICompatibleProvider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="nim", retryable=False)
+            raise LLMCancelledError(
+                message="Request cancelled", provider="nim", retryable=False
+            )
 
-        params = self._build_params(request)
+        params = self.build_params(request)
         timeout = timeout_s or self._timeout
 
         try:
             if stream and on_stream_event:
-                return await self._stream_completion(params, on_stream_event, timeout, cancel)
+                try:
+                    async with asyncio.timeout(timeout):
+                        return await self.stream_completion(
+                            params, on_stream_event, cancel
+                        )
+                except TimeoutError as e:
+                    raise LLMTimeoutError(
+                        message=f"Stream timed out after {timeout}s",
+                        provider="nim",
+                        raw=e,
+                    ) from e
 
             async with asyncio.timeout(timeout):
                 response = await self._client.chat.completions.create(**params)
 
-            message, usage = self._from_openai_response(response)
-            reasoning_content = self._extract_openai_reasoning_content(response.choices[0].message)
-            message, reasoning_content = self._normalize_thinking_tags(message, reasoning_content)
+            message, usage = _from_openai_response(response)
+            reasoning_content = _extract_openai_reasoning_content(
+                response.choices[0].message
+            )
+            message, reasoning_content = self._normalize_thinking_tags(
+                message, reasoning_content
+            )
 
             return CompletionResponse(
                 message=message,
@@ -173,15 +257,16 @@ class NIMProvider(OpenAICompatibleProvider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(message="Request cancelled", provider="nim") from None
+            raise LLMCancelledError(
+                message="Request cancelled", provider="nim"
+            ) from None
         except Exception as e:
-            raise self._map_error(e) from e
+            raise self.map_error(e) from e
 
-    async def _stream_completion(
+    async def stream_completion(
         self,
         params: dict[str, Any],
         on_stream_event: StreamCallback,
-        timeout: float,
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
@@ -189,95 +274,35 @@ class NIMProvider(OpenAICompatibleProvider):
         stream_options = dict(params.get("stream_options") or {})
         stream_options.setdefault("include_usage", True)
         params["stream_options"] = stream_options
-
-        text_acc: list[str] = []
-        tool_calls_acc: dict[int, dict[str, Any]] = {}
-        usage: Usage | None = None
-        finish_reason: str | None = None
-        reasoning_acc: list[str] = []
-
-        try:
-            async with asyncio.timeout(timeout):
-                stream = await self._client.chat.completions.create(**params)
-                async for chunk in stream:
-                    if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="nim", retryable=False)
-
-                    if not chunk.choices:
-                        if hasattr(chunk, "usage") and chunk.usage:
-                            usage = Usage(
-                                input_tokens=chunk.usage.prompt_tokens,
-                                output_tokens=chunk.usage.completion_tokens,
-                                total_tokens=chunk.usage.total_tokens,
-                            )
-                        continue
-
-                    delta = chunk.choices[0].delta
-                    finish_reason = chunk.choices[0].finish_reason
-
-                    if delta.content:
-                        text_acc.append(delta.content)
-                        on_stream_event(StreamEvent(delta_text=delta.content))
-
-                    delta_reasoning = self._extract_openai_delta_reasoning(delta)
-                    if delta_reasoning:
-                        reasoning_acc.append(delta_reasoning)
-                        on_stream_event(StreamEvent(delta_reasoning=delta_reasoning))
-
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index
-                            if idx not in tool_calls_acc:
-                                tool_calls_acc[idx] = {
-                                    "id": tc.id or "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            if tc.function:
-                                if tc.function.name:
-                                    tool_calls_acc[idx]["name"] = tc.function.name
-                                if tc.function.arguments:
-                                    tool_calls_acc[idx]["arguments"] += tc.function.arguments
-
-        except TimeoutError as e:
-            raise LLMTimeoutError(
-                message=f"Stream timed out after {timeout}s",
-                provider="nim",
-                raw=e,
-            ) from e
-
-        parts: list[Any] = []
-        full_text = "".join(text_acc)
-        if full_text:
-            parts.append(TextPart(text=full_text))
-
-        for idx in sorted(tool_calls_acc.keys()):
-            tc = tool_calls_acc[idx]
-            parts.append(
-                ToolCallPart(
-                    name=tc["name"],
-                    arguments_json=tc["arguments"],
-                    call_id=tc["id"],
-                )
-            )
-
-        message = LLMMessage(role="assistant", parts=parts)
-        reasoning_content = "".join(reasoning_acc) or None
-        message, reasoning_content = self._normalize_thinking_tags(message, reasoning_content)
-
-        on_stream_event(StreamEvent(done=True, usage=usage, finish_reason=finish_reason))
-
-        return CompletionResponse(
-            message=message,
-            usage=usage or Usage.zero(),
-            raw_response=None,
-            reasoning_content=reasoning_content,
-            finish_reason=finish_reason,
+        accumulator = OpenAIStreamAccumulator(
+            on_stream_event, reasoning_of=_extract_openai_delta_reasoning
         )
 
-    def _build_params(self, request: LLMRequest) -> dict[str, Any]:
+        stream = await self._client.chat.completions.create(**params)
+        async for chunk in stream:
+            if cancel and cancel.is_cancelled():
+                raise LLMCancelledError(
+                    message="Request cancelled",
+                    provider="nim",
+                    retryable=False,
+                )
+            accumulator.add(chunk)
+
+        message, reasoning_content = self._normalize_thinking_tags(
+            accumulator.message(), accumulator.reasoning_content
+        )
+        accumulator.emit_done()
+        return CompletionResponse(
+            message=message,
+            usage=accumulator.usage or Usage.zero(),
+            raw_response=None,
+            reasoning_content=reasoning_content,
+            finish_reason=accumulator.finish_reason,
+        )
+
+    def build_params(self, request: LLMRequest) -> dict[str, Any]:
         """Build NIM OpenAI-compatible parameters from request."""
-        messages = self._to_openai_messages(request.messages)
+        messages = _to_openai_messages(request.messages)
         messages = self._reorder_system_messages(messages)
         params: dict[str, Any] = {
             "model": self._model,
@@ -297,7 +322,7 @@ class NIMProvider(OpenAICompatibleProvider):
             params["max_tokens"] = request.max_tokens
 
         if request.tools:
-            params["tools"] = self._to_openai_tools(request.tools)
+            params["tools"] = _to_openai_tools(request.tools)
 
         if request.tool_choice:
             params["tool_choice"] = {
@@ -306,19 +331,28 @@ class NIMProvider(OpenAICompatibleProvider):
             }
 
         if request.structured_output:
-            params["response_format"] = self._to_openai_response_format(request.structured_output)
+            params["response_format"] = _to_openai_response_format(
+                request.structured_output
+            )
 
         if request.extra:
             extra = dict(request.extra)
             self._normalize_nim_reasoning_controls(extra)
-            if self._profile.reasoning_effort_param and self._profile.reasoning_effort_param in extra:
-                params[self._profile.reasoning_effort_param] = extra.pop(self._profile.reasoning_effort_param)
+            if (
+                self._profile.reasoning_effort_param
+                and self._profile.reasoning_effort_param in extra
+            ):
+                params[self._profile.reasoning_effort_param] = extra.pop(
+                    self._profile.reasoning_effort_param
+                )
             params.update(extra)
 
         return params
 
-    def _reorder_system_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Ensure all system/developer messages appear first, collapsed to one."""
+    def _reorder_system_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Move all system/developer messages first, collapsed into one."""
         system_like_roles = {"system", "developer"}
         seen_non_system = False
         needs_reorder = False
@@ -331,8 +365,16 @@ class NIMProvider(OpenAICompatibleProvider):
             else:
                 seen_non_system = True
 
-        systems = [msg for msg in messages if str(msg.get("role", "")).lower() in system_like_roles]
-        others = [msg for msg in messages if str(msg.get("role", "")).lower() not in system_like_roles]
+        systems = [
+            msg
+            for msg in messages
+            if str(msg.get("role", "")).lower() in system_like_roles
+        ]
+        others = [
+            msg
+            for msg in messages
+            if str(msg.get("role", "")).lower() not in system_like_roles
+        ]
 
         normalized = messages
         if needs_reorder:
@@ -378,27 +420,10 @@ class NIMProvider(OpenAICompatibleProvider):
     def _normalize_nim_reasoning_controls(self, extra: dict[str, Any]) -> None:
         """Normalize generic reasoning controls into NIM's extra_body shape."""
         reasoning_effort = extra.pop("reasoning_effort", None)
-        control_key, on_value, off_value = self._resolve_reasoning_control_spec()
-
-        # Databricks-style thinking budgets are not supported by NIM; ignore with warning.
-        for key in self._UNSUPPORTED_BUDGET_KEYS:
-            if key in extra:
-                extra.pop(key, None)
-                logger.warning(
-                    "nim_unsupported_reasoning_budget",
-                    extra={"provider": "nim", "model": self._model, "control": key},
-                )
-
-        thinking_obj = extra.get("thinking")
-        has_budget_in_thinking = isinstance(thinking_obj, dict) and any(
-            k in thinking_obj for k in self._UNSUPPORTED_BUDGET_KEYS | {"budget_tokens"}
+        control_key, on_value, off_value = (
+            self._resolve_reasoning_control_spec()
         )
-        if has_budget_in_thinking:
-            extra.pop("thinking", None)
-            logger.warning(
-                "nim_unsupported_reasoning_budget",
-                extra={"provider": "nim", "model": self._model, "control": "thinking.budget_tokens"},
-            )
+        self._drop_unsupported_budgets(extra)
 
         alias_chat_kwargs = extra.pop("chat_template_kwargs", None)
         if alias_chat_kwargs is not None:
@@ -407,51 +432,26 @@ class NIMProvider(OpenAICompatibleProvider):
                 extra={"provider": "nim", "model": self._model},
             )
 
-        raw_extra_body = extra.get("extra_body")
-        if isinstance(raw_extra_body, dict):
-            extra_body = dict(raw_extra_body)
-        else:
-            extra_body = {}
-            if raw_extra_body is not None:
-                logger.warning(
-                    "nim_invalid_extra_body_ignored",
-                    extra={"provider": "nim", "model": self._model, "type": type(raw_extra_body).__name__},
-                )
-
+        extra_body = self._extra_body(extra.get("extra_body"))
         raw_chat_kwargs = extra_body.get("chat_template_kwargs")
         explicit_extra_body_control = isinstance(raw_chat_kwargs, dict) and (
             control_key in raw_chat_kwargs or "thinking" in raw_chat_kwargs
         )
-        chat_kwargs: dict[str, Any] = dict(raw_chat_kwargs) if isinstance(raw_chat_kwargs, dict) else {}
+        chat_kwargs = self._chat_template_kwargs(
+            raw_chat_kwargs, alias_chat_kwargs
+        )
 
-        if raw_chat_kwargs is not None and not isinstance(raw_chat_kwargs, dict):
-            logger.warning(
-                "nim_invalid_chat_template_kwargs_ignored",
-                extra={"provider": "nim", "model": self._model, "type": type(raw_chat_kwargs).__name__},
-            )
-
-        if isinstance(alias_chat_kwargs, dict):
-            # Backward-compatible alias merge: only fill missing keys.
-            for k, v in alias_chat_kwargs.items():
-                chat_kwargs.setdefault(k, v)
-        elif alias_chat_kwargs is not None:
-            logger.warning(
-                "nim_invalid_chat_template_kwargs_alias_ignored",
-                extra={"provider": "nim", "model": self._model, "type": type(alias_chat_kwargs).__name__},
-            )
-
-        for key in self._UNSUPPORTED_BUDGET_KEYS | {"budget_tokens"}:
-            if key in chat_kwargs:
-                chat_kwargs.pop(key, None)
-                logger.warning(
-                    "nim_unsupported_reasoning_budget",
-                    extra={"provider": "nim", "model": self._model, "control": f"chat_template_kwargs.{key}"},
-                )
-
-        # Backward compatibility for legacy key: map explicit "thinking" to model key.
-        if "thinking" in chat_kwargs and control_key != "thinking" and control_key not in chat_kwargs:
+        # Backward compatibility for legacy key: map explicit "thinking" to
+        # model key.
+        if (
+            "thinking" in chat_kwargs
+            and control_key != "thinking"
+            and control_key not in chat_kwargs
+        ):
             thinking_value = bool(chat_kwargs.pop("thinking"))
-            chat_kwargs[control_key] = on_value if thinking_value else off_value
+            chat_kwargs[control_key] = (
+                on_value if thinking_value else off_value
+            )
 
         derived_control = self._map_reasoning_effort_to_control_value(
             reasoning_effort,
@@ -461,13 +461,14 @@ class NIMProvider(OpenAICompatibleProvider):
         if derived_control is not None and not explicit_extra_body_control:
             chat_kwargs[control_key] = derived_control
 
-        if control_key != "thinking" and "thinking" in chat_kwargs:
-            # Avoid sending both legacy and model-native keys in the same request.
+        if control_key != "thinking":
+            # Avoid sending both legacy and model-native keys in the same
+            # request.
             chat_kwargs.pop("thinking", None)
 
         if chat_kwargs:
             extra_body["chat_template_kwargs"] = chat_kwargs
-        elif "chat_template_kwargs" in extra_body:
+        else:
             extra_body.pop("chat_template_kwargs", None)
 
         if extra_body:
@@ -475,20 +476,100 @@ class NIMProvider(OpenAICompatibleProvider):
         else:
             extra.pop("extra_body", None)
 
+    def _warn_unsupported_budget(self, control: str) -> None:
+        logger.warning(
+            "nim_unsupported_reasoning_budget",
+            extra={
+                "provider": "nim",
+                "model": self._model,
+                "control": control,
+            },
+        )
+
+    def _warn_ignored_type(self, event: str, value: object) -> None:
+        logger.warning(
+            event,
+            extra={
+                "provider": "nim",
+                "model": self._model,
+                "type": type(value).__name__,
+            },
+        )
+
+    def _drop_unsupported_budgets(self, extra: dict[str, Any]) -> None:
+        """Drop Databricks-style thinking budgets, which NIM ignores."""
+        for key in self._UNSUPPORTED_BUDGET_KEYS:
+            if key in extra:
+                extra.pop(key, None)
+                self._warn_unsupported_budget(key)
+
+        thinking_obj = extra.get("thinking")
+        if isinstance(thinking_obj, dict) and any(
+            k in thinking_obj
+            for k in self._UNSUPPORTED_BUDGET_KEYS | {"budget_tokens"}
+        ):
+            extra.pop("thinking", None)
+            self._warn_unsupported_budget("thinking.budget_tokens")
+
+    def _extra_body(self, raw_extra_body: object) -> dict[str, Any]:
+        """Copy a dict ``extra_body``; anything else is ignored."""
+        if isinstance(raw_extra_body, dict):
+            return dict(raw_extra_body)
+        if raw_extra_body is not None:
+            self._warn_ignored_type(
+                "nim_invalid_extra_body_ignored", raw_extra_body
+            )
+        return {}
+
+    def _chat_template_kwargs(
+        self, raw_chat_kwargs: object, alias_chat_kwargs: object
+    ) -> dict[str, Any]:
+        """Merge ``chat_template_kwargs`` with its legacy top-level alias."""
+        chat_kwargs: dict[str, Any] = (
+            dict(raw_chat_kwargs) if isinstance(raw_chat_kwargs, dict) else {}
+        )
+        if raw_chat_kwargs is not None and not isinstance(
+            raw_chat_kwargs, dict
+        ):
+            self._warn_ignored_type(
+                "nim_invalid_chat_template_kwargs_ignored", raw_chat_kwargs
+            )
+
+        if isinstance(alias_chat_kwargs, dict):
+            # Backward-compatible alias merge: only fill missing keys.
+            for k, v in alias_chat_kwargs.items():
+                chat_kwargs.setdefault(k, v)
+        elif alias_chat_kwargs is not None:
+            self._warn_ignored_type(
+                "nim_invalid_chat_template_kwargs_alias_ignored",
+                alias_chat_kwargs,
+            )
+
+        for key in self._UNSUPPORTED_BUDGET_KEYS | {"budget_tokens"}:
+            if key in chat_kwargs:
+                chat_kwargs.pop(key, None)
+                self._warn_unsupported_budget(f"chat_template_kwargs.{key}")
+        return chat_kwargs
+
     def _resolve_reasoning_control_spec(self) -> tuple[str, Any, Any]:
         model = self._model.lower()
-        for prefix, key, on_value, off_value in self._MODEL_REASONING_CONTROL_MAP:
+        for (
+            prefix,
+            key,
+            on_value,
+            off_value,
+        ) in self._MODEL_REASONING_CONTROL_MAP:
             if model.startswith(prefix):
                 return key, on_value, off_value
         return "thinking", True, False
 
     def _map_reasoning_effort_to_control_value(
         self,
-        reasoning_effort: Any,
+        reasoning_effort: object,
         *,
-        on_value: Any,
-        off_value: Any,
-    ) -> Any | None:
+        on_value: _ControlT,
+        off_value: _ControlT,
+    ) -> _ControlT | None:
         if reasoning_effort is None:
             return None
 
@@ -539,7 +620,11 @@ class NIMProvider(OpenAICompatibleProvider):
                 continue
 
             text = part.text
-            matches = [m.group(1) for m in pattern.finditer(text) if m.group(1).strip()]
+            matches = [
+                m.group(1)
+                for m in pattern.finditer(text)
+                if m.group(1).strip()
+            ]
             if matches:
                 extracted_reasoning.extend(matches)
                 text = pattern.sub("", text)
@@ -550,10 +635,12 @@ class NIMProvider(OpenAICompatibleProvider):
         if not extracted_reasoning:
             return message, reasoning_content
 
-        normalized_message = LLMMessage(role=message.role, parts=normalized_parts)
+        normalized_message = LLMMessage(
+            role=message.role, parts=normalized_parts
+        )
         return normalized_message, "".join(extracted_reasoning)
 
-    def _map_error(self, exc: Exception) -> LLMError:
+    def map_error(self, exc: Exception) -> LLMError:
         """Map OpenAI SDK exceptions to LLMError."""
         try:
             from openai import (
@@ -568,7 +655,9 @@ class NIMProvider(OpenAICompatibleProvider):
                 return LLMAuthError(
                     message=str(exc),
                     provider="nim",
-                    status_code=exc.status_code if hasattr(exc, "status_code") else 401,
+                    status_code=exc.status_code
+                    if hasattr(exc, "status_code")
+                    else 401,
                     raw=exc,
                 )
 
@@ -576,7 +665,9 @@ class NIMProvider(OpenAICompatibleProvider):
                 return LLMRateLimitError(
                     message=str(exc),
                     provider="nim",
-                    status_code=exc.status_code if hasattr(exc, "status_code") else 429,
+                    status_code=exc.status_code
+                    if hasattr(exc, "status_code")
+                    else 429,
                     raw=exc,
                 )
 
@@ -585,18 +676,24 @@ class NIMProvider(OpenAICompatibleProvider):
                     return LLMContextLengthError(
                         message=str(exc),
                         provider="nim",
-                        status_code=exc.status_code if hasattr(exc, "status_code") else 400,
+                        status_code=exc.status_code
+                        if hasattr(exc, "status_code")
+                        else 400,
                         raw=exc,
                     )
                 return LLMInvalidRequestError(
                     message=str(exc),
                     provider="nim",
-                    status_code=exc.status_code if hasattr(exc, "status_code") else 400,
+                    status_code=exc.status_code
+                    if hasattr(exc, "status_code")
+                    else 400,
                     raw=exc,
                 )
 
             if isinstance(exc, APIStatusError):
-                status = exc.status_code if hasattr(exc, "status_code") else 500
+                status = (
+                    exc.status_code if hasattr(exc, "status_code") else 500
+                )
                 if status >= 500:
                     return LLMServerError(
                         message=str(exc),

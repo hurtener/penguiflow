@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,9 +23,12 @@ from penguiflow.llm.types import (
     ToolSpec,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 
 @pytest.fixture
-def mock_openai_sdk() -> Any:
+def mock_openai_sdk() -> MagicMock:
     """Mock the OpenAI SDK used by NIM provider."""
     mock_sdk = MagicMock()
     mock_client = MagicMock()
@@ -34,7 +37,10 @@ def mock_openai_sdk() -> Any:
 
 
 class TestNIMProviderInit:
+    """Tests for NIM provider init."""
+
     def test_init_with_api_key(self, mock_openai_sdk: MagicMock) -> None:
+        """Init with API key."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.nim import NIMProvider
 
@@ -44,188 +50,322 @@ class TestNIMProviderInit:
             assert provider.provider_name == "nim"
             call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
             assert call_kwargs["api_key"] == "nim-key"
-            assert call_kwargs["base_url"] == "https://integrate.api.nvidia.com/v1"
+            assert (
+                call_kwargs["base_url"]
+                == "https://integrate.api.nvidia.com/v1"
+            )
 
-    def test_init_uses_nim_api_key_env(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_uses_nim_api_key_env(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Init uses NIM API key env."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.nim import NIMProvider
 
-            with patch.dict(os.environ, {"NIM_API_KEY": "nim-env"}, clear=True):
+            with patch.dict(
+                os.environ, {"NIM_API_KEY": "nim-env"}, clear=True
+            ):
                 NIMProvider("qwen/qwen3.5-397b-a17b")
                 call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
                 assert call_kwargs["api_key"] == "nim-env"
 
-    def test_init_uses_nvidia_api_key_fallback(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_uses_nvidia_api_key_fallback(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Init uses nvidia API key fallback."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.nim import NIMProvider
 
-            with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-env"}, clear=True):
+            with patch.dict(
+                os.environ, {"NVIDIA_API_KEY": "nvidia-env"}, clear=True
+            ):
                 NIMProvider("qwen/qwen3.5-397b-a17b")
                 call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
                 assert call_kwargs["api_key"] == "nvidia-env"
 
-    def test_init_raises_without_api_key(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_raises_without_api_key(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Init raises without API key."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.nim import NIMProvider
 
-            with patch.dict(os.environ, {}, clear=True):
-                with pytest.raises(ValueError, match="NIM API key required"):
-                    NIMProvider("qwen/qwen3.5-397b-a17b")
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                pytest.raises(ValueError, match="NIM API key required"),
+            ):
+                NIMProvider("qwen/qwen3.5-397b-a17b")
 
     def test_init_strips_prefixes(self, mock_openai_sdk: MagicMock) -> None:
+        """Init strips prefixes."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.nim import NIMProvider
 
-            provider_nim = NIMProvider("nim/qwen/qwen3.5-397b-a17b", api_key="x")
-            provider_nvidia = NIMProvider("nvidia/qwen/qwen3.5-397b-a17b", api_key="x")
-            provider_nvidia_direct = NIMProvider("nvidia/nemotron-3-nano-30b-a3b", api_key="x")
+            provider_nim = NIMProvider(
+                "nim/qwen/qwen3.5-397b-a17b", api_key="x"
+            )
+            provider_nvidia = NIMProvider(
+                "nvidia/qwen/qwen3.5-397b-a17b", api_key="x"
+            )
+            provider_nvidia_direct = NIMProvider(
+                "nvidia/nemotron-3-nano-30b-a3b", api_key="x"
+            )
 
             assert provider_nim.model == "qwen/qwen3.5-397b-a17b"
             assert provider_nvidia.model == "qwen/qwen3.5-397b-a17b"
-            assert provider_nvidia_direct.model == "nvidia/nemotron-3-nano-30b-a3b"
+            assert (
+                provider_nvidia_direct.model
+                == "nvidia/nemotron-3-nano-30b-a3b"
+            )
 
 
 class TestNIMProviderBuildParams:
+    """Tests for NIM provider build params."""
+
     def test_build_params_basic(self) -> None:
+        """Build params basic."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=False, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             temperature=0.7,
             max_tokens=256,
         )
 
-        params = provider._build_params(request)
+        params = provider.build_params(request)
         assert params["model"] == "qwen/qwen3.5-397b-a17b"
         assert params["temperature"] == 0.7
         assert params["max_tokens"] == 256
 
     def test_build_params_with_tools_and_structured_output(self) -> None:
+        """Build params with tools and structured output."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=False, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-            tools=(ToolSpec(name="get_weather", description="Get weather", json_schema={"type": "object"}),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
+            tools=(
+                ToolSpec(
+                    name="get_weather",
+                    description="Get weather",
+                    json_schema={"type": "object"},
+                ),
+            ),
             tool_choice="get_weather",
-            structured_output=StructuredOutputSpec(name="Out", json_schema={"type": "object"}, strict=False),
+            structured_output=StructuredOutputSpec(
+                name="Out", json_schema={"type": "object"}, strict=False
+            ),
             extra={"custom_flag": True},
         )
 
-        params = provider._build_params(request)
+        params = provider.build_params(request)
         assert "tools" in params
         assert params["tool_choice"]["function"]["name"] == "get_weather"
         assert params["response_format"]["type"] == "json_schema"
         assert params["custom_flag"] is True
 
     def test_build_params_maps_reasoning_effort_to_thinking_true(self) -> None:
+        """Build params maps reasoning effort to thinking true."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             extra={"reasoning_effort": "high"},
         )
 
-        params = provider._build_params(request)
-        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "thinking"
+        params = provider.build_params(request)
+        assert (
+            params["extra_body"]["chat_template_kwargs"]["thinking_mode"]
+            == "thinking"
+        )
         assert "reasoning_effort" not in params
 
-    def test_build_params_maps_reasoning_effort_to_thinking_false(self) -> None:
+    def test_build_params_maps_reasoning_effort_to_thinking_false(
+        self,
+    ) -> None:
+        """Build params maps reasoning effort to thinking false."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             extra={"reasoning_effort": "off"},
         )
 
-        params = provider._build_params(request)
-        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "non-thinking"
+        params = provider.build_params(request)
+        assert (
+            params["extra_body"]["chat_template_kwargs"]["thinking_mode"]
+            == "non-thinking"
+        )
 
-    def test_build_params_explicit_extra_body_thinking_overrides_effort(self) -> None:
+    def test_build_params_explicit_extra_body_thinking_overrides_effort(
+        self,
+    ) -> None:
+        """Build params explicit extra body thinking overrides effort."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             extra={
                 "reasoning_effort": "high",
-                "extra_body": {"chat_template_kwargs": {"thinking_mode": "non-thinking"}},
+                "extra_body": {
+                    "chat_template_kwargs": {"thinking_mode": "non-thinking"}
+                },
             },
         )
 
-        params = provider._build_params(request)
-        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "non-thinking"
+        params = provider.build_params(request)
+        assert (
+            params["extra_body"]["chat_template_kwargs"]["thinking_mode"]
+            == "non-thinking"
+        )
 
-    def test_build_params_normalizes_chat_template_kwargs_alias(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_build_params_normalizes_chat_template_kwargs_alias(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Build params normalizes chat template kwargs alias."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-            extra={"chat_template_kwargs": {"thinking_mode": "thinking", "foo": "bar"}},
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
+            extra={
+                "chat_template_kwargs": {
+                    "thinking_mode": "thinking",
+                    "foo": "bar",
+                }
+            },
         )
 
-        with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
-            params = provider._build_params(request)
+        with caplog.at_level(
+            logging.WARNING, logger="penguiflow.llm.providers.nim"
+        ):
+            params = provider.build_params(request)
 
-        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "thinking"
+        assert (
+            params["extra_body"]["chat_template_kwargs"]["thinking_mode"]
+            == "thinking"
+        )
         assert params["extra_body"]["chat_template_kwargs"]["foo"] == "bar"
-        assert any("nim_chat_template_kwargs_alias_normalized" in r.message for r in caplog.records)
+        assert any(
+            "nim_chat_template_kwargs_alias_normalized" in r.message
+            for r in caplog.records
+        )
 
-    def test_build_params_reorders_system_messages(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_build_params_reorders_system_messages(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Build params reorders system messages."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
             messages=(
                 LLMMessage(role="user", parts=[TextPart(text="User first")]),
-                LLMMessage(role="system", parts=[TextPart(text="System later")]),
+                LLMMessage(
+                    role="system", parts=[TextPart(text="System later")]
+                ),
             ),
         )
 
-        with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
-            params = provider._build_params(request)
+        with caplog.at_level(
+            logging.WARNING, logger="penguiflow.llm.providers.nim"
+        ):
+            params = provider.build_params(request)
 
-        assert [msg["role"] for msg in params["messages"]] == ["system", "user"]
-        assert any("nim_reordered_system_messages" in r.message for r in caplog.records)
+        assert [msg["role"] for msg in params["messages"]] == [
+            "system",
+            "user",
+        ]
+        assert any(
+            "nim_reordered_system_messages" in r.message
+            for r in caplog.records
+        )
 
-    def test_build_params_collapses_multiple_system_messages(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_build_params_collapses_multiple_system_messages(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Build params collapses multiple system messages."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
@@ -236,24 +376,42 @@ class TestNIMProviderBuildParams:
             ),
         )
 
-        with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
-            params = provider._build_params(request)
+        with caplog.at_level(
+            logging.WARNING, logger="penguiflow.llm.providers.nim"
+        ):
+            params = provider.build_params(request)
 
-        assert [msg["role"] for msg in params["messages"]] == ["system", "user"]
+        assert [msg["role"] for msg in params["messages"]] == [
+            "system",
+            "user",
+        ]
         assert "System A" in str(params["messages"][0]["content"])
         assert "System B" in str(params["messages"][0]["content"])
-        assert any("nim_collapsed_system_messages" in r.message for r in caplog.records)
+        assert any(
+            "nim_collapsed_system_messages" in r.message
+            for r in caplog.records
+        )
 
     @pytest.mark.parametrize(
         ("model", "effort", "expected_key", "expected_value"),
         [
             ("qwen/qwen3.5-397b-a17b", "high", "thinking_mode", "thinking"),
             ("qwen/qwen3.5-397b-a17b", "off", "thinking_mode", "non-thinking"),
-            ("stepfun-ai/step-3.5-flash", "high", "reasoning_mode", "thinking"),
+            (
+                "stepfun-ai/step-3.5-flash",
+                "high",
+                "reasoning_mode",
+                "thinking",
+            ),
             ("stepfun-ai/step-3.5-flash", "off", "reasoning_mode", "none"),
             ("z-ai/glm5", "high", "reasoning_mode", "thinking"),
             ("moonshotai/kimi-k2.5", "off", "reasoning_mode", "none"),
-            ("deepseek-ai/deepseek-v3.1-terminus", "high", "reasoning_mode", "thinking"),
+            (
+                "deepseek-ai/deepseek-v3.1-terminus",
+                "high",
+                "reasoning_mode",
+                "thinking",
+            ),
             ("minimaxai/minimax-m2.1", "high", "enable_thinking", True),
             ("minimaxai/minimax-m2.1", "off", "enable_thinking", False),
         ],
@@ -265,68 +423,103 @@ class TestNIMProviderBuildParams:
         expected_key: str,
         expected_value: object,
     ) -> None:
+        """Build params model specific reasoning controls."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = model
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            model,
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model=model,
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             extra={"reasoning_effort": effort},
         )
 
-        params = provider._build_params(request)
+        params = provider.build_params(request)
         chat_kwargs = params["extra_body"]["chat_template_kwargs"]
         assert chat_kwargs[expected_key] == expected_value
 
-    def test_build_params_ignores_unsupported_budget_controls(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_build_params_ignores_unsupported_budget_controls(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Build params ignores unsupported budget controls."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             extra={
                 "reasoning_budget_tokens": 8000,
                 "thinking": {"budget_tokens": 4096},
-                "extra_body": {"chat_template_kwargs": {"thinking_budget": 2048}},
+                "extra_body": {
+                    "chat_template_kwargs": {"thinking_budget": 2048}
+                },
             },
         )
 
-        with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
-            params = provider._build_params(request)
+        with caplog.at_level(
+            logging.WARNING, logger="penguiflow.llm.providers.nim"
+        ):
+            params = provider.build_params(request)
 
         assert "reasoning_budget_tokens" not in params
         assert "thinking" not in params
         assert "extra_body" not in params
-        assert any("nim_unsupported_reasoning_budget" in r.message for r in caplog.records)
+        assert any(
+            "nim_unsupported_reasoning_budget" in r.message
+            for r in caplog.records
+        )
 
     def test_build_params_non_reasoning_extra_passthrough(self) -> None:
+        """Build params non reasoning extra passthrough."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True, reasoning_effort_param=None
+            ),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             extra={"seed": 7, "custom_flag": True},
         )
 
-        params = provider._build_params(request)
+        params = provider.build_params(request)
         assert params["seed"] == 7
         assert params["custom_flag"] is True
 
 
 class TestNIMProviderComplete:
+    """Tests for NIM provider complete."""
+
     @pytest.mark.asyncio
-    async def test_complete_simple_text(self) -> None:
+    async def test_complete_simple_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Complete simple text."""
         from penguiflow.llm.providers.nim import NIMProvider
 
         mock_msg = MagicMock()
@@ -347,16 +540,26 @@ class TestNIMProviderComplete:
         mock_response.choices = [mock_choice]
         mock_response.usage = mock_usage
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-        provider._timeout = 30.0
-        provider._client = MagicMock()
-        provider._client.chat.completions.create = AsyncMock(return_value=mock_response)
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=False, reasoning_effort_param=None
+            ),
+            timeout=30.0,
+            client=MagicMock(),
+        )
+        monkeypatch.setattr(
+            provider.client.chat.completions,
+            "create",
+            AsyncMock(return_value=mock_response),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
         )
 
         response = await provider.complete(request)
@@ -364,19 +567,32 @@ class TestNIMProviderComplete:
         assert response.usage.total_tokens == 20
 
     @pytest.mark.asyncio
-    async def test_complete_timeout(self) -> None:
+    async def test_complete_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Complete timeout."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-        provider._timeout = 1.0
-        provider._client = MagicMock()
-        provider._client.chat.completions.create = AsyncMock(side_effect=TimeoutError("timeout"))
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=False, reasoning_effort_param=None
+            ),
+            timeout=1.0,
+            client=MagicMock(),
+        )
+        monkeypatch.setattr(
+            provider.client.chat.completions,
+            "create",
+            AsyncMock(side_effect=TimeoutError("timeout")),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
         )
 
         with pytest.raises(LLMTimeoutError):
@@ -384,27 +600,35 @@ class TestNIMProviderComplete:
 
     @pytest.mark.asyncio
     async def test_complete_cancelled(self) -> None:
+        """Complete cancelled."""
         from penguiflow.llm.providers.nim import NIMProvider
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-        provider._timeout = 30.0
-        provider._client = MagicMock()
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=False, reasoning_effort_param=None
+            ),
+            timeout=30.0,
+            client=MagicMock(),
+        )
 
         cancel_token = MagicMock()
         cancel_token.is_cancelled.return_value = True
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
         )
 
         with pytest.raises(LLMCancelledError):
             await provider.complete(request, cancel=cancel_token)
 
     @pytest.mark.asyncio
-    async def test_streaming(self) -> None:
+    async def test_streaming(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Streaming."""
         from penguiflow.llm.providers.nim import NIMProvider
 
         chunks: list[MagicMock] = []
@@ -433,16 +657,24 @@ class TestNIMProviderComplete:
         usage_chunk.usage.total_tokens = 13
         chunks.append(usage_chunk)
 
-        async def _stream() -> Any:
+        async def _stream() -> AsyncIterator[object]:
             for chunk in chunks:
                 yield chunk
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-        provider._timeout = 30.0
-        provider._client = MagicMock()
-        provider._client.chat.completions.create = AsyncMock(return_value=_stream())
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=False, reasoning_effort_param=None
+            ),
+            timeout=30.0,
+            client=MagicMock(),
+        )
+        monkeypatch.setattr(
+            provider.client.chat.completions,
+            "create",
+            AsyncMock(return_value=_stream()),
+        )
 
         streamed: list[str] = []
 
@@ -455,13 +687,19 @@ class TestNIMProviderComplete:
             messages=(LLMMessage(role="user", parts=[TextPart(text="Hi")]),),
         )
 
-        response = await provider.complete(request, stream=True, on_stream_event=on_stream)
+        response = await provider.complete(
+            request, stream=True, on_stream_event=on_stream
+        )
         assert "".join(streamed) == "Hello NIM"
         assert response.message.text == "Hello NIM"
         assert response.usage.total_tokens == 13
 
     @pytest.mark.asyncio
-    async def test_complete_moves_think_tags_to_reasoning_content(self) -> None:
+    async def test_complete_moves_think_tags_to_reasoning_content(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Complete moves think tags to reasoning content."""
         from penguiflow.llm.providers.nim import NIMProvider
 
         mock_msg = MagicMock()
@@ -482,20 +720,28 @@ class TestNIMProviderComplete:
         mock_response.choices = [mock_choice]
         mock_response.usage = mock_usage
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(
-            supports_reasoning=True,
-            reasoning_effort_param=None,
-            thinking_tags=("<think>", "</think>"),
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True,
+                reasoning_effort_param=None,
+                thinking_tags=("<think>", "</think>"),
+            ),
+            timeout=30.0,
+            client=MagicMock(),
         )
-        provider._timeout = 30.0
-        provider._client = MagicMock()
-        provider._client.chat.completions.create = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            provider.client.chat.completions,
+            "create",
+            AsyncMock(return_value=mock_response),
+        )
 
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
         )
 
         response = await provider.complete(request)
@@ -503,7 +749,11 @@ class TestNIMProviderComplete:
         assert response.reasoning_content == "Reasoning here."
 
     @pytest.mark.asyncio
-    async def test_streaming_moves_think_tags_to_reasoning_content(self) -> None:
+    async def test_streaming_moves_think_tags_to_reasoning_content(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Streaming moves think tags to reasoning content."""
         from penguiflow.llm.providers.nim import NIMProvider
 
         chunk = MagicMock()
@@ -520,20 +770,26 @@ class TestNIMProviderComplete:
         usage_chunk.usage.completion_tokens = 3
         usage_chunk.usage.total_tokens = 13
 
-        async def _stream() -> Any:
+        async def _stream() -> AsyncIterator[object]:
             yield chunk
             yield usage_chunk
 
-        provider = NIMProvider.__new__(NIMProvider)
-        provider._model = "qwen/qwen3.5-397b-a17b"
-        provider._profile = MagicMock(
-            supports_reasoning=True,
-            reasoning_effort_param=None,
-            thinking_tags=("<think>", "</think>"),
+        provider = NIMProvider(
+            "qwen/qwen3.5-397b-a17b",
+            api_key="test-key",
+            profile=MagicMock(
+                supports_reasoning=True,
+                reasoning_effort_param=None,
+                thinking_tags=("<think>", "</think>"),
+            ),
+            timeout=30.0,
+            client=MagicMock(),
         )
-        provider._timeout = 30.0
-        provider._client = MagicMock()
-        provider._client.chat.completions.create = AsyncMock(return_value=_stream())
+        monkeypatch.setattr(
+            provider.client.chat.completions,
+            "create",
+            AsyncMock(return_value=_stream()),
+        )
 
         events: list[StreamEvent] = []
 
@@ -545,14 +801,19 @@ class TestNIMProviderComplete:
             messages=(LLMMessage(role="user", parts=[TextPart(text="Hi")]),),
         )
 
-        response = await provider.complete(request, stream=True, on_stream_event=on_stream)
+        response = await provider.complete(
+            request, stream=True, on_stream_event=on_stream
+        )
         assert response.message.text == "done"
         assert response.reasoning_content == "Reason."
         assert any(e.done for e in events)
 
 
 class TestNIMProviderErrorMapping:
+    """Tests for NIM provider error mapping."""
+
     def test_map_error_auth(self) -> None:
+        """Map error auth."""
         from penguiflow.llm.providers.nim import NIMProvider
 
         class AuthenticationError(Exception):
@@ -563,12 +824,16 @@ class TestNIMProviderErrorMapping:
         fake_openai.RateLimitError = type("RateLimitError", (Exception,), {})
         fake_openai.BadRequestError = type("BadRequestError", (Exception,), {})
         fake_openai.APIStatusError = type("APIStatusError", (Exception,), {})
-        fake_openai.APIConnectionError = type("APIConnectionError", (Exception,), {})
+        fake_openai.APIConnectionError = type(
+            "APIConnectionError", (Exception,), {}
+        )
 
-        provider = NIMProvider.__new__(NIMProvider)
+        provider = NIMProvider(
+            "meta/llama-3.1-8b-instruct", api_key="test-key"
+        )
 
         with patch.dict("sys.modules", {"openai": fake_openai}):
-            mapped = provider._map_error(AuthenticationError("auth"))
+            mapped = provider.map_error(AuthenticationError("auth"))
 
         assert isinstance(mapped, LLMAuthError)
         assert mapped.provider == "nim"

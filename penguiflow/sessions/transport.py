@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Protocol
 
-from penguiflow.steering import SteeringEvent
+if TYPE_CHECKING:
+    from types import TracebackType
 
-from .models import StateUpdate
+    from penguiflow.steering import SteeringEvent
+
+    from .models import StateUpdate
 
 
 class Transport(Protocol):
@@ -30,8 +33,8 @@ class Transport(Protocol):
         """Wait for and return the next steering event from the client.
 
         Returns:
-            The next `SteeringEvent`, or None if the transport has closed and no
-            more events will arrive.
+            The next `SteeringEvent`, or None if the transport has closed and
+            no more events will arrive.
         """
         ...
 
@@ -43,12 +46,14 @@ class Transport(Protocol):
 class SessionConnection:
     """Wires a StreamingSession to a bidirectional transport."""
 
-    def __init__(self, session: StreamingSession, transport: Transport) -> None:
+    def __init__(
+        self, session: StreamingSession, transport: Transport
+    ) -> None:
         """Initialize the connection.
 
         Args:
-            session: The streaming session whose updates are forwarded and which
-                receives steering events.
+            session: The streaming session whose updates are forwarded and
+                which receives steering events.
             transport: The bidirectional transport to wire the session to.
         """
         self._session = session
@@ -56,7 +61,7 @@ class SessionConnection:
         self._tasks: list[asyncio.Task[None]] = []
 
     async def __aenter__(self) -> SessionConnection:
-        """Start forwarding session updates to the transport and steering events back.
+        """Forward session updates to the transport and steering back in.
 
         Returns:
             This `SessionConnection`, with background forwarding tasks running.
@@ -74,11 +79,24 @@ class SessionConnection:
                     break
                 await self._session.steer(event)
 
-        self._tasks.append(asyncio.create_task(_forward_updates(), name="session:forward_updates"))
-        self._tasks.append(asyncio.create_task(_receive_steering(), name="session:receive_steering"))
+        self._tasks.append(
+            asyncio.create_task(
+                _forward_updates(), name="session:forward_updates"
+            )
+        )
+        self._tasks.append(
+            asyncio.create_task(
+                _receive_steering(), name="session:receive_steering"
+            )
+        )
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         """Cancel the forwarding tasks and close the transport.
 
         Args:

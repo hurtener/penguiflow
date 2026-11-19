@@ -1,18 +1,25 @@
 """Planner tool helpers for calling remote A2A agents.
 
-This module provides a small wrapper that turns an A2A remote invocation, made through a
-:class:`penguiflow.remote.RemoteTransport`, into a regular planner tool (a
-:class:`penguiflow.catalog.NodeSpec`).
+This module provides a small wrapper that turns an A2A remote invocation, made
+through a :class:`penguiflow.remote.RemoteTransport`, into a regular planner
+tool (a :class:`penguiflow.catalog.NodeSpec`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -21,6 +28,7 @@ from penguiflow.node import Node, NodePolicy
 from penguiflow.planner.context import ToolContext
 from penguiflow.remote import (
     RemoteCallRequest,
+    RemoteStreamEvent,
     RemoteTaskAuthRequired,
     RemoteTaskEvent,
     RemoteTaskInputRequired,
@@ -45,12 +53,12 @@ _FAILED_REMOTE_STATES = {
 }
 
 
-def _coerce_text_result(result: Any, out_model: type[BaseModel]) -> Any:
+def _coerce_text_result(result: object, out_model: type[BaseModel]) -> object:
     """Wrap a plain-text remote answer into a single-field ``out_model``.
 
-    A2A agents usually answer with a text part. When the declared output model has
-    exactly one field, the text becomes that field's value so it validates; any other
-    result is returned unchanged.
+    A2A agents usually answer with a text part. When the declared output model
+    has exactly one field, the text becomes that field's value so it validates;
+    any other result is returned unchanged.
     """
     if not isinstance(result, str):
         return result
@@ -78,21 +86,22 @@ def _tool_context_string(ctx: ToolContext, *keys: str) -> str | None:
     return None
 
 
-def _planner_state_store(ctx: ToolContext) -> Any | None:
+def _planner_state_store(ctx: ToolContext) -> object:
     candidate = ctx.tool_context.get("state_store")
     if candidate is not None:
         return candidate
-    planner = getattr(ctx, "_planner", None)
-    return getattr(planner, "_state_store", None)
+    planner = getattr(ctx, "planner", None)
+    return getattr(planner, "state_store", None)
 
 
-def _supports_keyword(func: Any, name: str) -> bool:
+def _supports_keyword(func: Callable[..., object], name: str) -> bool:
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
         return True
     return name in signature.parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
     )
 
 
@@ -118,7 +127,7 @@ async def _find_conversation_binding(
         kwargs["tenant_id"] = _tool_context_string(ctx, "tenant_id", "tenant")
     if _supports_keyword(finder, "user_id"):
         kwargs["user_id"] = _tool_context_string(ctx, "user_id")
-    binding = await finder(**kwargs)
+    binding: RemoteBinding | None = await finder(**kwargs)
     if binding is None or binding.is_terminal:
         return None
     return binding
@@ -143,7 +152,10 @@ async def _save_conversation_binding(
     router_session_id = _tool_context_string(ctx, "session_id")
     if router_session_id is None:
         return
-    trace_id = _tool_context_string(ctx, "trace_id", "_current_tool_call_id") or f"planner:{uuid.uuid4().hex}"
+    trace_id = (
+        _tool_context_string(ctx, "trace_id", "_current_tool_call_id")
+        or f"planner:{uuid.uuid4().hex}"
+    )
     await saver(
         RemoteBinding(
             trace_id=trace_id,
@@ -171,7 +183,11 @@ async def _mark_conversation_binding_terminal(
     marker = getattr(store, "mark_binding_terminal", None)
     if marker is None or binding is None or task_id is None:
         return
-    await marker(trace_id=binding.trace_id, context_id=binding.context_id, task_id=task_id)
+    await marker(
+        trace_id=binding.trace_id,
+        context_id=binding.context_id,
+        task_id=task_id,
+    )
 
 
 async def _pause_for_remote_state(
@@ -181,7 +197,7 @@ async def _pause_for_remote_state(
     skill: str,
     agent_url: str,
     reason: Literal["await_input", "approval_required"],
-) -> Any:
+) -> object:
     pause = getattr(ctx, "pause", None)
     if pause is None:
         return {
@@ -211,7 +227,7 @@ async def _handle_remote_pause_exception(
     exc: RemoteTaskInputRequired | RemoteTaskAuthRequired,
     skill: str,
     agent_url: str,
-) -> Any:
+) -> object:
     snapshot = exc.snapshot
     await _save_conversation_binding(
         ctx,
@@ -230,13 +246,49 @@ async def _handle_remote_pause_exception(
         snapshot=snapshot,
         skill=skill,
         agent_url=agent_url,
-        reason="await_input" if isinstance(exc, RemoteTaskInputRequired) else "approval_required",
+        reason="await_input"
+        if isinstance(exc, RemoteTaskInputRequired)
+        else "approval_required",
     )
 
 
-def _task_transport(transport: RemoteTransport) -> Any | None:
+@runtime_checkable
+class _TaskTransport(Protocol):
+    """The task operations the tool needs from a transport."""
+
+    async def send_task(
+        self, request: RemoteCallRequest, *, blocking: bool = False
+    ) -> RemoteTaskSnapshot:
+        """Create or continue a remote task."""
+        ...
+
+    async def get_task(
+        self,
+        *,
+        agent_url: str,
+        task_id: str,
+        history_length: int | None = None,
+    ) -> RemoteTaskSnapshot:
+        """Fetch a remote task snapshot."""
+        ...
+
+
+@runtime_checkable
+class _SubscribingTransport(Protocol):
+    """A transport that streams a remote task's updates."""
+
+    def subscribe_task(
+        self, *, agent_url: str, task_id: str
+    ) -> AsyncIterator[RemoteTaskEvent]:
+        """Subscribe to a remote task's updates."""
+        ...
+
+
+def _task_transport(transport: RemoteTransport) -> _TaskTransport | None:
     required = ("send_task", "get_task")
-    if all(callable(getattr(transport, name, None)) for name in required):
+    if isinstance(transport, _TaskTransport) and all(
+        callable(getattr(transport, name, None)) for name in required
+    ):
         return transport
     return None
 
@@ -245,12 +297,19 @@ def _should_continue_existing_task(binding: RemoteBinding | None) -> bool:
     if binding is None or binding.is_terminal:
         return False
     metadata = dict(binding.metadata or {})
-    return bool(metadata.get("awaiting_remote_input") or metadata.get("awaiting_remote_auth"))
+    return bool(
+        metadata.get("awaiting_remote_input")
+        or metadata.get("awaiting_remote_auth")
+    )
 
 
 def _raise_for_failed_task(snapshot: RemoteTaskSnapshot) -> None:
     if snapshot.status.state in _FAILED_REMOTE_STATES:
-        raise RuntimeError(f"Remote task failed: {snapshot.status.message or snapshot.status.state.value}")
+        msg = (
+            "Remote task failed: "
+            f"{snapshot.status.message or snapshot.status.state.value}"
+        )
+        raise RuntimeError(msg)
 
 
 def _event_from_snapshot(
@@ -291,14 +350,18 @@ async def _emit_remote_task_event(
     configured_sink: RemoteEventSink | None,
     event: RemoteTaskEvent,
 ) -> None:
-    """Best-effort hook for routers to bridge A2A task events into their own UI/event bus."""
+    """Forward a task event to the configured sinks (best effort).
 
+    Routers use this to bridge A2A task events into their own UI/event bus.
+    """
     sinks: list[Any] = []
     if configured_sink is not None:
         sinks.append(configured_sink)
     for key in ("a2a_remote_event_sink", "remote_task_event_sink"):
         runtime_sink = ctx.tool_context.get(key)
-        if runtime_sink is not None and not any(runtime_sink is sink for sink in sinks):
+        if runtime_sink is not None and not any(
+            runtime_sink is sink for sink in sinks
+        ):
             sinks.append(runtime_sink)
 
     for sink in sinks:
@@ -313,60 +376,76 @@ async def _emit_remote_task_event(
             continue
 
 
-async def _wait_for_task_completion(
+async def _follow_subscription(
+    transport: _SubscribingTransport,
     *,
-    transport: Any,
     ctx: ToolContext,
     agent_url: str,
     task_id: str,
     skill: str,
     stream_id: str,
     chunk_channel: str,
-    use_subscription: bool,
+    remote_event_sink: RemoteEventSink | None,
+) -> RemoteTaskSnapshot | None:
+    """Stream a task's events as chunks; return it once it is terminal."""
+    seq = 0
+    latest_snapshot: RemoteTaskSnapshot | None = None
+    async for event in transport.subscribe_task(
+        agent_url=agent_url, task_id=task_id
+    ):
+        await _emit_remote_task_event(ctx, remote_event_sink, event)
+        latest_snapshot = event.task or latest_snapshot
+        if event.text is not None:
+            chunk_meta: dict[str, Any] = {
+                "channel": chunk_channel,
+                "remote_agent_url": agent_url,
+                "remote_task_id": event.task_id or task_id,
+                "remote_context_id": event.context_id,
+                "remote_skill": skill,
+                "remote_event_kind": event.kind,
+            }
+            if event.meta:
+                chunk_meta.update(dict(event.meta))
+            await ctx.emit_chunk(
+                stream_id=stream_id,
+                seq=seq,
+                text=event.text,
+                done=event.done,
+                meta=chunk_meta,
+            )
+            seq += 1
+        if event.task is not None and event.task.is_terminal:
+            return event.task
+        if (
+            event.done
+            and latest_snapshot is not None
+            and latest_snapshot.is_terminal
+        ):
+            return latest_snapshot
+    if latest_snapshot is not None and latest_snapshot.is_terminal:
+        return latest_snapshot
+    return None
+
+
+async def _poll_task(
+    transport: _TaskTransport,
+    *,
+    ctx: ToolContext,
+    agent_url: str,
+    task_id: str,
     poll_interval_s: float,
     max_poll_attempts: int,
     remote_event_sink: RemoteEventSink | None,
 ) -> RemoteTaskSnapshot:
-    seq = 0
-    if use_subscription and callable(getattr(transport, "subscribe_task", None)):
-        latest_snapshot: RemoteTaskSnapshot | None = None
-        try:
-            async for event in transport.subscribe_task(agent_url=agent_url, task_id=task_id):
-                await _emit_remote_task_event(ctx, remote_event_sink, event)
-                latest_snapshot = event.task or latest_snapshot
-                if event.text is not None:
-                    chunk_meta: dict[str, Any] = {
-                        "channel": chunk_channel,
-                        "remote_agent_url": agent_url,
-                        "remote_task_id": event.task_id or task_id,
-                        "remote_context_id": event.context_id,
-                        "remote_skill": skill,
-                        "remote_event_kind": event.kind,
-                    }
-                    if event.meta:
-                        chunk_meta.update(dict(event.meta))
-                    await ctx.emit_chunk(
-                        stream_id=stream_id,
-                        seq=seq,
-                        text=event.text,
-                        done=event.done,
-                        meta=chunk_meta,
-                    )
-                    seq += 1
-                if event.task is not None and event.task.is_terminal:
-                    return event.task
-                if event.done and latest_snapshot is not None and latest_snapshot.is_terminal:
-                    return latest_snapshot
-            if latest_snapshot is not None and latest_snapshot.is_terminal:
-                return latest_snapshot
-        except RuntimeError:
-            # Some agents expose task polling but reject subscription when streaming is disabled.
-            pass
-
+    """Poll a task until it ends, needs input or runs out of attempts."""
     last_poll_signature: tuple[Any, ...] | None = None
     for _ in range(max_poll_attempts):
-        snapshot = await transport.get_task(agent_url=agent_url, task_id=task_id)
-        event = _event_from_snapshot(snapshot, kind="status", agent_url=agent_url)
+        snapshot = await transport.get_task(
+            agent_url=agent_url, task_id=task_id
+        )
+        event = _event_from_snapshot(
+            snapshot, kind="status", agent_url=agent_url
+        )
         signature = _remote_event_signature(event)
         if signature != last_poll_signature:
             await _emit_remote_task_event(ctx, remote_event_sink, event)
@@ -384,6 +463,62 @@ async def _wait_for_task_completion(
     return snapshot
 
 
+async def _wait_for_task_completion(
+    *,
+    transport: _TaskTransport,
+    ctx: ToolContext,
+    agent_url: str,
+    task_id: str,
+    skill: str,
+    stream_id: str,
+    chunk_channel: str,
+    use_subscription: bool,
+    poll_interval_s: float,
+    max_poll_attempts: int,
+    remote_event_sink: RemoteEventSink | None,
+) -> RemoteTaskSnapshot:
+    if (
+        use_subscription
+        and isinstance(transport, _SubscribingTransport)
+        and callable(transport.subscribe_task)
+    ):
+        try:
+            snapshot = await _follow_subscription(
+                transport,
+                ctx=ctx,
+                agent_url=agent_url,
+                task_id=task_id,
+                skill=skill,
+                stream_id=stream_id,
+                chunk_channel=chunk_channel,
+                remote_event_sink=remote_event_sink,
+            )
+        except RuntimeError:
+            # Some agents expose task polling but reject subscription when
+            # streaming is disabled.
+            snapshot = None
+        if snapshot is not None:
+            return snapshot
+    return await _poll_task(
+        transport,
+        ctx=ctx,
+        agent_url=agent_url,
+        task_id=task_id,
+        poll_interval_s=poll_interval_s,
+        max_poll_attempts=max_poll_attempts,
+        remote_event_sink=remote_event_sink,
+    )
+
+
+def _merge_present(
+    target: dict[str, Any], items: Iterable[tuple[str, object]]
+) -> None:
+    """Copy the items whose value is not ``None`` into ``target``."""
+    for key, value in items:
+        if value is not None:
+            target[key] = value
+
+
 def _merge_metadata(
     *,
     base: Mapping[str, Any] | None,
@@ -394,31 +529,21 @@ def _merge_metadata(
     args: BaseModel,
 ) -> Mapping[str, Any] | None:
     merged: dict[str, Any] = dict(base or {})
-    for key in include_tool_context_keys:
-        if key in merged:
-            continue
-        value = ctx.tool_context.get(key)
-        if value is None:
-            continue
-        merged[key] = value
-
+    _merge_present(
+        merged,
+        (
+            (key, ctx.tool_context.get(key))
+            for key in include_tool_context_keys
+            if key not in merged
+        ),
+    )
     if override:
-        for key, value in override.items():
-            if value is None:
-                continue
-            merged[key] = value
-
+        _merge_present(merged, override.items())
     if builder is not None:
         extra = builder(args, ctx)
         if extra:
-            for key, value in extra.items():
-                if value is None:
-                    continue
-                merged[key] = value
-
-    if not merged:
-        return None
-    return merged
+            _merge_present(merged, extra.items())
+    return merged or None
 
 
 @dataclass(slots=True)
@@ -431,7 +556,12 @@ class A2AAgentToolset:
 
     default_timeout_s: float | None = None
     default_metadata: Mapping[str, Any] | None = None
-    include_tool_context_keys: Sequence[str] = ("tenant", "session_id", "task_id", "user_id")
+    include_tool_context_keys: Sequence[str] = (
+        "tenant",
+        "session_id",
+        "task_id",
+        "user_id",
+    )
 
     def tool(
         self,
@@ -457,221 +587,29 @@ class A2AAgentToolset:
         max_poll_attempts: int = 120,
         remote_event_sink: RemoteEventSink | None = None,
     ) -> NodeSpec:
-        """Build a :class:`~penguiflow.catalog.NodeSpec` that calls the remote agent."""
+        """Build a :class:`~penguiflow.catalog.NodeSpec` calling the agent."""
+        remote_tool = _RemoteTool(
+            toolset=self,
+            name=name,
+            skill=skill,
+            out_model=out_model,
+            streaming=streaming,
+            timeout_s=timeout_s,
+            metadata=metadata,
+            metadata_builder=metadata_builder,
+            payload_builder=payload_builder,
+            cancel_on_cancel=cancel_on_cancel,
+            chunk_channel=chunk_channel,
+            execution_mode=execution_mode,
+            use_subscription=use_subscription,
+            poll_interval_s=poll_interval_s,
+            max_poll_attempts=max_poll_attempts,
+            remote_event_sink=remote_event_sink,
+        )
 
-        async def _impl(args: ArgsModelT, ctx: ToolContext) -> Any:
-            payload = payload_builder(args, ctx) if payload_builder is not None else args.model_dump(mode="json")
-            headers = Headers(tenant=_resolve_tenant(ctx))
-            message = Message(payload=payload, headers=headers)
-            merged_metadata = _merge_metadata(
-                base=self.default_metadata,
-                ctx=ctx,
-                include_tool_context_keys=self.include_tool_context_keys,
-                override=metadata,
-                builder=metadata_builder,
-                args=args,
-            )
-            existing_binding = await _find_conversation_binding(ctx, agent_url=self.agent_url, skill=skill)
-            existing_task_id = (
-                existing_binding.task_id
-                if existing_binding is not None and _should_continue_existing_task(existing_binding)
-                else None
-            )
-
-            request = RemoteCallRequest(
-                message=message,
-                skill=skill,
-                agent_url=self.agent_url,
-                agent_card=self.agent_card,
-                metadata=merged_metadata,
-                timeout_s=timeout_s or self.default_timeout_s,
-                context_id=existing_binding.context_id if existing_binding is not None else None,
-                task_id=existing_task_id,
-            )
-
-            task_transport = _task_transport(self.transport)
-            resolved_execution = execution_mode
-            if resolved_execution == "auto":
-                if streaming:
-                    resolved_execution = "stream"
-                else:
-                    resolved_execution = "blocking"
-            elif resolved_execution == "task" and task_transport is None:
-                resolved_execution = "blocking"
-
-            if resolved_execution == "task" and task_transport is not None:
-                snapshot = await task_transport.send_task(request, blocking=False)
-                await _emit_remote_task_event(
-                    ctx,
-                    remote_event_sink,
-                    _event_from_snapshot(snapshot, kind="task", agent_url=self.agent_url),
-                )
-                _raise_for_failed_task(snapshot)
-                await _save_conversation_binding(
-                    ctx,
-                    agent_url=snapshot.agent_url or self.agent_url,
-                    skill=skill,
-                    context_id=snapshot.context_id or request.context_id,
-                    task_id=snapshot.task_id,
-                    is_terminal=False,
-                    metadata={
-                        "remote_task_state": snapshot.status.state.value,
-                        "remote_task_terminal": snapshot.is_terminal,
-                        "awaiting_remote_input": snapshot.status.state is RemoteTaskState.INPUT_REQUIRED,
-                        "awaiting_remote_auth": snapshot.status.state is RemoteTaskState.AUTH_REQUIRED,
-                    },
-                )
-                if snapshot.status.state is RemoteTaskState.INPUT_REQUIRED:
-                    return await _pause_for_remote_state(
-                        ctx,
-                        snapshot=snapshot,
-                        skill=skill,
-                        agent_url=snapshot.agent_url or self.agent_url,
-                        reason="await_input",
-                    )
-                if snapshot.status.state is RemoteTaskState.AUTH_REQUIRED:
-                    return await _pause_for_remote_state(
-                        ctx,
-                        snapshot=snapshot,
-                        skill=skill,
-                        agent_url=snapshot.agent_url or self.agent_url,
-                        reason="approval_required",
-                    )
-                if not snapshot.is_terminal:
-                    snapshot = await _wait_for_task_completion(
-                        transport=task_transport,
-                        ctx=ctx,
-                        agent_url=snapshot.agent_url or self.agent_url,
-                        task_id=snapshot.task_id,
-                        skill=skill,
-                        stream_id=f"a2a:{name}:{uuid.uuid4().hex}",
-                        chunk_channel=chunk_channel,
-                        use_subscription=use_subscription,
-                        poll_interval_s=poll_interval_s,
-                        max_poll_attempts=max_poll_attempts,
-                        remote_event_sink=remote_event_sink,
-                    )
-                    _raise_for_failed_task(snapshot)
-                    await _save_conversation_binding(
-                        ctx,
-                        agent_url=snapshot.agent_url or self.agent_url,
-                        skill=skill,
-                        context_id=snapshot.context_id or request.context_id,
-                        task_id=snapshot.task_id,
-                        is_terminal=False,
-                        metadata={
-                            "remote_task_state": snapshot.status.state.value,
-                            "remote_task_terminal": snapshot.is_terminal,
-                        },
-                    )
-                if snapshot.status.state is RemoteTaskState.INPUT_REQUIRED:
-                    return await _pause_for_remote_state(
-                        ctx,
-                        snapshot=snapshot,
-                        skill=skill,
-                        agent_url=snapshot.agent_url or self.agent_url,
-                        reason="await_input",
-                    )
-                if snapshot.status.state is RemoteTaskState.AUTH_REQUIRED:
-                    return await _pause_for_remote_state(
-                        ctx,
-                        snapshot=snapshot,
-                        skill=skill,
-                        agent_url=snapshot.agent_url or self.agent_url,
-                        reason="approval_required",
-                    )
-                return _coerce_text_result(snapshot.result, out_model)
-
-            if resolved_execution == "blocking":
-                try:
-                    result = await self.transport.send(request)
-                except (RemoteTaskInputRequired, RemoteTaskAuthRequired) as exc:
-                    return await _handle_remote_pause_exception(
-                        ctx,
-                        exc=exc,
-                        skill=skill,
-                        agent_url=self.agent_url,
-                    )
-                await _save_conversation_binding(
-                    ctx,
-                    agent_url=result.agent_url or self.agent_url,
-                    skill=skill,
-                    context_id=result.context_id or request.context_id,
-                    task_id=result.task_id,
-                    is_terminal=False,
-                    metadata=dict(result.meta or {}),
-                )
-                return _coerce_text_result(result.result, out_model)
-
-            stream_id = f"a2a:{name}:{uuid.uuid4().hex}"
-            seq = 0
-            remote_task_id: str | None = None
-            remote_context_id: str | None = request.context_id
-            remote_agent_url: str = self.agent_url
-            try:
-                async for event in self.transport.stream(request):
-                    if event.task_id is not None:
-                        remote_task_id = event.task_id
-                    if event.context_id is not None:
-                        remote_context_id = event.context_id
-                    if event.agent_url is not None:
-                        remote_agent_url = event.agent_url
-
-                    if event.text is not None:
-                        meta: dict[str, Any] = {
-                            "channel": chunk_channel,
-                            "remote_agent_url": remote_agent_url,
-                            "remote_task_id": remote_task_id,
-                            "remote_context_id": remote_context_id,
-                            "remote_skill": skill,
-                        }
-                        if event.meta:
-                            meta.update(dict(event.meta))
-                        await ctx.emit_chunk(
-                            stream_id=stream_id,
-                            seq=seq,
-                            text=event.text,
-                            done=event.done,
-                            meta=meta,
-                        )
-                        seq += 1
-
-                    if event.result is not None:
-                        await _save_conversation_binding(
-                            ctx,
-                            agent_url=remote_agent_url,
-                            skill=skill,
-                            context_id=remote_context_id,
-                            task_id=remote_task_id,
-                            is_terminal=False,
-                        )
-                        return _coerce_text_result(event.result, out_model)
-                await _save_conversation_binding(
-                    ctx,
-                    agent_url=remote_agent_url,
-                    skill=skill,
-                    context_id=remote_context_id,
-                    task_id=remote_task_id,
-                    is_terminal=False,
-                )
-                return None
-            except (RemoteTaskInputRequired, RemoteTaskAuthRequired) as exc:
-                return await _handle_remote_pause_exception(
-                    ctx,
-                    exc=exc,
-                    skill=skill,
-                    agent_url=remote_agent_url,
-                )
-            except asyncio.CancelledError:
-                if cancel_on_cancel and remote_task_id is not None:
-                    try:
-                        await self.transport.cancel(agent_url=self.agent_url, task_id=remote_task_id)
-                    except Exception:
-                        # Cancellation is best-effort; preserve local cancellation.
-                        pass
-                raise
-
-        node = Node(_impl, name=name, policy=NodePolicy(validate="none"))
+        node = Node(
+            remote_tool.run, name=name, policy=NodePolicy(validate="none")
+        )
         return NodeSpec(
             node=node,
             name=name,
@@ -688,6 +626,289 @@ class A2AAgentToolset:
                     "streaming": streaming,
                 }
             },
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _RemoteTool:
+    """One remote skill exposed as a planner tool (see ``tool()``)."""
+
+    toolset: A2AAgentToolset
+    name: str
+    skill: str
+    out_model: type[BaseModel]
+    streaming: bool
+    timeout_s: float | None
+    metadata: Mapping[str, Any] | None
+    metadata_builder: MetadataBuilder | None
+    payload_builder: PayloadBuilder | None
+    cancel_on_cancel: bool
+    chunk_channel: str
+    execution_mode: ExecutionMode
+    use_subscription: bool
+    poll_interval_s: float
+    max_poll_attempts: int
+    remote_event_sink: RemoteEventSink | None
+
+    async def run(self, args: BaseModel, ctx: ToolContext) -> object:
+        """Call the remote skill with ``args``; return its result."""
+        request = await self._request(args, ctx)
+        task_transport = _task_transport(self.toolset.transport)
+        execution = self.execution_mode
+        if execution == "auto":
+            execution = "stream" if self.streaming else "blocking"
+        if execution == "task" and task_transport is not None:
+            return await self._run_task(task_transport, request, ctx)
+        if execution in {"blocking", "task"}:
+            return await self._run_blocking(request, ctx)
+        return await self._run_stream(request, ctx)
+
+    async def _request(
+        self, args: BaseModel, ctx: ToolContext
+    ) -> RemoteCallRequest:
+        """Build the remote call, continuing a bound conversation."""
+        toolset = self.toolset
+        payload = (
+            self.payload_builder(args, ctx)
+            if self.payload_builder is not None
+            else args.model_dump(mode="json")
+        )
+        headers = Headers(tenant=_resolve_tenant(ctx))
+        merged_metadata = _merge_metadata(
+            base=toolset.default_metadata,
+            ctx=ctx,
+            include_tool_context_keys=toolset.include_tool_context_keys,
+            override=self.metadata,
+            builder=self.metadata_builder,
+            args=args,
+        )
+        existing_binding = await _find_conversation_binding(
+            ctx, agent_url=toolset.agent_url, skill=self.skill
+        )
+        existing_task_id = (
+            existing_binding.task_id
+            if existing_binding is not None
+            and _should_continue_existing_task(existing_binding)
+            else None
+        )
+        return RemoteCallRequest(
+            message=Message(payload=payload, headers=headers),
+            skill=self.skill,
+            agent_url=toolset.agent_url,
+            agent_card=toolset.agent_card,
+            metadata=merged_metadata,
+            timeout_s=self.timeout_s or toolset.default_timeout_s,
+            context_id=existing_binding.context_id
+            if existing_binding is not None
+            else None,
+            task_id=existing_task_id,
+        )
+
+    async def _save_task_binding(
+        self,
+        ctx: ToolContext,
+        snapshot: RemoteTaskSnapshot,
+        request: RemoteCallRequest,
+        *,
+        awaiting_flags: bool,
+    ) -> None:
+        """Remember the remote task for the conversation."""
+        state = snapshot.status.state
+        metadata: dict[str, Any] = {
+            "remote_task_state": state.value,
+            "remote_task_terminal": snapshot.is_terminal,
+        }
+        if awaiting_flags:
+            metadata["awaiting_remote_input"] = (
+                state is RemoteTaskState.INPUT_REQUIRED
+            )
+            metadata["awaiting_remote_auth"] = (
+                state is RemoteTaskState.AUTH_REQUIRED
+            )
+        await _save_conversation_binding(
+            ctx,
+            agent_url=snapshot.agent_url or self.toolset.agent_url,
+            skill=self.skill,
+            context_id=snapshot.context_id or request.context_id,
+            task_id=snapshot.task_id,
+            is_terminal=False,
+            metadata=metadata,
+        )
+
+    async def _pause_if_waiting(
+        self, ctx: ToolContext, snapshot: RemoteTaskSnapshot
+    ) -> object | None:
+        """Pause when the remote task needs input or auth; else ``None``."""
+        state = snapshot.status.state
+        if state is RemoteTaskState.INPUT_REQUIRED:
+            reason: Literal["await_input", "approval_required"] = "await_input"
+        elif state is RemoteTaskState.AUTH_REQUIRED:
+            reason = "approval_required"
+        else:
+            return None
+        return await _pause_for_remote_state(
+            ctx,
+            snapshot=snapshot,
+            skill=self.skill,
+            agent_url=snapshot.agent_url or self.toolset.agent_url,
+            reason=reason,
+        )
+
+    async def _run_task(
+        self,
+        transport: _TaskTransport,
+        request: RemoteCallRequest,
+        ctx: ToolContext,
+    ) -> object:
+        """Run the call as a remote task, waiting for it to finish."""
+        snapshot = await transport.send_task(request, blocking=False)
+        await _emit_remote_task_event(
+            ctx,
+            self.remote_event_sink,
+            _event_from_snapshot(
+                snapshot, kind="task", agent_url=self.toolset.agent_url
+            ),
+        )
+        _raise_for_failed_task(snapshot)
+        await self._save_task_binding(
+            ctx, snapshot, request, awaiting_flags=True
+        )
+        paused = await self._pause_if_waiting(ctx, snapshot)
+        if paused is not None:
+            return paused
+        if not snapshot.is_terminal:
+            snapshot = await _wait_for_task_completion(
+                transport=transport,
+                ctx=ctx,
+                agent_url=snapshot.agent_url or self.toolset.agent_url,
+                task_id=snapshot.task_id,
+                skill=self.skill,
+                stream_id=f"a2a:{self.name}:{uuid.uuid4().hex}",
+                chunk_channel=self.chunk_channel,
+                use_subscription=self.use_subscription,
+                poll_interval_s=self.poll_interval_s,
+                max_poll_attempts=self.max_poll_attempts,
+                remote_event_sink=self.remote_event_sink,
+            )
+            _raise_for_failed_task(snapshot)
+            await self._save_task_binding(
+                ctx, snapshot, request, awaiting_flags=False
+            )
+        paused = await self._pause_if_waiting(ctx, snapshot)
+        if paused is not None:
+            return paused
+        return _coerce_text_result(snapshot.result, self.out_model)
+
+    async def _run_blocking(
+        self, request: RemoteCallRequest, ctx: ToolContext
+    ) -> object:
+        """Run the call and wait for its result."""
+        try:
+            result = await self.toolset.transport.send(request)
+        except (RemoteTaskInputRequired, RemoteTaskAuthRequired) as exc:
+            return await _handle_remote_pause_exception(
+                ctx,
+                exc=exc,
+                skill=self.skill,
+                agent_url=self.toolset.agent_url,
+            )
+        await _save_conversation_binding(
+            ctx,
+            agent_url=result.agent_url or self.toolset.agent_url,
+            skill=self.skill,
+            context_id=result.context_id or request.context_id,
+            task_id=result.task_id,
+            is_terminal=False,
+            metadata=dict(result.meta or {}),
+        )
+        return _coerce_text_result(result.result, self.out_model)
+
+    async def _run_stream(
+        self, request: RemoteCallRequest, ctx: ToolContext
+    ) -> object:
+        """Run the call streaming its text as chunks."""
+        stream = _RemoteStream(
+            tool=self,
+            ctx=ctx,
+            stream_id=f"a2a:{self.name}:{uuid.uuid4().hex}",
+            context_id=request.context_id,
+            agent_url=self.toolset.agent_url,
+        )
+        try:
+            async for event in self.toolset.transport.stream(request):
+                await stream.handle(event)
+                if event.result is not None:
+                    await stream.save_binding()
+                    return _coerce_text_result(event.result, self.out_model)
+            await stream.save_binding()
+        except (RemoteTaskInputRequired, RemoteTaskAuthRequired) as exc:
+            return await _handle_remote_pause_exception(
+                ctx,
+                exc=exc,
+                skill=self.skill,
+                agent_url=stream.agent_url,
+            )
+        except asyncio.CancelledError:
+            if self.cancel_on_cancel and stream.task_id is not None:
+                # Cancellation is best-effort; preserve local cancellation.
+                with contextlib.suppress(Exception):
+                    await self.toolset.transport.cancel(
+                        agent_url=self.toolset.agent_url,
+                        task_id=stream.task_id,
+                    )
+            raise
+        return None
+
+
+@dataclass(slots=True)
+class _RemoteStream:
+    """Tracks a streamed remote call and forwards its text chunks."""
+
+    tool: _RemoteTool
+    ctx: ToolContext
+    stream_id: str
+    context_id: str | None
+    agent_url: str
+    task_id: str | None = None
+    seq: int = 0
+
+    async def handle(self, event: RemoteStreamEvent) -> None:
+        """Track the event's task and emit its text as a chunk."""
+        if event.task_id is not None:
+            self.task_id = event.task_id
+        if event.context_id is not None:
+            self.context_id = event.context_id
+        if event.agent_url is not None:
+            self.agent_url = event.agent_url
+        if event.text is None:
+            return
+        meta: dict[str, Any] = {
+            "channel": self.tool.chunk_channel,
+            "remote_agent_url": self.agent_url,
+            "remote_task_id": self.task_id,
+            "remote_context_id": self.context_id,
+            "remote_skill": self.tool.skill,
+        }
+        if event.meta:
+            meta.update(dict(event.meta))
+        await self.ctx.emit_chunk(
+            stream_id=self.stream_id,
+            seq=self.seq,
+            text=event.text,
+            done=event.done,
+            meta=meta,
+        )
+        self.seq += 1
+
+    async def save_binding(self) -> None:
+        """Remember the remote conversation for follow-up calls."""
+        await _save_conversation_binding(
+            self.ctx,
+            agent_url=self.agent_url,
+            skill=self.tool.skill,
+            context_id=self.context_id,
+            task_id=self.task_id,
+            is_terminal=False,
         )
 
 

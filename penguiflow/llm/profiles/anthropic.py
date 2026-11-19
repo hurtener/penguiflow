@@ -52,7 +52,8 @@ PROFILES: dict[str, ModelProfile] = {
     # Claude 4.5 family (latest)
     "claude-opus-4-5": ModelProfile(
         supports_schema_guided_output=True,
-        supports_json_only_output=False,  # Anthropic uses tool_use for structured output
+        # Anthropic uses tool_use for structured output
+        supports_json_only_output=False,
         supports_tools=True,
         supports_reasoning=True,  # Supports extended thinking
         supports_streaming=True,

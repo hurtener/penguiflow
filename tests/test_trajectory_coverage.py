@@ -1,5 +1,7 @@
 """Tests for penguiflow/planner/trajectory.py edge cases."""
 
+from __future__ import annotations
+
 from pydantic import BaseModel
 
 from penguiflow.llm.types import ImagePart
@@ -16,7 +18,7 @@ from penguiflow.planner.trajectory import (
 # ─── TrajectorySummary tests ─────────────────────────────────────────────────
 
 
-def test_trajectory_summary_compact_with_note():
+def test_trajectory_summary_compact_with_note() -> None:
     """compact() should include note when present."""
     summary = TrajectorySummary(
         goals=["goal1"],
@@ -31,7 +33,7 @@ def test_trajectory_summary_compact_with_note():
     assert result["note"] == "important note"
 
 
-def test_trajectory_summary_compact_without_note():
+def test_trajectory_summary_compact_without_note() -> None:
     """compact() should exclude note when None."""
     summary = TrajectorySummary(goals=["goal1"])
     result = summary.compact()
@@ -42,7 +44,7 @@ def test_trajectory_summary_compact_without_note():
 # ─── TrajectoryStep tests ────────────────────────────────────────────────────
 
 
-def test_trajectory_step_dump_with_llm_observation():
+def test_trajectory_step_dump_with_llm_observation() -> None:
     """dump() should include llm_observation when present."""
     action = PlannerAction(thought="test thought", next_node="test_node")
     step = TrajectoryStep(
@@ -55,7 +57,7 @@ def test_trajectory_step_dump_with_llm_observation():
     assert result["llm_observation"] == {"redacted": "data"}
 
 
-def test_trajectory_step_dump_with_failure():
+def test_trajectory_step_dump_with_failure() -> None:
     """dump() should include failure when present."""
     action = PlannerAction(thought="test thought", next_node="test_node")
     step = TrajectoryStep(
@@ -67,7 +69,7 @@ def test_trajectory_step_dump_with_failure():
     assert result["failure"] == {"error": "details", "traceback": "stack"}
 
 
-def test_trajectory_step_dump_with_streams():
+def test_trajectory_step_dump_with_streams() -> None:
     """dump() should include streams when present."""
     action = PlannerAction(thought="test thought", next_node="test_node")
     step = TrajectoryStep(
@@ -79,10 +81,13 @@ def test_trajectory_step_dump_with_streams():
     result = step.dump()
 
     assert "streams" in result
-    assert result["streams"]["stream1"] == [{"text": "chunk1"}, {"text": "chunk2"}]
+    assert result["streams"]["stream1"] == [
+        {"text": "chunk1"},
+        {"text": "chunk2"},
+    ]
 
 
-def test_trajectory_step_serialize_observation_basemodel():
+def test_trajectory_step_serialize_observation_basemodel() -> None:
     """_serialise_observation should handle BaseModel."""
     action = PlannerAction(thought="test thought", next_node="test_node")
 
@@ -94,12 +99,12 @@ def test_trajectory_step_serialize_observation_basemodel():
         action=action,
         observation=MyModel(data="test", count=42),
     )
-    result = step._serialise_observation()
+    result = step.serialise_for_llm()
 
     assert result == {"data": "test", "count": 42}
 
 
-def test_trajectory_step_serialise_for_llm_with_llm_observation():
+def test_trajectory_step_serialise_for_llm_with_llm_observation() -> None:
     """serialise_for_llm should prefer llm_observation."""
     action = PlannerAction(thought="test thought", next_node="test_node")
     step = TrajectoryStep(
@@ -112,7 +117,7 @@ def test_trajectory_step_serialise_for_llm_with_llm_observation():
     assert result == {"redacted": "data"}
 
 
-def test_trajectory_step_serialise_for_llm_without_llm_observation():
+def test_trajectory_step_serialise_for_llm_without_llm_observation() -> None:
     """serialise_for_llm should fallback to observation."""
     action = PlannerAction(thought="test thought", next_node="test_node")
     step = TrajectoryStep(
@@ -127,8 +132,8 @@ def test_trajectory_step_serialise_for_llm_without_llm_observation():
 # ─── Trajectory tests ────────────────────────────────────────────────────────
 
 
-def test_trajectory_serialise_with_nonserializable_tool_context():
-    """serialise should handle non-JSON-serializable tool_context."""
+def test_trajectory_serialise_with_nonserializable_tool_context() -> None:
+    """Serialise should handle non-JSON-serializable tool_context."""
     trajectory = Trajectory(
         query="test query",
         tool_context={"func": lambda x: x},  # Not JSON serializable
@@ -139,8 +144,8 @@ def test_trajectory_serialise_with_nonserializable_tool_context():
     assert result["tool_context"] is None
 
 
-def test_trajectory_serialise_with_summary():
-    """serialise should include summary when present."""
+def test_trajectory_serialise_with_summary() -> None:
+    """Serialise should include summary when present."""
     trajectory = Trajectory(query="test query")
     trajectory.summary = TrajectorySummary(goals=["goal1"])
     result = trajectory.serialise()
@@ -149,7 +154,7 @@ def test_trajectory_serialise_with_summary():
     assert result["summary"]["goals"] == ["goal1"]
 
 
-def test_trajectory_from_serialised_with_summary():
+def test_trajectory_from_serialised_with_summary() -> None:
     """from_serialised should restore summary."""
     payload = {
         "query": "test",
@@ -162,7 +167,7 @@ def test_trajectory_from_serialised_with_summary():
     assert trajectory.summary.goals == ["restored goal"]
 
 
-def test_trajectory_from_serialised_with_sources():
+def test_trajectory_from_serialised_with_sources() -> None:
     """from_serialised should restore sources."""
     payload = {
         "query": "test",
@@ -175,7 +180,7 @@ def test_trajectory_from_serialised_with_sources():
     assert trajectory.sources[0]["url"] == "http://example.com"
 
 
-def test_trajectory_from_serialised_with_invalid_sources():
+def test_trajectory_from_serialised_with_invalid_sources() -> None:
     """from_serialised should skip invalid sources."""
     payload = {
         "query": "test",
@@ -188,7 +193,7 @@ def test_trajectory_from_serialised_with_invalid_sources():
     assert trajectory.sources[0]["valid"] == "source"
 
 
-def test_trajectory_from_serialised_with_streams():
+def test_trajectory_from_serialised_with_streams() -> None:
     """from_serialised should restore streams in steps."""
     payload = {
         "query": "test",
@@ -208,7 +213,8 @@ def test_trajectory_from_serialised_with_streams():
     assert "stream1" in trajectory.steps[0].streams
 
 
-def test_background_result_roundtrip_and_extract():
+def test_background_result_roundtrip_and_extract() -> None:
+    """Background result roundtrip and extract."""
     result = BackgroundTaskResult(
         task_id="t-bg",
         summary="done",
@@ -229,7 +235,8 @@ def test_background_result_roundtrip_and_extract():
     assert "t-bg" in extracted
 
 
-def test_coerce_background_results_and_consumption():
+def test_coerce_background_results_and_consumption() -> None:
+    """Coerce background results and consumption."""
     payload = {"task_id": "t2", "digest": ["ok"], "artifacts": []}
     results = coerce_background_results([payload])
     assert "t2" in results
@@ -242,9 +249,12 @@ def test_coerce_background_results_and_consumption():
     assert removed == 1
 
 
-def test_trajectory_serialise_includes_background_results():
+def test_trajectory_serialise_includes_background_results() -> None:
+    """Trajectory serialise includes background results."""
     trajectory = Trajectory(query="test")
-    trajectory.add_background_result(BackgroundTaskResult(task_id="t3", summary="ok"))
+    trajectory.add_background_result(
+        BackgroundTaskResult(task_id="t3", summary="ok")
+    )
     payload = trajectory.serialise()
     assert "background_results" in payload
 
@@ -252,7 +262,7 @@ def test_trajectory_serialise_includes_background_results():
     assert "t3" in restored.background_results
 
 
-def test_trajectory_from_serialised_with_invalid_stream_chunks():
+def test_trajectory_from_serialised_with_invalid_stream_chunks() -> None:
     """from_serialised should skip invalid stream chunks."""
     payload = {
         "query": "test",
@@ -268,10 +278,13 @@ def test_trajectory_from_serialised_with_invalid_stream_chunks():
     trajectory = Trajectory.from_serialised(payload)
 
     # Should have empty streams dict since the stream was invalid
-    assert trajectory.steps[0].streams == {} or trajectory.steps[0].streams is None
+    assert (
+        trajectory.steps[0].streams == {}
+        or trajectory.steps[0].streams is None
+    )
 
 
-def test_trajectory_from_serialised_with_legacy_context_meta():
+def test_trajectory_from_serialised_with_legacy_context_meta() -> None:
     """from_serialised should handle legacy context_meta field."""
     payload = {
         "query": "test",
@@ -283,7 +296,7 @@ def test_trajectory_from_serialised_with_legacy_context_meta():
     assert trajectory.llm_context == {"legacy": "context"}
 
 
-def test_trajectory_from_serialised_with_invalid_tool_context():
+def test_trajectory_from_serialised_with_invalid_tool_context() -> None:
     """from_serialised should handle non-mapping tool_context."""
     payload = {
         "query": "test",
@@ -295,11 +308,13 @@ def test_trajectory_from_serialised_with_invalid_tool_context():
     assert trajectory.tool_context == {}
 
 
-def test_trajectory_compress_with_error():
-    """compress should capture last error."""
+def test_trajectory_compress_with_error() -> None:
+    """Compress should capture last error."""
     trajectory = Trajectory(query="test query")
     action = PlannerAction(thought="test", next_node="failing_node")
-    trajectory.steps.append(TrajectoryStep(action=action, error="Something failed"))
+    trajectory.steps.append(
+        TrajectoryStep(action=action, error="Something failed")
+    )
 
     summary = trajectory.compress()
 
@@ -307,22 +322,26 @@ def test_trajectory_compress_with_error():
     assert summary.facts["last_error"] == "Something failed"
 
 
-def test_trajectory_compress_with_retry_pending():
-    """compress should add pending retry for error steps."""
+def test_trajectory_compress_with_retry_pending() -> None:
+    """Compress should add pending retry for error steps."""
     trajectory = Trajectory(query="test query")
     action = PlannerAction(thought="test", next_node="node_to_retry")
-    trajectory.steps.append(TrajectoryStep(action=action, error="Error occurred"))
+    trajectory.steps.append(
+        TrajectoryStep(action=action, error="Error occurred")
+    )
 
     summary = trajectory.compress()
 
     assert "retry node_to_retry" in summary.pending
 
 
-def test_trajectory_compress_with_observation():
-    """compress should capture last observation digest."""
+def test_trajectory_compress_with_observation() -> None:
+    """Compress should capture last observation digest."""
     trajectory = Trajectory(query="test query")
     action = PlannerAction(thought="test", next_node="test_node")
-    trajectory.steps.append(TrajectoryStep(action=action, observation={"result": "data"}))
+    trajectory.steps.append(
+        TrajectoryStep(action=action, observation={"result": "data"})
+    )
 
     summary = trajectory.compress()
 
@@ -330,32 +349,41 @@ def test_trajectory_compress_with_observation():
     assert "result" in summary.last_output_digest
 
 
-def test_trajectory_input_parts_are_stubbed_in_serialise_and_summary():
+def test_trajectory_input_parts_are_stubbed_in_serialise_and_summary() -> None:
     """Multimodal inputs should preserve metadata without raw bytes."""
     raw = b"\x89PNG\r\nraw-bytes"
     trajectory = Trajectory(
         query="describe",
-        input_parts=(ImagePart(data=raw, media_type="image/png", detail="high"),),
+        input_parts=(
+            ImagePart(data=raw, media_type="image/png", detail="high"),
+        ),
     )
 
     serialised = trajectory.serialise()
     summary = trajectory.compress()
 
     assert serialised["input_parts"] == [
-        {"type": "image", "media_type": "image/png", "bytes": len(raw), "detail": "high"}
+        {
+            "type": "image",
+            "media_type": "image/png",
+            "bytes": len(raw),
+            "detail": "high",
+        }
     ]
     assert summary.facts["input_parts"] == serialised["input_parts"]
     assert "raw-bytes" not in str(serialised)
     assert "raw-bytes" not in str(summary.compact())
 
 
-def test_trajectory_compress_with_long_observation():
-    """compress should truncate long observation digest."""
+def test_trajectory_compress_with_long_observation() -> None:
+    """Compress should truncate long observation digest."""
     trajectory = Trajectory(query="test query")
     action = PlannerAction(thought="test", next_node="test_node")
     # Create observation that will produce > 120 char digest
     long_data = {"result": "x" * 200}
-    trajectory.steps.append(TrajectoryStep(action=action, observation=long_data))
+    trajectory.steps.append(
+        TrajectoryStep(action=action, observation=long_data)
+    )
 
     summary = trajectory.compress()
 

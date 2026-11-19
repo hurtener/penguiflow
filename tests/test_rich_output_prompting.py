@@ -1,3 +1,5 @@
+"""Tests for rich output prompting."""
+
 from __future__ import annotations
 
 from penguiflow.rich_output.prompting import generate_component_system_prompt
@@ -5,6 +7,7 @@ from penguiflow.rich_output.registry import get_registry
 
 
 def test_prompt_includes_components() -> None:
+    """Prompt includes components."""
     registry = get_registry()
     prompt = generate_component_system_prompt(registry)
     assert "render_component" in prompt
@@ -21,10 +24,15 @@ def test_prompt_includes_components() -> None:
 
 
 def test_prompt_respects_allowlist() -> None:
+    """Prompt respects allowlist."""
     registry = get_registry()
-    prompt = generate_component_system_prompt(registry, allowlist=["markdown"], include_examples=False)
+    prompt = generate_component_system_prompt(
+        registry, allowlist=["markdown"], include_examples=False
+    )
     assert "`markdown`" in prompt
     assert "`echarts`" not in prompt
     assert "build_chart_echarts" not in prompt
     assert 'next_node="parallel"' not in prompt
-    assert "When no typed builder tools are available in this runtime" in prompt
+    assert (
+        "When no typed builder tools are available in this runtime" in prompt
+    )

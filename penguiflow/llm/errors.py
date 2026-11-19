@@ -3,7 +3,8 @@
 Provides a stable error hierarchy with explicit retryability so that:
 - The retry loop can make correct decisions without string matching
 - The planner/runtime can log consistent failure reasons across providers
-- User-visible errors can be extracted cleanly while retaining raw payloads for debugging
+- User-visible errors can be extracted cleanly while retaining raw payloads for
+  debugging
 """
 
 from __future__ import annotations
@@ -31,9 +32,11 @@ class LLMError(Exception):
     raw: Any = None
 
     def __post_init__(self) -> None:
+        """Initialize the exception with ``message``."""
         super().__init__(self.message)
 
     def __str__(self) -> str:
+        """Return the message with provider and status details."""
         parts = [self.message]
         if self.provider:
             parts.append(f"provider={self.provider}")
@@ -82,9 +85,9 @@ class LLMAuthError(LLMError):
 class LLMCancelledError(LLMError):
     """Request was cancelled."""
 
-    # Provider/client cancellations can be transient (connection resets, upstream aborts).
-    # If the caller cancelled intentionally (CancelToken), raise LLMCancelledError with
-    # retryable=False at the call site.
+    # Provider/client cancellations can be transient (connection resets,
+    # upstream aborts). If the caller cancelled intentionally (CancelToken),
+    # raise LLMCancelledError with retryable=False at the call site.
     retryable: bool = True
 
 
@@ -92,7 +95,9 @@ class LLMCancelledError(LLMError):
 class LLMContextLengthError(LLMError):
     """Context length exceeded."""
 
-    retryable: bool = False  # Not automatically retryable; requires context reduction
+    retryable: bool = (
+        False  # Not automatically retryable; requires context reduction
+    )
     max_tokens: int | None = None
     current_tokens: int | None = None
 
@@ -129,7 +134,7 @@ def map_status_to_error(
     status_code: int,
     message: str,
     provider: str | None = None,
-    raw: Any = None,
+    raw: object = None,
 ) -> LLMError:
     """Map an HTTP status code to the appropriate LLMError subclass."""
     if status_code == 401 or status_code == 403:
@@ -139,41 +144,40 @@ def map_status_to_error(
             status_code=status_code,
             raw=raw,
         )
-    elif status_code == 429:
+    if status_code == 429:
         return LLMRateLimitError(
             message=message,
             provider=provider,
             status_code=status_code,
             raw=raw,
         )
-    elif status_code == 408 or status_code == 504:
+    if status_code == 408 or status_code == 504:
         return LLMTimeoutError(
             message=message,
             provider=provider,
             status_code=status_code,
             raw=raw,
         )
-    elif status_code >= 500:
+    if status_code >= 500:
         return LLMServerError(
             message=message,
             provider=provider,
             status_code=status_code,
             raw=raw,
         )
-    elif status_code >= 400:
+    if status_code >= 400:
         return LLMInvalidRequestError(
             message=message,
             provider=provider,
             status_code=status_code,
             raw=raw,
         )
-    else:
-        return LLMError(
-            message=message,
-            provider=provider,
-            status_code=status_code,
-            raw=raw,
-        )
+    return LLMError(
+        message=message,
+        provider=provider,
+        status_code=status_code,
+        raw=raw,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +243,9 @@ def extract_clean_error_message(exc: Exception) -> str:
     # Pattern: {"error_code":"BAD_REQUEST","message":"{"message":"..."}"}
     try:
         # Look for nested message patterns
-        matches = re.findall(r'"message"\s*:\s*"([^"]+)"', error_str)
+        matches: list[str] = re.findall(
+            r'"message"\s*:\s*"([^"]+)"', error_str
+        )
         if matches:
             # Return the last (most nested) message
             return matches[-1]

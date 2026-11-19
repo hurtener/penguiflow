@@ -7,14 +7,25 @@ This module tests:
 - Prompt content serialization
 """
 
+from __future__ import annotations
+
 import asyncio
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
+import mcp.types as mcp_types
 import pytest
+from pydantic import AnyUrl
 
-from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
+from penguiflow.artifacts import (
+    InMemoryArtifactStore,
+)
 from penguiflow.registry import ModelRegistry
-from penguiflow.tools.config import ExternalToolConfig, PromptsConfig, TransportType
+from penguiflow.tools.config import (
+    ExternalToolConfig,
+    PromptsConfig,
+    TransportType,
+)
 from penguiflow.tools.node import ToolNode
 from penguiflow.tools.prompts import (
     PromptArgumentInfo,
@@ -22,78 +33,60 @@ from penguiflow.tools.prompts import (
     serialize_prompt_messages,
 )
 
+from .tool_context_doubles import FakeToolContext
+
 pytest.importorskip("tenacity")
 
 
-# ─── Fixtures ─────────────────────────────────────────────────────────────────
+# ─── Fixtures ────────────────────────────────────────────────────────────────
 
 
-class DummyCtx:
-    """Minimal context for testing prompt operations."""
+class DummyCtx(FakeToolContext):
+    """Tool context for ToolNode tests."""
 
-    def __init__(self, artifact_store=None):
-        self._tool_context: dict[str, str] = {}
-        self._llm_context: dict[str, str] = {}
-        self._meta: dict[str, str] = {}
-        self._artifacts_store = artifact_store or InMemoryArtifactStore()
-
-    @property
-    def tool_context(self):
-        return self._tool_context
-
-    @property
-    def llm_context(self):
-        return self._llm_context
-
-    @property
-    def meta(self):
-        return self._meta
-
-    @property
-    def _artifacts(self):
-        return self._artifacts_store
-
-    @property
-    def artifacts(self):
-        return ScopedArtifacts(
-            self._artifacts_store,
-            tenant_id=None,
-            user_id=None,
-            session_id=None,
-            trace_id=None,
-        )
+    def __init__(
+        self,
+        artifact_store: InMemoryArtifactStore | None = None,
+    ) -> None:
+        """Store artifacts in ``artifact_store`` when given."""
+        super().__init__(artifact_store=artifact_store)
 
 
-def build_config(**overrides):
-    base = {
+def build_config(**overrides: object) -> ExternalToolConfig:
+    """Build an MCP tool config, with ``overrides`` applied."""
+    base: dict[str, object] = {
         "name": "test_server",
         "transport": TransportType.MCP,
         "connection": "npx -y @test/server",
     }
     base.update(overrides)
-    return ExternalToolConfig(**base)
+    return ExternalToolConfig.model_validate(base)
 
 
 @pytest.fixture
-def artifact_store():
+def artifact_store() -> InMemoryArtifactStore:
+    """Provide an empty in-memory artifact store."""
     return InMemoryArtifactStore()
 
 
 @pytest.fixture
-def registry():
+def registry() -> ModelRegistry:
+    """Provide an empty model registry."""
     return ModelRegistry()
 
 
-# ─── PromptInfo / PromptArgumentInfo Model Tests ──────────────────────────────
+# ─── PromptInfo / PromptArgumentInfo Model Tests ─────────────────────────────
 
 
-def test_prompt_info_basic():
+def test_prompt_info_basic() -> None:
     """PromptInfo should accept basic fields."""
     info = PromptInfo(
         name="summarize",
         description="Summarize a text",
         arguments=[
-            PromptArgumentInfo(name="text", description="Text to summarize", required=True),
+            PromptArgumentInfo(
+                name="text", description="Text to summarize", required=True
+            ),
             PromptArgumentInfo(name="length", description="Target length"),
         ],
     )
@@ -105,7 +98,7 @@ def test_prompt_info_basic():
     assert info.arguments[1].required is False
 
 
-def test_prompt_info_minimal():
+def test_prompt_info_minimal() -> None:
     """PromptInfo should only require name."""
     info = PromptInfo(name="test")
     assert info.name == "test"
@@ -113,7 +106,7 @@ def test_prompt_info_minimal():
     assert info.arguments == []
 
 
-def test_prompt_argument_info_defaults():
+def test_prompt_argument_info_defaults() -> None:
     """PromptArgumentInfo should have sensible defaults."""
     arg = PromptArgumentInfo(name="input")
     assert arg.name == "input"
@@ -121,7 +114,7 @@ def test_prompt_argument_info_defaults():
     assert arg.required is False
 
 
-def test_prompt_info_serialization():
+def test_prompt_info_serialization() -> None:
     """PromptInfo should round-trip through model_dump/model_validate."""
     info = PromptInfo(
         name="code_review",
@@ -138,66 +131,61 @@ def test_prompt_info_serialization():
 # ─── PromptsConfig Tests ─────────────────────────────────────────────────────
 
 
-def test_prompts_config_defaults():
+def test_prompts_config_defaults() -> None:
     """PromptsConfig should have sensible defaults."""
     config = PromptsConfig()
     assert config.enabled is True
     assert config.generate_tools is True
 
 
-def test_prompts_config_disabled():
+def test_prompts_config_disabled() -> None:
     """PromptsConfig should support disabling."""
     config = PromptsConfig(enabled=False, generate_tools=False)
     assert config.enabled is False
     assert config.generate_tools is False
 
 
-def test_prompts_config_in_external_tool_config():
+def test_prompts_config_in_external_tool_config() -> None:
     """ExternalToolConfig should include prompts config."""
     cfg = build_config()
     assert cfg.prompts.enabled is True
     assert cfg.prompts.generate_tools is True
 
 
-# ─── Content Serialization Tests ──────────────────────────────────────────────
+# ─── Content Serialization Tests ─────────────────────────────────────────────
 
 
-class MockTextContent:
-    type = "text"
-    text = "Hello, world!"
+_TEXT = mcp_types.TextContent(type="text", text="Hello, world!")
+_IMAGE = mcp_types.ImageContent(
+    type="image", data="iVBORw0KGgo=", mimeType="image/png"
+)
+_AUDIO = mcp_types.AudioContent(
+    type="audio", data="UklGRg==", mimeType="audio/wav"
+)
+_RESOURCE = mcp_types.EmbeddedResource(
+    type="resource",
+    resource=mcp_types.TextResourceContents(
+        uri=AnyUrl("file:///test.txt"),
+        mimeType="text/plain",
+        text="file content",
+    ),
+)
 
 
-class MockImageContent:
-    type = "image"
-    data = "iVBORw0KGgo="
-    mimeType = "image/png"
+def _message(
+    role: Literal["user", "assistant"],
+    content: mcp_types.TextContent
+    | mcp_types.ImageContent
+    | mcp_types.AudioContent
+    | mcp_types.EmbeddedResource,
+) -> mcp_types.PromptMessage:
+    """Build a prompt message from ``role`` with ``content``."""
+    return mcp_types.PromptMessage(role=role, content=content)
 
 
-class MockAudioContent:
-    type = "audio"
-    data = "UklGRg=="
-    mimeType = "audio/wav"
-
-
-class MockResourceContent:
-    type = "resource"
-
-    class resource:
-        uri = "file:///test.txt"
-        mimeType = "text/plain"
-        text = "file content"
-        blob = None
-
-
-class MockPromptMessage:
-    def __init__(self, role, content):
-        self.role = role
-        self.content = content
-
-
-def test_serialize_text_message():
+def test_serialize_text_message() -> None:
     """Text content should serialize correctly."""
-    messages = [MockPromptMessage("user", MockTextContent())]
+    messages = [_message("user", _TEXT)]
     result = serialize_prompt_messages(messages)
     assert len(result) == 1
     assert result[0]["role"] == "user"
@@ -205,9 +193,9 @@ def test_serialize_text_message():
     assert result[0]["text"] == "Hello, world!"
 
 
-def test_serialize_image_message():
+def test_serialize_image_message() -> None:
     """Image content should serialize correctly."""
-    messages = [MockPromptMessage("assistant", MockImageContent())]
+    messages = [_message("assistant", _IMAGE)]
     result = serialize_prompt_messages(messages)
     assert len(result) == 1
     assert result[0]["role"] == "assistant"
@@ -215,47 +203,53 @@ def test_serialize_image_message():
     assert result[0]["data"] == "iVBORw0KGgo="
 
 
-def test_serialize_audio_message():
+def test_serialize_audio_message() -> None:
     """Audio content should serialize correctly."""
-    messages = [MockPromptMessage("user", MockAudioContent())]
+    messages = [_message("user", _AUDIO)]
     result = serialize_prompt_messages(messages)
     assert len(result) == 1
     assert result[0]["type"] == "audio"
     assert result[0]["mimeType"] == "audio/wav"
 
 
-def test_serialize_resource_message():
+def test_serialize_resource_message() -> None:
     """Embedded resource content should serialize correctly."""
-    messages = [MockPromptMessage("assistant", MockResourceContent())]
+    messages = [_message("assistant", _RESOURCE)]
     result = serialize_prompt_messages(messages)
     assert len(result) == 1
     assert result[0]["type"] == "resource"
     assert result[0]["resource"]["uri"] == "file:///test.txt"
 
 
-def test_serialize_multiple_messages():
+def test_serialize_multiple_messages() -> None:
     """Multiple messages should all be serialized."""
     messages = [
-        MockPromptMessage("user", MockTextContent()),
-        MockPromptMessage("assistant", MockTextContent()),
+        _message("user", _TEXT),
+        _message("assistant", _TEXT),
     ]
     result = serialize_prompt_messages(messages)
     assert len(result) == 2
 
 
-def test_serialize_empty_messages():
+def test_serialize_empty_messages() -> None:
     """Empty message list should return empty list."""
     result = serialize_prompt_messages([])
     assert result == []
 
 
-# ─── ToolNode Prompt Discovery Tests ──────────────────────────────────────────
+# ─── ToolNode Prompt Discovery Tests ─────────────────────────────────────────
 
 
 class MockMCPPrompt:
     """Mock MCP Prompt object from list_prompts()."""
 
-    def __init__(self, name, description=None, arguments=None):
+    def __init__(
+        self,
+        name: str,
+        description: str | None = None,
+        arguments: list[MockMCPPromptArg] | None = None,
+    ) -> None:
+        """Store ``name``, ``description`` and ``arguments``."""
         self.name = name
         self.description = description
         self.arguments = arguments or []
@@ -264,7 +258,10 @@ class MockMCPPrompt:
 class MockMCPPromptArg:
     """Mock MCP PromptArgument."""
 
-    def __init__(self, name, description=None, required=False):
+    def __init__(
+        self, name: str, description: str | None = None, required: bool = False
+    ) -> None:
+        """Store ``name``, ``description`` and ``required``."""
         self.name = name
         self.description = description
         self.required = required
@@ -273,15 +270,16 @@ class MockMCPPromptArg:
 class MockMCPTool:
     """Mock MCP tool."""
 
-    def __init__(self, name, description="", inputSchema=None):
+    def __init__(self, name: str, description: str = "") -> None:
+        """Store ``name`` and ``description``."""
         self.name = name
         self.description = description
-        self.inputSchema = inputSchema or {"type": "object", "properties": {}}
+        self.inputSchema = {"type": "object", "properties": {}}
         self.meta = None
 
 
 @pytest.mark.asyncio
-async def test_discover_prompts_success(registry, artifact_store):
+async def test_discover_prompts_success(registry: ModelRegistry) -> None:
     """ToolNode should discover prompts from MCP server."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
@@ -308,16 +306,13 @@ async def test_discover_prompts_success(registry, artifact_store):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with _patch_mcp_connect(node, mock_client):
-        pass
-
     # Simulate connect
-    node._mcp_client = mock_client
-    node._connected = True
-    node._connected_loop = asyncio.get_running_loop()
-    node._tools = node._convert_mcp_tools([MockMCPTool("search")])
-    await node._discover_mcp_resources()
-    await node._discover_mcp_prompts()
+    node.mcp_client = mock_client
+    node.connected = True
+    node.connected_loop = asyncio.get_running_loop()
+    node.tools = node.convert_mcp_tools([MockMCPTool("search")])
+    await node.discover_mcp_resources()
+    await node.discover_mcp_prompts()
 
     assert node.prompts_supported is True
     assert len(node.prompts) == 2
@@ -327,23 +322,25 @@ async def test_discover_prompts_success(registry, artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_discover_prompts_not_supported(registry):
+async def test_discover_prompts_not_supported(registry: ModelRegistry) -> None:
     """ToolNode should handle servers that don't support prompts."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
 
     mock_client = AsyncMock()
-    mock_client.list_prompts = AsyncMock(side_effect=Exception("Not supported"))
+    mock_client.list_prompts = AsyncMock(
+        side_effect=Exception("Not supported")
+    )
 
-    node._mcp_client = mock_client
-    await node._discover_mcp_prompts()
+    node.mcp_client = mock_client
+    await node.discover_mcp_prompts()
 
     assert node.prompts_supported is False
     assert node.prompts == []
 
 
 @pytest.mark.asyncio
-async def test_discover_prompts_disabled(registry):
+async def test_discover_prompts_disabled(registry: ModelRegistry) -> None:
     """ToolNode should skip prompt discovery when disabled."""
     config = build_config()
     config.prompts.enabled = False
@@ -352,8 +349,8 @@ async def test_discover_prompts_disabled(registry):
     mock_client = AsyncMock()
     mock_client.list_prompts = AsyncMock(return_value=[])
 
-    node._mcp_client = mock_client
-    await node._discover_mcp_prompts()
+    node.mcp_client = mock_client
+    await node.discover_mcp_prompts()
 
     # list_prompts should not have been called
     mock_client.list_prompts.assert_not_called()
@@ -361,19 +358,19 @@ async def test_discover_prompts_disabled(registry):
 
 
 @pytest.mark.asyncio
-async def test_generate_prompt_tools(registry):
+async def test_generate_prompt_tools(registry: ModelRegistry) -> None:
     """ToolNode should generate prompt tools when prompts are discovered."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
 
     # Simulate prompts discovered
-    node._prompts = [
+    node.prompts = [
         PromptInfo(name="summarize", description="Summarize"),
         PromptInfo(name="translate", description="Translate"),
     ]
-    node._prompts_supported = True
+    node.prompts_supported = True
 
-    tools = node._generate_prompt_tools()
+    tools = node.generate_prompt_tools()
 
     assert len(tools) == 2
     names = [t.name for t in tools]
@@ -382,27 +379,31 @@ async def test_generate_prompt_tools(registry):
 
 
 @pytest.mark.asyncio
-async def test_handle_prompts_list(registry, artifact_store):
+async def test_handle_prompts_list(
+    registry: ModelRegistry, artifact_store: InMemoryArtifactStore
+) -> None:
     """prompts_list handler should return prompt info."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
 
-    node._prompts = [
+    node.prompts = [
         PromptInfo(name="summarize", description="Summarize"),
     ]
-    node._prompts_supported = True
-    node._connected = True
-    node._connected_loop = asyncio.get_running_loop()
+    node.prompts_supported = True
+    node.connected = True
+    node.connected_loop = asyncio.get_running_loop()
 
     ctx = DummyCtx(artifact_store)
-    result = await node._handle_prompts_list(None, ctx)
+    result = await node.handle_prompts_list(None, ctx)
 
     assert result["count"] == 1
     assert result["prompts"][0]["name"] == "summarize"
 
 
 @pytest.mark.asyncio
-async def test_handle_prompts_get(registry, artifact_store):
+async def test_handle_prompts_get(
+    registry: ModelRegistry, artifact_store: InMemoryArtifactStore
+) -> None:
     """prompts_get handler should call get_prompt and return messages."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
@@ -410,16 +411,16 @@ async def test_handle_prompts_get(registry, artifact_store):
     # Mock MCP client
     mock_result = MagicMock()
     mock_result.description = "A summary"
-    mock_msg = MockPromptMessage("assistant", MockTextContent())
+    mock_msg = _message("assistant", _TEXT)
     mock_result.messages = [mock_msg]
 
     mock_client = AsyncMock()
     mock_client.get_prompt = AsyncMock(return_value=mock_result)
 
-    node._mcp_client = mock_client
-    node._prompts_supported = True
-    node._connected = True
-    node._connected_loop = asyncio.get_running_loop()
+    node.mcp_client = mock_client
+    node.prompts_supported = True
+    node.connected = True
+    node.connected_loop = asyncio.get_running_loop()
 
     # Call handler
     args = MagicMock()
@@ -427,7 +428,7 @@ async def test_handle_prompts_get(registry, artifact_store):
     args.arguments = {"text": "Hello"}
 
     ctx = DummyCtx(artifact_store)
-    result = await node._handle_prompts_get(args, ctx)
+    result = await node.handle_prompts_get(args, ctx)
 
     assert result["description"] == "A summary"
     assert len(result["messages"]) == 1
@@ -435,7 +436,7 @@ async def test_handle_prompts_get(registry, artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_list_prompts_refresh(registry):
+async def test_list_prompts_refresh(registry: ModelRegistry) -> None:
     """list_prompts with refresh=True should re-fetch from server."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
@@ -447,64 +448,55 @@ async def test_list_prompts_refresh(registry):
         ]
     )
 
-    node._mcp_client = mock_client
-    node._prompts_supported = True
-    node._connected = True
-    node._connected_loop = asyncio.get_running_loop()
-    node._prompts = [PromptInfo(name="old")]
+    node.mcp_client = mock_client
+    node.prompts_supported = True
+    node.connected = True
+    node.connected_loop = asyncio.get_running_loop()
+    node.prompts = [PromptInfo(name="old")]
 
     result = await node.list_prompts(refresh=True)
     assert len(result) == 1
     assert result[0].name == "new_prompt"
 
 
-def test_handle_prompts_changed(registry):
+def test_handle_prompts_changed(registry: ModelRegistry) -> None:
     """handle_prompts_changed should invalidate cache."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
 
-    node._prompts = [PromptInfo(name="test")]
-    node._prompts_supported = True
+    node.prompts = [PromptInfo(name="test")]
+    node.prompts_supported = True
 
     node.handle_prompts_changed()
 
     assert node.prompts == []
     assert node.prompts_supported is True
-    assert node._prompts_stale is True
+    assert node.prompts_stale is True
 
 
 @pytest.mark.asyncio
-async def test_list_prompts_refreshes_when_cache_is_stale(registry):
+async def test_list_prompts_refreshes_when_cache_is_stale(
+    registry: ModelRegistry,
+) -> None:
     """A prompts/list_changed invalidation should refresh on next access."""
     config = build_config()
     node = ToolNode(config=config, registry=registry)
 
     mock_client = AsyncMock()
-    mock_client.list_prompts = AsyncMock(return_value=[MockMCPPrompt("fresh", "Fresh prompt")])
+    mock_client.list_prompts = AsyncMock(
+        return_value=[MockMCPPrompt("fresh", "Fresh prompt")]
+    )
 
-    node._mcp_client = mock_client
-    node._connected = True
-    node._prompts_supported = True
-    node._prompts = [PromptInfo(name="stale")]
+    node.mcp_client = mock_client
+    node.connected = True
+    node.prompts_supported = True
+    node.prompts = [PromptInfo(name="stale")]
     node.handle_prompts_changed()
 
     refreshed = await node.list_prompts()
     assert len(refreshed) == 1
     assert refreshed[0].name == "fresh"
-    assert node._prompts_stale is False
+    assert node.prompts_stale is False
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-
-class _patch_mcp_connect:
-    """Context manager that does nothing (placeholder for complex connect patching)."""
-
-    def __init__(self, node, client):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
+# ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -1,3 +1,5 @@
+"""Tests for planner action schema."""
+
 from __future__ import annotations
 
 from penguiflow.planner.llm import (
@@ -7,6 +9,7 @@ from penguiflow.planner.llm import (
 
 
 def test_planner_action_schema_requires_answer_on_final_response() -> None:
+    """Planner action schema requires answer on final response."""
     schema = _build_planner_action_schema_conditional_finish()
     assert schema["type"] == "object"
     assert "allOf" in schema
@@ -16,7 +19,9 @@ def test_planner_action_schema_requires_answer_on_final_response() -> None:
     conditional = schema["allOf"][1]
     assert "if" in conditional
     assert "then" in conditional
-    assert conditional["if"]["properties"]["next_node"]["enum"] == ["final_response"]
+    assert conditional["if"]["properties"]["next_node"]["enum"] == [
+        "final_response"
+    ]
 
     then_args = conditional["then"]["properties"]["args"]
     assert then_args["required"] == ["answer"]
@@ -24,7 +29,10 @@ def test_planner_action_schema_requires_answer_on_final_response() -> None:
 
 
 def test_conditional_finish_schema_support_is_google_scoped() -> None:
+    """Conditional finish schema support is Google scoped."""
     assert _supports_conditional_finish_schema("google/gemini-2.5-pro")
-    assert _supports_conditional_finish_schema("openrouter/google/gemini-2.5-pro")
+    assert _supports_conditional_finish_schema(
+        "openrouter/google/gemini-2.5-pro"
+    )
     assert not _supports_conditional_finish_schema("openrouter/openai/gpt-4.1")
     assert not _supports_conditional_finish_schema("openai/gpt-5")

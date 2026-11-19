@@ -1,6 +1,9 @@
+"""Tests for guardrails policy pack."""
+
 from __future__ import annotations
 
 import textwrap
+from typing import TYPE_CHECKING
 
 from penguiflow.planner.guardrails import (
     AsyncRuleEvaluator,
@@ -16,8 +19,12 @@ from penguiflow.planner.guardrails import (
 )
 from penguiflow.steering import InMemoryGuardInbox
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def test_load_policy_pack_env_override(tmp_path) -> None:
+
+def test_load_policy_pack_env_override(tmp_path: Path) -> None:
+    """Load policy pack env override."""
     content = textwrap.dedent(
         """
         policy_pack: "default"
@@ -38,7 +45,8 @@ def test_load_policy_pack_env_override(tmp_path) -> None:
     assert pack.data["gateway"]["mode"] == "shadow"
 
 
-def test_apply_policy_config_updates_rules_and_gateway(tmp_path) -> None:
+def test_apply_policy_config_updates_rules_and_gateway(tmp_path: Path) -> None:
+    """Apply policy config updates rules and gateway."""
     content = textwrap.dedent(
         """
         policy_pack: "default"
@@ -81,7 +89,16 @@ def test_apply_policy_config_updates_rules_and_gateway(tmp_path) -> None:
     assert gateway.config.sync_timeout_ms == 10
     assert gateway.config.sync_parallel is False
 
-    allowlist = next(rule for rule in registry.all_rules() if rule.rule_id == "tool-allowlist")
+    allowlist = next(
+        rule
+        for rule in registry.all_rules()
+        if rule.rule_id == "tool-allowlist"
+    )
+    assert isinstance(allowlist, ToolAllowlistRule)
     assert allowlist.denied_tools == frozenset({"tool.a"})
-    secret = next(rule for rule in registry.all_rules() if rule.rule_id == "secret-redaction")
+    secret = next(
+        rule
+        for rule in registry.all_rules()
+        if rule.rule_id == "secret-redaction"
+    )
     assert secret.enabled is False

@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
-from .context import ContextSnapshotV1, GuardrailEvent
+from typing_extensions import override
+
 from .models import (
     GuardrailAction,
     GuardrailDecision,
@@ -15,6 +17,10 @@ from .models import (
     RuleCost,
     StopSpec,
 )
+from .protocols import GuardrailRule
+
+if TYPE_CHECKING:
+    from .context import ContextSnapshotV1, GuardrailEvent
 
 
 class JailbreakIntent(str, Enum):
@@ -29,7 +35,7 @@ class JailbreakIntent(str, Enum):
 
 
 @dataclass
-class ToolAllowlistRule:
+class ToolAllowlistRule(GuardrailRule):
     """Block unauthorized tool execution."""
 
     rule_id: str = "tool-allowlist"
@@ -41,6 +47,7 @@ class ToolAllowlistRule:
     denied_tools: frozenset[str] = frozenset()
     allowed_tools: frozenset[str] | None = None
 
+    @override
     async def evaluate(
         self,
         event: GuardrailEvent,
@@ -72,7 +79,7 @@ class ToolAllowlistRule:
 
 
 @dataclass
-class SecretRedactionRule:
+class SecretRedactionRule(GuardrailRule):
     """Detect and redact secrets in output."""
 
     rule_id: str = "secret-redaction"
@@ -89,6 +96,7 @@ class SecretRedactionRule:
     patterns: dict[str, re.Pattern[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Default to the built-in secret patterns."""
         if not self.patterns:
             self.patterns = {
                 "OPENAI_KEY": re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -97,6 +105,7 @@ class SecretRedactionRule:
                 "GITHUB_TOKEN": re.compile(r"ghp_[a-zA-Z0-9]{36}"),
             }
 
+    @override
     async def evaluate(
         self,
         event: GuardrailEvent,
@@ -132,7 +141,7 @@ class SecretRedactionRule:
 
 
 @dataclass
-class InjectionPatternRule:
+class InjectionPatternRule(GuardrailRule):
     """Regex-based jailbreak pattern detection."""
 
     rule_id: str = "injection-patterns"
@@ -141,22 +150,47 @@ class InjectionPatternRule:
     cost: RuleCost = RuleCost.FAST
     enabled: bool = True
     severity: GuardrailSeverity = GuardrailSeverity.CRITICAL
-    patterns: tuple[tuple[str, JailbreakIntent], ...] = field(default_factory=tuple)
+    patterns: tuple[tuple[str, JailbreakIntent], ...] = field(
+        default_factory=tuple
+    )
 
     def __post_init__(self) -> None:
+        """Default to the built-in injection patterns."""
         if not self.patterns:
             self.patterns = (
-                (r"ignore\s+(all\s+)?previous\s+instructions", JailbreakIntent.JB_OVERRIDE),
-                (r"disregard\s+(your\s+)?(instructions|rules)", JailbreakIntent.JB_OVERRIDE),
-                (r"you\s+are\s+now\s+(in\s+)?(\w+\s+)?mode", JailbreakIntent.JB_OVERRIDE),
+                (
+                    r"ignore\s+(all\s+)?previous\s+instructions",
+                    JailbreakIntent.JB_OVERRIDE,
+                ),
+                (
+                    r"disregard\s+(your\s+)?(instructions|rules)",
+                    JailbreakIntent.JB_OVERRIDE,
+                ),
+                (
+                    r"you\s+are\s+now\s+(in\s+)?(\w+\s+)?mode",
+                    JailbreakIntent.JB_OVERRIDE,
+                ),
                 (r"\bDAN\b.*mode", JailbreakIntent.JB_OVERRIDE),
                 (r"jailbreak", JailbreakIntent.JB_OVERRIDE),
-                (r"(show|reveal|print)\s+(your|the)\s+system\s*prompt", JailbreakIntent.EXFIL_PROMPT),
-                (r"what\s+(is|are)\s+your\s+(system\s+)?instructions", JailbreakIntent.EXFIL_PROMPT),
-                (r"(run|execute)\s+(as\s+)?(root|admin|sudo)", JailbreakIntent.TOOL_ESCALATION),
-                (r"bypass\s+(tool\s+)?restrictions", JailbreakIntent.TOOL_ESCALATION),
+                (
+                    r"(show|reveal|print)\s+(your|the)\s+system\s*prompt",
+                    JailbreakIntent.EXFIL_PROMPT,
+                ),
+                (
+                    r"what\s+(is|are)\s+your\s+(system\s+)?instructions",
+                    JailbreakIntent.EXFIL_PROMPT,
+                ),
+                (
+                    r"(run|execute)\s+(as\s+)?(root|admin|sudo)",
+                    JailbreakIntent.TOOL_ESCALATION,
+                ),
+                (
+                    r"bypass\s+(tool\s+)?restrictions",
+                    JailbreakIntent.TOOL_ESCALATION,
+                ),
             )
 
+    @override
     async def evaluate(
         self,
         event: GuardrailEvent,
@@ -172,11 +206,17 @@ class InjectionPatternRule:
                 return GuardrailDecision(
                     action=GuardrailAction.STOP,
                     rule_id=self.rule_id,
-                    reason=f"Jailbreak pattern [{intent.value}]: '{match.group(0)[:50]}'",
+                    reason=(
+                        f"Jailbreak pattern [{intent.value}]: "
+                        f"'{match.group(0)[:50]}'"
+                    ),
                     severity=GuardrailSeverity.CRITICAL,
                     confidence=1.0,
                     effects=("flag_trajectory", "increment_strike"),
-                    classifier_result={"intent": intent.value, "method": "regex"},
+                    classifier_result={
+                        "intent": intent.value,
+                        "method": "regex",
+                    },
                     stop=StopSpec(
                         error_code=f"JAILBREAK_{intent.value.upper()}",
                         user_message="I can't process that request.",

@@ -7,22 +7,29 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar
 
 from pydantic import BaseModel, model_validator
 
-from .node import Node
-from .registry import ModelRegistry
+if TYPE_CHECKING:
+    from .node import Node
+    from .registry import ModelRegistry
 
-SideEffect: TypeAlias = Literal["pure", "read", "write", "external", "stateful"]
+SideEffect: TypeAlias = Literal[
+    "pure", "read", "write", "external", "stateful"
+]
 
 
 class ToolLoadingMode(str, Enum):
+    """How a tool is exposed to the planner: always loaded or deferred."""
+
     ALWAYS = "always"
     DEFERRED = "deferred"
 
 
 class ToolInputExample(BaseModel):
+    """An example invocation of a tool, shown to the planner."""
+
     args: dict[str, Any]
     description: str | None = None
     tags: list[str] = []
@@ -32,7 +39,8 @@ class ToolInputExample(BaseModel):
         try:
             json.dumps(self.args, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
-            raise ValueError("ToolInputExample.args must be JSON-serializable") from exc
+            msg = "ToolInputExample.args must be JSON-serializable"
+            raise ValueError(msg) from exc
         if self.tags:
             deduped: list[str] = []
             seen: set[str] = set()
@@ -46,15 +54,16 @@ class ToolInputExample(BaseModel):
         return self
 
 
-def _coerce_examples(
-    examples: Sequence[ToolInputExample | Mapping[str, Any]] | Mapping[str, Any] | None,
-) -> tuple[ToolInputExample, ...]:
+def _coerce_examples(examples: object) -> tuple[ToolInputExample, ...]:
     if not examples:
         return ()
     if isinstance(examples, Mapping):
         examples = [examples]
-    if not isinstance(examples, Sequence) or isinstance(examples, (str, bytes)):
-        raise TypeError("Tool examples must be a sequence or mapping")
+    if not isinstance(examples, Sequence) or isinstance(
+        examples, (str, bytes)
+    ):
+        msg = "Tool examples must be a sequence or mapping"
+        raise TypeError(msg)
     parsed: list[ToolInputExample] = []
     for example in examples:
         if isinstance(example, ToolInputExample):
@@ -62,7 +71,10 @@ def _coerce_examples(
         elif isinstance(example, Mapping):
             parsed.append(ToolInputExample.model_validate(example))
         else:
-            raise TypeError("Tool examples must be mappings or ToolInputExample instances")
+            msg = (
+                "Tool examples must be mappings or ToolInputExample instances"
+            )
+            raise TypeError(msg)
     return tuple(parsed)
 
 
@@ -86,8 +98,13 @@ class NodeSpec:
     examples: Sequence[ToolInputExample] = field(default_factory=tuple)
 
     def examples_payload(self) -> list[dict[str, Any]]:
+        """Return the tool's examples as JSON-ready dicts."""
         payload: list[dict[str, Any]] = []
-        examples_source: Sequence[ToolInputExample | Mapping[str, Any]] | Mapping[str, Any] | None = self.examples
+        examples_source: (
+            Sequence[ToolInputExample | Mapping[str, Any]]
+            | Mapping[str, Any]
+            | None
+        ) = self.examples
         if not examples_source and "examples" in self.extra:
             examples_source = self.extra.get("examples")
         for example in _coerce_examples(examples_source):
@@ -136,6 +153,10 @@ def _normalise_sequence(value: Sequence[str] | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value))
 
 
+_ToolFn = TypeVar("_ToolFn", bound=Callable[..., Any])
+"""A tool function; ``tool`` returns it unchanged."""
+
+
 def tool(
     *,
     desc: str | None = None,
@@ -149,10 +170,11 @@ def tool(
     arg_validator: Callable[..., Any] | None = None,
     extra: Mapping[str, Any] | None = None,
     loading_mode: ToolLoadingMode | str | None = None,
-    examples: Sequence[ToolInputExample | Mapping[str, Any]] | Mapping[str, Any] | None = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    examples: Sequence[ToolInputExample | Mapping[str, Any]]
+    | Mapping[str, Any]
+    | None = None,
+) -> Callable[[_ToolFn], _ToolFn]:
     """Annotate a node function with catalog metadata."""
-
     extra_payload = dict(extra) if extra else {}
     if arg_validation is not None:
         extra_payload["arg_validation"] = dict(arg_validation)
@@ -175,9 +197,8 @@ def tool(
         "examples": examples,
     }
 
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        func_ref = cast(Any, func)
-        func_ref.__penguiflow_tool__ = payload
+    def decorator(func: _ToolFn) -> _ToolFn:
+        vars(func)["__penguiflow_tool__"] = payload
         return func
 
     return decorator

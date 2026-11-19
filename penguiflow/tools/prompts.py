@@ -3,7 +3,8 @@
 This module implements MCP prompts protocol support including:
 - Prompt listing and argument discovery
 - Prompt execution with argument serialization
-- Content serialization for prompt messages (text, image, audio, embedded resource)
+- Content serialization for prompt messages (text, image, audio, embedded
+  resource)
 
 See plan: MCP Prompts + Apps (Phase 3)
 """
@@ -11,7 +12,10 @@ See plan: MCP Prompts + Apps (Phase 3)
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 from pydantic import BaseModel, Field
 
@@ -60,7 +64,9 @@ class PromptInfo(BaseModel):
 # -----------------------------------------------------------------------------
 
 
-def serialize_prompt_messages(messages: Any) -> list[dict[str, Any]]:
+def serialize_prompt_messages(
+    messages: Iterable[object],
+) -> list[dict[str, Any]]:
     """Serialize MCP PromptMessage list into plain dicts.
 
     Handles all MCP Content types:
@@ -88,7 +94,7 @@ def serialize_prompt_messages(messages: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _serialize_content(content: Any) -> dict[str, Any]:
+def _serialize_content(content: object) -> dict[str, Any]:
     """Serialize a single MCP Content item."""
     content_type = getattr(content, "type", None)
 
@@ -124,7 +130,7 @@ def _serialize_content(content: Any) -> dict[str, Any]:
 
     # Fallback: try to dump as dict
     if hasattr(content, "model_dump"):
-        return content.model_dump()
+        return dict(content.model_dump())
     if isinstance(content, dict):
         return content
 

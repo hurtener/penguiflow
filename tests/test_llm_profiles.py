@@ -93,7 +93,7 @@ class TestGetProfileForModel:
 
 
 class TestNewModelProfiles:
-    """Profiles added for the GPT-5.5, Gemini 3.5, and Claude 4.7 generations."""
+    """Profiles exist for GPT-5.5, Gemini 3.5 and Claude 4.7."""
 
     def test_databricks_claude_sonnet_5_non_tool_capabilities(self) -> None:
         """Databricks Sonnet 5 supports native structured non-tool output."""
@@ -104,8 +104,13 @@ class TestNewModelProfiles:
         assert profile.supports_streaming is True
         assert profile.supports_image_input is True
         assert profile.default_output_mode == "native"
-        assert profile.native_structured_kind == "databricks_constrained_decoding"
-        assert profile.schema_transformer_name == "DatabricksJsonSchemaTransformer"
+        assert (
+            profile.native_structured_kind == "databricks_constrained_decoding"
+        )
+        assert (
+            profile.schema_transformer_name
+            == "DatabricksJsonSchemaTransformer"
+        )
         assert profile.preferred_transport == "native"
         assert profile.max_tools == 32
         assert profile.max_schema_keys == 64
@@ -126,7 +131,10 @@ class TestNewModelProfiles:
             assert profile.max_output_tokens == out, model
             assert profile.supports_tools is True, model
             assert profile.supports_reasoning is True, model
-            assert profile.native_structured_kind == "databricks_constrained_decoding"
+            assert (
+                profile.native_structured_kind
+                == "databricks_constrained_decoding"
+            )
 
     def test_databricks_claude_reasoning_display_is_omitted(self) -> None:
         """Databricks Claude profiles hide reasoning by default."""
@@ -135,18 +143,28 @@ class TestNewModelProfiles:
             "databricks-claude-opus-4-8",
             "databricks-claude-sonnet-5",
         ):
-            assert get_profile(model).reasoning_display_default == "omitted", model
+            assert get_profile(model).reasoning_display_default == "omitted", (
+                model
+            )
 
     def test_general_new_models(self) -> None:
         """General provider profiles exist for the new flagship models."""
-        for model in ("gpt-5.5", "gpt-5.5-pro", "gemini-3.5-flash", "claude-opus-4-7"):
+        for model in (
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gemini-3.5-flash",
+            "claude-opus-4-7",
+        ):
             profile = get_profile(model)
             assert profile.supports_tools is True, model
             assert profile.supports_reasoning is True, model
             assert profile.max_context_tokens is not None, model
 
         assert get_profile("openai/gpt-5.5-pro").max_output_tokens == 128000
-        assert get_profile("google/gemini-3.5-flash").max_context_tokens == 1048576
+        assert (
+            get_profile("google/gemini-3.5-flash").max_context_tokens
+            == 1048576
+        )
         assert get_profile("claude-opus-4-7").max_context_tokens == 1000000
 
     def test_new_models_have_pricing(self) -> None:
@@ -203,31 +221,41 @@ class TestGetSchemaTransformer:
 
     def test_openai_transformer(self) -> None:
         """Test getting OpenAI schema transformer."""
-        profile = ModelProfile(schema_transformer_name="OpenAIJsonSchemaTransformer")
+        profile = ModelProfile(
+            schema_transformer_name="OpenAIJsonSchemaTransformer"
+        )
         transformer = get_schema_transformer(profile, {"type": "object"})
         assert transformer is not None
 
     def test_anthropic_transformer(self) -> None:
         """Test getting Anthropic schema transformer."""
-        profile = ModelProfile(schema_transformer_name="AnthropicJsonSchemaTransformer")
+        profile = ModelProfile(
+            schema_transformer_name="AnthropicJsonSchemaTransformer"
+        )
         transformer = get_schema_transformer(profile, {"type": "object"})
         assert transformer is not None
 
     def test_google_transformer(self) -> None:
         """Test getting Google schema transformer."""
-        profile = ModelProfile(schema_transformer_name="GoogleJsonSchemaTransformer")
+        profile = ModelProfile(
+            schema_transformer_name="GoogleJsonSchemaTransformer"
+        )
         transformer = get_schema_transformer(profile, {"type": "object"})
         assert transformer is not None
 
     def test_bedrock_transformer(self) -> None:
         """Test getting Bedrock schema transformer."""
-        profile = ModelProfile(schema_transformer_name="BedrockJsonSchemaTransformer")
+        profile = ModelProfile(
+            schema_transformer_name="BedrockJsonSchemaTransformer"
+        )
         transformer = get_schema_transformer(profile, {"type": "object"})
         assert transformer is not None
 
     def test_databricks_transformer(self) -> None:
         """Test getting Databricks schema transformer."""
-        profile = ModelProfile(schema_transformer_name="DatabricksJsonSchemaTransformer")
+        profile = ModelProfile(
+            schema_transformer_name="DatabricksJsonSchemaTransformer"
+        )
         transformer = get_schema_transformer(profile, {"type": "object"})
         assert transformer is not None
 

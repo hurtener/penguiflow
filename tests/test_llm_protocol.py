@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,8 +26,13 @@ from penguiflow.llm.types import (
     Usage,
 )
 
+if TYPE_CHECKING:
+    from penguiflow.llm.types import LLMRequest
+
 
 class TestNativeLLMAdapter:
+    """Tests for native LLM adapter."""
+
     @pytest.fixture
     def mock_provider(self) -> MagicMock:
         """Create a mock provider."""
@@ -36,13 +42,16 @@ class TestNativeLLMAdapter:
         provider.profile = ModelProfile()
         provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text='{"result": "ok"}')]
+                ),
                 usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
             )
         )
         return provider
 
     def test_init(self) -> None:
+        """Init."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "gpt-4o"
@@ -55,9 +64,10 @@ class TestNativeLLMAdapter:
                 api_key=None,
                 base_url=None,
             )
-            assert adapter._temperature == 0.5
+            assert adapter.temperature == 0.5
 
     def test_init_with_options(self) -> None:
+        """Init with options."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "gpt-4o"
@@ -77,23 +87,29 @@ class TestNativeLLMAdapter:
                 api_key="test-key",
                 base_url="https://api.example.com",
             )
-            assert adapter._max_retries == 5
-            assert adapter._timeout_s == 360.0
-            assert adapter._json_schema_mode is False
+            assert adapter.max_retries == 5
+            assert adapter.timeout_s == 360.0
+            assert adapter.json_schema_mode is False
 
     @pytest.mark.asyncio
     async def test_complete(self, mock_provider: MagicMock) -> None:
+        """Complete."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model")
-            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
+            content, _cost = await adapter.complete(
+                messages=[{"role": "user", "content": "Hello"}]
+            )
 
             assert content == '{"result": "ok"}'
             mock_provider.complete.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_complete_falls_back_to_tool_call_arguments_when_text_empty(self, mock_provider: MagicMock) -> None:
+    async def test_complete_falls_back_to_tool_call_arguments_when_text_empty(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete falls back to tool call arguments when text empty."""
         mock_provider.complete.return_value = CompletionResponse(
             message=LLMMessage(
                 role="assistant",
@@ -111,23 +127,31 @@ class TestNativeLLMAdapter:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model")
-            content, _ = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
+            content, _ = await adapter.complete(
+                messages=[{"role": "user", "content": "Hello"}]
+            )
             assert content.startswith("{")
             assert '"next_node"' in content
 
     @pytest.mark.asyncio
-    async def test_complete_with_response_format(self, mock_provider: MagicMock) -> None:
+    async def test_complete_with_response_format(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete with response format."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model", json_schema_mode=True)
-            content, cost = await adapter.complete(
+            content, _cost = await adapter.complete(
                 messages=[{"role": "user", "content": "test"}],
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
                         "name": "test_schema",
-                        "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+                        "schema": {
+                            "type": "object",
+                            "properties": {"x": {"type": "string"}},
+                        },
                     },
                 },
             )
@@ -138,7 +162,10 @@ class TestNativeLLMAdapter:
             assert call_args.structured_output.name == "test_schema"
 
     @pytest.mark.asyncio
-    async def test_image_part_reaches_provider_when_profile_supports_it(self, mock_provider: MagicMock) -> None:
+    async def test_image_part_reaches_provider_when_profile_supports_it(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Image part reaches provider when profile supports it."""
         mock_provider.profile = ModelProfile(supports_image_input=True)
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
@@ -160,25 +187,37 @@ class TestNativeLLMAdapter:
             assert isinstance(request.messages[0].parts[1], ImagePart)
 
     @pytest.mark.asyncio
-    async def test_unsupported_image_input_fails_loudly(self, mock_provider: MagicMock) -> None:
+    async def test_unsupported_image_input_fails_loudly(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Unsupported image input fails loudly."""
         mock_provider.profile = ModelProfile(supports_image_input=False)
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model")
-            with pytest.raises(LLMInvalidRequestError, match="does not support image input"):
+            with pytest.raises(
+                LLMInvalidRequestError, match="does not support image input"
+            ):
                 await adapter.complete(
                     messages=[
                         {
                             "role": "user",
-                            "content": [ImagePart(data=b"\x89PNG", media_type="image/png")],
+                            "content": [
+                                ImagePart(
+                                    data=b"\x89PNG", media_type="image/png"
+                                )
+                            ],
                         }
                     ]
                 )
             mock_provider.complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_inline_multimodal_threshold_fails_loudly(self, mock_provider: MagicMock) -> None:
+    async def test_inline_multimodal_threshold_fails_loudly(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Inline multimodal threshold fails loudly."""
         mock_provider.profile = ModelProfile(supports_image_input=True)
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
@@ -191,7 +230,8 @@ class TestNativeLLMAdapter:
                             "role": "user",
                             "content": [
                                 ImagePart(
-                                    data=b"x" * (INLINE_MULTIMODAL_DATA_LIMIT_BYTES + 1),
+                                    data=b"x"
+                                    * (INLINE_MULTIMODAL_DATA_LIMIT_BYTES + 1),
                                     media_type="image/png",
                                 )
                             ],
@@ -201,63 +241,94 @@ class TestNativeLLMAdapter:
             mock_provider.complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_inline_multimodal_threshold_is_configurable(self, mock_provider: MagicMock) -> None:
+    async def test_inline_multimodal_threshold_is_configurable(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Inline multimodal threshold is configurable."""
         mock_provider.profile = ModelProfile(supports_image_input=True)
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
-            adapter = NativeLLMAdapter("test-model", multimodal_inline_data_limit_bytes=4)
+            adapter = NativeLLMAdapter(
+                "test-model", multimodal_inline_data_limit_bytes=4
+            )
             await adapter.complete(
                 messages=[
                     {
                         "role": "user",
-                        "content": [ImagePart(data=b"1234", media_type="image/png")],
+                        "content": [
+                            ImagePart(data=b"1234", media_type="image/png")
+                        ],
                     }
                 ]
             )
-            with pytest.raises(LLMInvalidRequestError, match="4 byte inline limit"):
+            with pytest.raises(
+                LLMInvalidRequestError, match="4 byte inline limit"
+            ):
                 await adapter.complete(
                     messages=[
                         {
                             "role": "user",
-                            "content": [ImagePart(data=b"12345", media_type="image/png")],
+                            "content": [
+                                ImagePart(
+                                    data=b"12345", media_type="image/png"
+                                )
+                            ],
                         }
                     ]
                 )
 
     def test_negative_inline_multimodal_threshold_rejected(self) -> None:
-        with pytest.raises(ValueError, match="multimodal_inline_data_limit_bytes"):
-            NativeLLMAdapter("test-model", multimodal_inline_data_limit_bytes=-1)
+        """Negative inline multimodal threshold rejected."""
+        with pytest.raises(
+            ValueError, match="multimodal_inline_data_limit_bytes"
+        ):
+            NativeLLMAdapter(
+                "test-model", multimodal_inline_data_limit_bytes=-1
+            )
 
     def test_full_reasoning_display_rejected(self) -> None:
+        # The setting arrives untyped, as when read from JSON config.
+        """Full reasoning display rejected."""
+        settings = json.loads('{"reasoning_display": "full"}')
         with pytest.raises(ValueError, match="reasoning_display"):
-            NativeLLMAdapter("test-model", reasoning_display="full")
+            NativeLLMAdapter("test-model", **settings)
 
     @pytest.mark.asyncio
-    async def test_unsupported_audio_input_fails_loudly(self, mock_provider: MagicMock) -> None:
+    async def test_unsupported_audio_input_fails_loudly(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Unsupported audio input fails loudly."""
         mock_provider.profile = ModelProfile(supports_audio_input=False)
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model")
-            with pytest.raises(LLMInvalidRequestError, match="does not support audio input"):
+            with pytest.raises(
+                LLMInvalidRequestError, match="does not support audio input"
+            ):
                 await adapter.complete(
                     messages=[
                         {
                             "role": "user",
-                            "content": [AudioPart(data=b"RIFF", media_type="audio/wav")],
+                            "content": [
+                                AudioPart(data=b"RIFF", media_type="audio/wav")
+                            ],
                         }
                     ]
                 )
             mock_provider.complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_complete_with_json_object_format(self, mock_provider: MagicMock) -> None:
+    async def test_complete_with_json_object_format(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete with JSON object format."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model", json_schema_mode=True)
-            content, cost = await adapter.complete(
+            content, _cost = await adapter.complete(
                 messages=[{"role": "user", "content": "test"}],
                 response_format={"type": "json_object"},
             )
@@ -267,19 +338,24 @@ class TestNativeLLMAdapter:
             call_args = mock_provider.complete.call_args[0][0]
             assert call_args.structured_output is not None
             assert call_args.structured_output.name == "json_response"
-            assert call_args.structured_output.json_schema == {"type": "object"}
+            assert call_args.structured_output.json_schema == {
+                "type": "object"
+            }
             assert call_args.structured_output.strict is False
 
     def test_build_request_normalizes_composed_schema_root_type(self) -> None:
+        """Build request normalizes composed schema root type."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "test-model"
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model", json_schema_mode=True)
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
 
-            request = adapter._build_request(
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -289,18 +365,28 @@ class TestNativeLLMAdapter:
                             "allOf": [
                                 {
                                     "type": "object",
-                                    "properties": {"next_node": {"type": "string"}},
+                                    "properties": {
+                                        "next_node": {"type": "string"}
+                                    },
                                     "required": ["next_node"],
                                 },
                                 {
                                     "if": {
-                                        "properties": {"next_node": {"const": "final_response"}},
+                                        "properties": {
+                                            "next_node": {
+                                                "const": "final_response"
+                                            }
+                                        },
                                     },
                                     "then": {
                                         "properties": {
                                             "args": {
                                                 "type": "object",
-                                                "properties": {"answer": {"type": "string"}},
+                                                "properties": {
+                                                    "answer": {
+                                                        "type": "string"
+                                                    }
+                                                },
                                                 "required": ["answer"],
                                             }
                                         }
@@ -316,17 +402,24 @@ class TestNativeLLMAdapter:
             assert request.structured_output.json_schema["type"] == "object"
             assert "allOf" in request.structured_output.json_schema
 
-    def test_build_request_openrouter_non_allowlisted_route_uses_json_object(self) -> None:
+    def test_build_request_openrouter_non_allowlisted_route_uses_json_object(
+        self,
+    ) -> None:
+        """Build request OpenRouter non allowlisted route uses JSON object."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "anthropic/claude-sonnet-4.5"
             mock_provider.provider_name = "openrouter"
             mock_create.return_value = mock_provider
 
-            adapter = NativeLLMAdapter("openrouter/anthropic/claude-sonnet-4.5", json_schema_mode=True)
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+            adapter = NativeLLMAdapter(
+                "openrouter/anthropic/claude-sonnet-4.5", json_schema_mode=True
+            )
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
 
-            request = adapter._build_request(
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -346,17 +439,24 @@ class TestNativeLLMAdapter:
             assert request.structured_output.json_schema == {"type": "object"}
             assert request.structured_output.strict is False
 
-    def test_build_request_openrouter_openai_route_keeps_json_schema(self) -> None:
+    def test_build_request_openrouter_openai_route_keeps_json_schema(
+        self,
+    ) -> None:
+        """Build request OpenRouter OpenAI route keeps JSON schema."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "openai/gpt-5"
             mock_provider.provider_name = "openrouter"
             mock_create.return_value = mock_provider
 
-            adapter = NativeLLMAdapter("openrouter/openai/gpt-5", json_schema_mode=True)
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+            adapter = NativeLLMAdapter(
+                "openrouter/openai/gpt-5", json_schema_mode=True
+            )
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
 
-            request = adapter._build_request(
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -375,17 +475,24 @@ class TestNativeLLMAdapter:
             assert request.structured_output.name == "planner_action"
             assert request.structured_output.strict is True
 
-    def test_build_request_openrouter_stepfun_route_uses_text_mode(self) -> None:
+    def test_build_request_openrouter_stepfun_route_uses_text_mode(
+        self,
+    ) -> None:
+        """Build request OpenRouter stepfun route uses text mode."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "stepfun/step-3.5-flash"
             mock_provider.provider_name = "openrouter"
             mock_create.return_value = mock_provider
 
-            adapter = NativeLLMAdapter("openrouter/stepfun/step-3.5-flash", json_schema_mode=True)
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+            adapter = NativeLLMAdapter(
+                "openrouter/stepfun/step-3.5-flash", json_schema_mode=True
+            )
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
 
-            request = adapter._build_request(
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -402,7 +509,10 @@ class TestNativeLLMAdapter:
 
             assert request.structured_output is None
 
-    def test_build_request_anthropic_claude_with_reasoning_disables_structured_output(self) -> None:
+    def test_anthropic_reasoning_disables_structured_output(
+        self,
+    ) -> None:
+        """Reasoning on Anthropic Claude disables structured output."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "claude-sonnet-4-5"
@@ -415,8 +525,10 @@ class TestNativeLLMAdapter:
                 use_native_reasoning=True,
                 reasoning_effort="medium",
             )
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
-            request = adapter._build_request(
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -434,7 +546,10 @@ class TestNativeLLMAdapter:
             assert request.structured_output is None
             assert request.extra == {"reasoning_effort": "medium"}
 
-    def test_build_request_databricks_claude_with_reasoning_disables_structured_output(self) -> None:
+    def test_databricks_reasoning_disables_structured_output(
+        self,
+    ) -> None:
+        """Reasoning on Databricks Claude disables structured output."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "databricks-claude-sonnet-4-5"
@@ -447,8 +562,10 @@ class TestNativeLLMAdapter:
                 use_native_reasoning=True,
                 reasoning_effort="high",
             )
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
-            request = adapter._build_request(
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -466,12 +583,17 @@ class TestNativeLLMAdapter:
             assert request.structured_output is None
             assert request.extra == {"reasoning_effort": "high"}
 
-    def test_build_request_databricks_sonnet_5_uses_default_reasoning_display(self) -> None:
+    def test_build_request_databricks_sonnet_5_uses_default_reasoning_display(
+        self,
+    ) -> None:
+        """Build request Databricks sonnet 5 uses default reasoning display."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "databricks-claude-sonnet-5"
             mock_provider.provider_name = "databricks"
-            mock_provider.profile = ModelProfile(reasoning_display_default="omitted")
+            mock_provider.profile = ModelProfile(
+                reasoning_display_default="omitted"
+            )
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter(
@@ -479,12 +601,20 @@ class TestNativeLLMAdapter:
                 use_native_reasoning=True,
                 reasoning_effort="high",
             )
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
-            request = adapter._build_request(messages, None)
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
+            request = adapter.build_request(messages, None)
 
-            assert request.extra == {"reasoning_effort": "high", "reasoning_display": "omitted"}
+            assert request.extra == {
+                "reasoning_effort": "high",
+                "reasoning_display": "omitted",
+            }
 
-    def test_build_request_anthropic_claude_without_reasoning_keeps_structured_output(self) -> None:
+    def test_anthropic_no_reasoning_keeps_structured_output(
+        self,
+    ) -> None:
+        """Anthropic Claude without reasoning keeps structured output."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "claude-sonnet-4-5"
@@ -497,8 +627,10 @@ class TestNativeLLMAdapter:
                 use_native_reasoning=False,
                 reasoning_effort="medium",
             )
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
-            request = adapter._build_request(
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -517,7 +649,10 @@ class TestNativeLLMAdapter:
             assert request.structured_output.name == "planner_action"
             assert request.extra is None
 
-    def test_build_request_nim_structured_keeps_reasoning_effort_by_default(self) -> None:
+    def test_build_request_nim_structured_keeps_reasoning_effort_by_default(
+        self,
+    ) -> None:
+        """Build request NIM structured keeps reasoning effort by default."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "qwen/qwen3.5-397b-a17b"
@@ -530,9 +665,11 @@ class TestNativeLLMAdapter:
                 use_native_reasoning=True,
                 reasoning_effort="high",
             )
-            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+            messages = adapter.convert_messages(
+                [{"role": "user", "content": "test"}]
+            )
 
-            request = adapter._build_request(
+            request = adapter.build_request(
                 messages,
                 response_format={
                     "type": "json_schema",
@@ -553,6 +690,7 @@ class TestNativeLLMAdapter:
             assert request.extra["reasoning_effort"] == "high"
 
     def test_convert_messages(self) -> None:
+        """Convert messages."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "test-model"
@@ -565,7 +703,7 @@ class TestNativeLLMAdapter:
                 {"role": "assistant", "content": "Hi there!"},
             ]
 
-            result = adapter._convert_messages(messages)
+            result = adapter.convert_messages(messages)
 
             assert len(result) == 3
             assert result[0].role == "system"
@@ -574,6 +712,7 @@ class TestNativeLLMAdapter:
             assert result[2].role == "assistant"
 
     def test_convert_messages_invalid_role(self) -> None:
+        """Convert messages invalid role."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "test-model"
@@ -582,15 +721,20 @@ class TestNativeLLMAdapter:
             adapter = NativeLLMAdapter("test-model")
             messages = [{"role": "invalid_role", "content": "test"}]
 
-            result = adapter._convert_messages(messages)
+            result = adapter.convert_messages(messages)
 
             # Invalid role should be mapped to "user"
             assert result[0].role == "user"
 
     @pytest.mark.asyncio
-    async def test_complete_with_reasoning_content(self, mock_provider: MagicMock) -> None:
+    async def test_complete_with_reasoning_content(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete with reasoning content."""
         mock_provider.complete.return_value = CompletionResponse(
-            message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
+            message=LLMMessage(
+                role="assistant", parts=[TextPart(text='{"result": "ok"}')]
+            ),
             usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
             reasoning_content="I thought about it...",
         )
@@ -604,7 +748,7 @@ class TestNativeLLMAdapter:
                 reasoning_chunks.append((text, done))
 
             adapter = NativeLLMAdapter("test-model")
-            content, cost = await adapter.complete(
+            content, _cost = await adapter.complete(
                 messages=[{"role": "user", "content": "test"}],
                 on_reasoning_chunk=on_reasoning,
             )
@@ -615,12 +759,17 @@ class TestNativeLLMAdapter:
             assert reasoning_chunks[1] == ("", True)
 
     @pytest.mark.asyncio
-    async def test_complete_reorders_nim_system_messages_before_request(self, mock_provider: MagicMock) -> None:
+    async def test_complete_reorders_nim_system_messages_before_request(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete reorders NIM system messages before request."""
         mock_provider.provider_name = "nim"
         mock_provider.model = "qwen/qwen3.5-397b-a17b"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text='{"ok": true}')]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text='{"ok": true}')]
+                ),
                 usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
             )
         )
@@ -639,12 +788,17 @@ class TestNativeLLMAdapter:
             assert [msg.role for msg in request.messages] == ["system", "user"]
 
     @pytest.mark.asyncio
-    async def test_complete_collapses_multiple_nim_system_messages(self, mock_provider: MagicMock) -> None:
+    async def test_complete_collapses_multiple_nim_system_messages(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete collapses multiple NIM system messages."""
         mock_provider.provider_name = "nim"
         mock_provider.model = "qwen/qwen3.5-397b-a17b"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text='{"ok": true}')]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text='{"ok": true}')]
+                ),
                 usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
             )
         )
@@ -666,13 +820,23 @@ class TestNativeLLMAdapter:
             assert "System B" in request.messages[0].text
 
     @pytest.mark.asyncio
-    async def test_complete_downgrades_schema_after_invalid_json_schema_error(self, mock_provider: MagicMock) -> None:
+    async def test_complete_downgrades_schema_after_invalid_json_schema_error(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete downgrades schema after invalid JSON schema error."""
         mock_provider.complete = AsyncMock(
             side_effect=[
-                RuntimeError("invalid_json_schema: strict provider rejected schema"),
+                RuntimeError(
+                    "invalid_json_schema: strict provider rejected schema"
+                ),
                 CompletionResponse(
-                    message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
-                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                    message=LLMMessage(
+                        role="assistant",
+                        parts=[TextPart(text='{"result": "ok"}')],
+                    ),
+                    usage=Usage(
+                        input_tokens=10, output_tokens=5, total_tokens=15
+                    ),
                 ),
             ]
         )
@@ -703,19 +867,32 @@ class TestNativeLLMAdapter:
             retry_request = mock_provider.complete.call_args_list[1].args[0]
             assert retry_request.structured_output is not None
             assert retry_request.structured_output.name == "json_response"
-            assert retry_request.structured_output.json_schema == {"type": "object"}
+            assert retry_request.structured_output.json_schema == {
+                "type": "object"
+            }
             assert retry_request.structured_output.strict is False
 
     @pytest.mark.asyncio
-    async def test_complete_downgrades_json_object_to_text_mode(self, mock_provider: MagicMock) -> None:
+    async def test_complete_downgrades_json_object_to_text_mode(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete downgrades JSON object to text mode."""
         mock_provider.provider_name = "openrouter"
         mock_provider.model = "meta-llama/llama-3.3-70b-instruct"
         mock_provider.complete = AsyncMock(
             side_effect=[
-                RuntimeError("response_format json_object is not supported for this model"),
+                RuntimeError(
+                    "response_format json_object is not supported for "
+                    "this model"
+                ),
                 CompletionResponse(
-                    message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
-                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                    message=LLMMessage(
+                        role="assistant",
+                        parts=[TextPart(text='{"result": "ok"}')],
+                    ),
+                    usage=Usage(
+                        input_tokens=10, output_tokens=5, total_tokens=15
+                    ),
                 ),
             ]
         )
@@ -723,7 +900,10 @@ class TestNativeLLMAdapter:
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
-            adapter = NativeLLMAdapter("openrouter/meta-llama/llama-3.3-70b-instruct", json_schema_mode=True)
+            adapter = NativeLLMAdapter(
+                "openrouter/meta-llama/llama-3.3-70b-instruct",
+                json_schema_mode=True,
+            )
             content, _ = await adapter.complete(
                 messages=[{"role": "user", "content": "test"}],
                 response_format={"type": "json_object"},
@@ -735,15 +915,23 @@ class TestNativeLLMAdapter:
             assert retry_request.structured_output is None
 
     @pytest.mark.asyncio
-    async def test_complete_nim_structured_disables_reasoning_after_error(self, mock_provider: MagicMock) -> None:
+    async def test_complete_nim_structured_disables_reasoning_after_error(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Complete NIM structured disables reasoning after error."""
         mock_provider.provider_name = "nim"
         mock_provider.model = "qwen/qwen3.5-397b-a17b"
         mock_provider.complete = AsyncMock(
             side_effect=[
                 RuntimeError("provider rejected first structured request"),
                 CompletionResponse(
-                    message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
-                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                    message=LLMMessage(
+                        role="assistant",
+                        parts=[TextPart(text='{"result": "ok"}')],
+                    ),
+                    usage=Usage(
+                        input_tokens=10, output_tokens=5, total_tokens=15
+                    ),
                     reasoning_content="hidden reasoning",
                 ),
             ]
@@ -790,7 +978,10 @@ class TestNativeLLMAdapter:
 
 
 class TestCreateNativeAdapter:
+    """Tests for create native adapter."""
+
     def test_create_with_string_model(self) -> None:
+        """Create with string model."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter("gpt-4o", temperature=0.7)
 
@@ -812,9 +1003,14 @@ class TestCreateNativeAdapter:
             )
 
     def test_create_with_dict_config(self) -> None:
+        """Create with dict config."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
-                {"model": "gpt-4o", "api_key": "test-key", "base_url": "https://api.example.com"},
+                {
+                    "model": "gpt-4o",
+                    "api_key": "test-key",
+                    "base_url": "https://api.example.com",
+                },
                 temperature=0.5,
             )
 
@@ -836,6 +1032,7 @@ class TestCreateNativeAdapter:
             )
 
     def test_create_with_nim_dict_config(self) -> None:
+        """Create with NIM dict config."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
                 {
@@ -863,6 +1060,7 @@ class TestCreateNativeAdapter:
             )
 
     def test_create_with_dict_config_multimodal_limit(self) -> None:
+        """Create with dict config multimodal limit."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
                 {
@@ -875,6 +1073,7 @@ class TestCreateNativeAdapter:
             assert call_kwargs["multimodal_inline_data_limit_bytes"] == 1234
 
     def test_create_with_api_base_alias(self) -> None:
+        """Create with API base alias."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
                 {"model": "gpt-4o", "api_base": "https://legacy.api.com"},
@@ -885,6 +1084,7 @@ class TestCreateNativeAdapter:
             assert call_kwargs["base_url"] == "https://legacy.api.com"
 
     def test_create_with_streaming(self) -> None:
+        """Create with streaming."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter("gpt-4o", streaming_enabled=True)
 
@@ -892,6 +1092,7 @@ class TestCreateNativeAdapter:
             assert call_kwargs["streaming_enabled"] is True
 
     def test_create_with_reasoning_params(self) -> None:
+        """Create with reasoning params."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
                 "o1",
@@ -904,6 +1105,7 @@ class TestCreateNativeAdapter:
             assert call_kwargs["reasoning_effort"] == "high"
 
     def test_create_extracts_extra_kwargs_from_dict(self) -> None:
+        """Create extracts extra kwargs from dict."""
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
                 {"model": "gpt-4o", "custom_param": "value"},
@@ -913,7 +1115,10 @@ class TestCreateNativeAdapter:
             assert call_kwargs.get("custom_param") == "value"
 
     def test_create_with_fallback_threads_multimodal_limit(self) -> None:
-        with patch("penguiflow.llm.fallback.FallbackLLMClient") as mock_fallback:
+        """Create with fallback threads multimodal limit."""
+        with patch(
+            "penguiflow.llm.fallback.FallbackLLMClient"
+        ) as mock_fallback:
             create_native_adapter(
                 "gpt-4o",
                 fallback=ModelFallbackConfig(models=["gpt-4o-mini"]),
@@ -924,11 +1129,12 @@ class TestCreateNativeAdapter:
             assert call_kwargs["multimodal_inline_data_limit_bytes"] == 2048
 
     def test_create_rejects_full_reasoning_display_with_fallback(self) -> None:
+        """Create rejects full reasoning display with fallback."""
         with pytest.raises(ValueError, match="reasoning_display"):
             create_native_adapter(
                 "gpt-4o",
                 fallback=ModelFallbackConfig(models=["gpt-4o-mini"]),
-                reasoning_display="full",
+                **json.loads('{"reasoning_display": "full"}'),
             )
 
 
@@ -943,14 +1149,18 @@ class TestNativeLLMAdapterStreaming:
         provider.provider_name = "test"
         provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text='{"result": "ok"}')]
+                ),
                 usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
             )
         )
         return provider
 
     @pytest.mark.asyncio
-    async def test_streaming_callback_wrapper(self, mock_provider: MagicMock) -> None:
+    async def test_streaming_callback_wrapper(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that streaming callback wrapper forwards events correctly."""
         from penguiflow.llm.types import StreamEvent
 
@@ -964,15 +1174,19 @@ class TestNativeLLMAdapterStreaming:
             received_reasoning.append((text, done))
 
         # Mock provider that calls the stream callback
-        async def mock_complete(request: Any, **kwargs: Any) -> CompletionResponse:
+        async def mock_complete(
+            _request: LLMRequest, **kwargs: object
+        ) -> CompletionResponse:
             callback = kwargs.get("on_stream_event")
-            if callback:
+            if callable(callback):
                 callback(StreamEvent(delta_text="Hello"))
                 callback(StreamEvent(delta_text=" world"))
                 callback(StreamEvent(delta_reasoning="Because..."))
                 callback(StreamEvent(done=True))
             return CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Hello world")]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Hello world")]
+                ),
                 usage=Usage(input_tokens=5, output_tokens=2, total_tokens=7),
             )
 
@@ -996,7 +1210,9 @@ class TestNativeLLMAdapterStreaming:
         assert ("", True) in received_reasoning
 
     @pytest.mark.asyncio
-    async def test_streaming_disabled_ignores_callback(self, mock_provider: MagicMock) -> None:
+    async def test_streaming_disabled_ignores_callback(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that streaming disabled doesn't use callback."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
@@ -1005,7 +1221,7 @@ class TestNativeLLMAdapterStreaming:
 
             called = False
 
-            def on_chunk(text: str, done: bool) -> None:
+            def on_chunk(_text: str, _done: bool) -> None:
                 nonlocal called
                 called = True
 
@@ -1021,19 +1237,26 @@ class TestNativeLLMAdapterStreaming:
 
 
 class TestNativeLLMAdapterStreamEvents:
+    """Tests for native LLM adapter stream events."""
+
     @pytest.mark.asyncio
     async def test_stream_events_yields_provider_events(self) -> None:
+        """Stream events yields provider events."""
         from penguiflow.llm.types import StreamEvent
 
-        async def mock_complete(request: Any, **kwargs: Any) -> CompletionResponse:
+        async def mock_complete(
+            _request: LLMRequest, **kwargs: object
+        ) -> CompletionResponse:
             callback = kwargs.get("on_stream_event")
             assert kwargs.get("stream") is True
-            assert callback is not None
+            assert callable(callback)
             callback(StreamEvent(delta_text="Hello"))
             callback(StreamEvent(delta_reasoning="Thinking..."))
             callback(StreamEvent(done=True))
             return CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Hello")]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Hello")]
+                ),
                 usage=Usage(input_tokens=1, output_tokens=2, total_tokens=3),
                 reasoning_content="Thinking...",
             )
@@ -1048,7 +1271,9 @@ class TestNativeLLMAdapterStreamEvents:
             adapter = NativeLLMAdapter("test-model", streaming_enabled=True)
 
             events: list[Any] = []
-            async for event in adapter.stream_events(messages=[{"role": "user", "content": "Hi"}]):
+            async for event in adapter.stream_events(
+                messages=[{"role": "user", "content": "Hi"}]
+            ):
                 events.append(event)
 
         assert any(e.delta_text == "Hello" for e in events)
@@ -1057,6 +1282,7 @@ class TestNativeLLMAdapterStreamEvents:
 
     @pytest.mark.asyncio
     async def test_stream_events_raises_when_disabled(self) -> None:
+        """Stream events raises when disabled."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
@@ -1067,7 +1293,9 @@ class TestNativeLLMAdapterStreamEvents:
             adapter = NativeLLMAdapter("test-model", streaming_enabled=False)
 
             with pytest.raises(RuntimeError, match="Streaming is disabled"):
-                async for _ in adapter.stream_events(messages=[{"role": "user", "content": "Hi"}]):
+                async for _ in adapter.stream_events(
+                    messages=[{"role": "user", "content": "Hi"}]
+                ):
                     pass
 
 
@@ -1082,9 +1310,11 @@ class TestNativeLLMAdapterBuildRequest:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model", temperature=0.5)
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Hello")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Hello")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             assert request.model == "test-model"
             assert request.temperature == 0.5
@@ -1098,12 +1328,17 @@ class TestNativeLLMAdapterBuildRequest:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model", json_schema_mode=False)
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Hello")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Hello")])
+            ]
 
             # Pass response_format but mode is disabled
-            request = adapter._build_request(
+            request = adapter.build_request(
                 messages,
-                {"type": "json_schema", "json_schema": {"name": "test", "schema": {}}},
+                {
+                    "type": "json_schema",
+                    "json_schema": {"name": "test", "schema": {}},
+                },
             )
 
             # structured_output should be None when mode is disabled
@@ -1121,15 +1356,17 @@ class TestNativeLLMAdapterBuildRequest:
                 use_native_reasoning=True,
                 reasoning_effort="medium",
             )
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Think")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             assert request.extra is not None
             assert request.extra["reasoning_effort"] == "medium"
 
     def test_build_request_with_reasoning_effort_for_nim_model(self) -> None:
-        """NIM models should use the same canonical reasoning_effort request knob."""
+        """NIM models use the canonical reasoning_effort request knob."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "qwen/qwen3.5-397b-a17b"
@@ -1140,14 +1377,19 @@ class TestNativeLLMAdapterBuildRequest:
                 use_native_reasoning=True,
                 reasoning_effort="high",
             )
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Think")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             assert request.extra is not None
             assert request.extra["reasoning_effort"] == "high"
 
-    def test_build_request_openrouter_xai_injects_reasoning_enabled(self) -> None:
+    def test_build_request_openrouter_xai_injects_reasoning_enabled(
+        self,
+    ) -> None:
+        """Build request OpenRouter xai injects reasoning enabled."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "x-ai/grok-4.1-fast"
@@ -1158,15 +1400,20 @@ class TestNativeLLMAdapterBuildRequest:
                 "openrouter/x-ai/grok-4.1-fast",
                 use_native_reasoning=True,
             )
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Think")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             assert request.extra is not None
             assert request.extra["reasoning_enabled"] is True
             assert "reasoning_effort" not in request.extra
 
-    def test_build_request_openrouter_xai_reasoning_effort_off_sets_disabled(self) -> None:
+    def test_build_request_openrouter_xai_reasoning_effort_off_sets_disabled(
+        self,
+    ) -> None:
+        """Build request OpenRouter xai reasoning effort off sets disabled."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "x-ai/grok-4.1-fast"
@@ -1178,15 +1425,20 @@ class TestNativeLLMAdapterBuildRequest:
                 use_native_reasoning=True,
                 reasoning_effort="off",
             )
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Think")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             assert request.extra is not None
             assert request.extra["reasoning_enabled"] is False
             assert request.extra["reasoning_effort"] == "off"
 
-    def test_build_request_openrouter_non_xai_does_not_inject_reasoning_enabled(self) -> None:
+    def test_openrouter_non_xai_no_reasoning_enabled(
+        self,
+    ) -> None:
+        """OpenRouter non-xAI requests do not inject reasoning.enabled."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.model = "anthropic/claude-sonnet-4.5"
@@ -1197,9 +1449,11 @@ class TestNativeLLMAdapterBuildRequest:
                 "openrouter/anthropic/claude-sonnet-4.5",
                 use_native_reasoning=True,
             )
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Think")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             assert request.extra is None
 
@@ -1215,9 +1469,11 @@ class TestNativeLLMAdapterBuildRequest:
                 use_native_reasoning=False,
                 reasoning_effort="medium",
             )
-            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+            messages = [
+                LLMMessage(role="user", parts=[TextPart(text="Think")])
+            ]
 
-            request = adapter._build_request(messages, None)
+            request = adapter.build_request(messages, None)
 
             # extra should be None when use_native_reasoning is False
             assert request.extra is None
@@ -1233,8 +1489,12 @@ class TestNativeLLMAdapterCost:
         mock_provider.model = "gpt-4o"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Response")]),
-                usage=Usage(input_tokens=1000, output_tokens=500, total_tokens=1500),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Response")]
+                ),
+                usage=Usage(
+                    input_tokens=1000, output_tokens=500, total_tokens=1500
+                ),
             )
         )
 
@@ -1242,7 +1502,9 @@ class TestNativeLLMAdapterCost:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("gpt-4o")
-            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
+            _content, cost = await adapter.complete(
+                messages=[{"role": "user", "content": "Hello"}]
+            )
 
             # Cost should be positive for known model
             assert cost > 0
@@ -1254,7 +1516,9 @@ class TestNativeLLMAdapterCost:
         mock_provider.model = "claude-haiku-4.5"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Response " * 200)]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Response " * 200)]
+                ),
                 usage=Usage.zero(),
             )
         )
@@ -1263,19 +1527,23 @@ class TestNativeLLMAdapterCost:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("claude-haiku-4.5")
-            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello " * 500}])
+            _content, cost = await adapter.complete(
+                messages=[{"role": "user", "content": "Hello " * 500}]
+            )
 
             assert cost > 0.0
 
     @pytest.mark.asyncio
     async def test_zero_cost_no_usage_for_unknown_model(self) -> None:
-        """Test zero cost when usage is missing and pricing is unknown."""
+        """Test zero cost when usage is empty and pricing is unknown."""
         mock_provider = MagicMock()
         mock_provider.model = "totally-unknown-model"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Response")]),
-                usage=None,
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Response")]
+                ),
+                usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0),
             )
         )
 
@@ -1283,13 +1551,17 @@ class TestNativeLLMAdapterCost:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("totally-unknown-model")
-            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
+            _content, cost = await adapter.complete(
+                messages=[{"role": "user", "content": "Hello"}]
+            )
 
             assert cost == 0.0
 
     @pytest.mark.asyncio
-    async def test_estimated_cost_in_native_tool_call_mode_when_usage_is_zero(self) -> None:
-        """Native tool-calling should estimate cost when a priced provider returns 0/0 usage."""
+    async def test_estimated_cost_in_native_tool_call_mode_when_usage_is_zero(
+        self,
+    ) -> None:
+        """Native tool calls estimate cost when usage comes back 0/0."""
         mock_provider = MagicMock()
         mock_provider.model = "databricks-claude-opus-4-6"
         mock_provider.provider_name = "databricks"
@@ -1315,21 +1587,30 @@ class TestNativeLLMAdapterCost:
 
             adapter = NativeLLMAdapter("databricks-claude-opus-4-6")
             result = await adapter.complete_with_tools(
-                messages=[{"role": "user", "content": "Analyze Tubi for Q1 2026"}],
+                messages=[
+                    {"role": "user", "content": "Analyze Tubi for Q1 2026"}
+                ],
                 tools=[],
             )
 
             assert result.cost > 0.0
 
     @pytest.mark.asyncio
-    async def test_complete_with_tools_uses_databricks_sonnet_5_reasoning_defaults(self) -> None:
+    async def test_tools_call_uses_sonnet_5_reasoning_defaults(
+        self,
+    ) -> None:
+        """Complete with tools uses databricks sonnet 5 reasoning defaults."""
         mock_provider = MagicMock()
         mock_provider.model = "databricks-claude-sonnet-5"
         mock_provider.provider_name = "databricks"
-        mock_provider.profile = ModelProfile(reasoning_display_default="omitted")
+        mock_provider.profile = ModelProfile(
+            reasoning_display_default="omitted"
+        )
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Response")]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Response")]
+                ),
                 usage=Usage.zero(),
             )
         )
@@ -1347,4 +1628,7 @@ class TestNativeLLMAdapterCost:
             )
 
             request = mock_provider.complete.call_args.args[0]
-            assert request.extra == {"reasoning_effort": "high", "reasoning_display": "omitted"}
+            assert request.extra == {
+                "reasoning_effort": "high",
+                "reasoning_display": "omitted",
+            }

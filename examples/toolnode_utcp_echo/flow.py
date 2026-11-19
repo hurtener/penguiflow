@@ -1,29 +1,22 @@
+"""ToolNode example: call an echo tool over UTCP."""
+
 import asyncio
 import json
+import sys
 
+from penguiflow.artifacts import InMemoryArtifactStore
 from penguiflow.registry import ModelRegistry
-from penguiflow.tools import ExternalToolConfig, ToolNode, TransportType, UtcpMode
-
-
-class DummyCtx:
-    """Minimal ToolContext-compatible stub for examples."""
-
-    def __init__(self) -> None:
-        self.tool_context = {}
-        self.llm_context = {}
-        self.meta = {}
-
-    async def pause(self, reason, payload=None):
-        return None
-
-    async def emit_chunk(self, *args, **kwargs):
-        return None
-
-    async def emit_artifact(self, *args, **kwargs):
-        return None
+from penguiflow.sessions.tool_jobs import ToolJobContext
+from penguiflow.tools import (
+    ExternalToolConfig,
+    ToolNode,
+    TransportType,
+    UtcpMode,
+)
 
 
 async def main() -> None:
+    """Run the example."""
     config = ExternalToolConfig(
         name="echo",
         transport=TransportType.UTCP,
@@ -36,18 +29,26 @@ async def main() -> None:
     await node.connect()
 
     tools = node.get_tools()
-    print(f"Discovered tools: {[t.name for t in tools]}")
+    sys.stdout.write(f"Discovered tools: {[t.name for t in tools]}\n")
 
     if not tools:
-        print("No tools discovered; check connectivity and utcp manual support.")
+        sys.stdout.write(
+            "No tools discovered; check connectivity and utcp manual "
+            "support.\n"
+        )
         return
 
-    ctx = DummyCtx()
+    # A standalone ToolContext: tools run here without a planner.
+    ctx = ToolJobContext(
+        llm_context={}, tool_context={}, artifacts=InMemoryArtifactStore()
+    )
     tool_name = tools[0].name
 
     try:
-        result = await node.call(tool_name, {"message": "hello from ToolNode via UTCP"}, ctx)
-        print("Call result:\n", json.dumps(result, indent=2))
+        result = await node.call(
+            tool_name, {"message": "hello from ToolNode via UTCP"}, ctx
+        )
+        sys.stdout.write(f"Call result:\n {json.dumps(result, indent=2)}\n")
     finally:
         await node.close()
 

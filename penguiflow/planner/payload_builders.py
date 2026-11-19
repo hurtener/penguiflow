@@ -5,92 +5,114 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
-from ..artifacts import ArtifactScope, ArtifactStore
-from .artifact_registry import ArtifactRegistry
 from .models import FinalPayload, ObservationGuardrailConfig, PlannerEvent
 from .trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from ..artifacts import ArtifactScope, ArtifactStore
+    from ..catalog import NodeSpec
+    from .artifact_registry import ArtifactRegistry
 
 logger = logging.getLogger("penguiflow.planner")
 
 
-def _fallback_answer(last_observation: Any) -> str:
+_NO_ANSWER = "No answer produced."
+_ANSWER_KEYS = (
+    "raw_answer",
+    "answer",
+    "text",
+    "result",
+    "output",
+    "response",
+    "message",
+    "content",
+    "greeting",
+    "joke",
+    "reply",
+    "summary",
+    "explanation",
+    "description",
+    "body",
+)
+_THINKING_PHRASES = (
+    "i need to",
+    "i should",
+    "i will",
+    "let me",
+    "i'll",
+    "first,",
+    "now i",
+    "the user",
+    "based on",
+    "looking at",
+    "i can see",
+    "i notice",
+    "according to",
+)
+
+
+def _mapping_answer(observation: Mapping[str, Any]) -> str | None:
+    """Extract an answer string from a mapping observation, if any."""
+    # First pass: check for answer-like keys (prioritized order)
+    for key in _ANSWER_KEYS:
+        if key not in observation:
+            continue
+        value = observation[key]
+        if isinstance(value, str):
+            return value
+        if isinstance(value, Mapping):
+            # Recursively extract from nested dict
+            return _fallback_answer(value)
+        if value is not None:
+            return str(value)
+
+    # Second pass: check if there's a nested 'args' dict with answer-like
+    # keys
+    if "args" in observation and isinstance(observation["args"], Mapping):
+        nested = _fallback_answer(observation["args"])
+        if nested != _NO_ANSWER:
+            return nested
+
+    # Third pass: if observation has exactly one string value > 10 chars, use
+    # it (excluding 'thought' and 'next_node' which are planner metadata)
+    excluded_keys = {"thought", "next_node", "plan", "join"}
+    string_values = [
+        v
+        for k, v in observation.items()
+        if k not in excluded_keys and isinstance(v, str) and len(v) > 10
+    ]
+    if len(string_values) == 1:
+        return string_values[0]
+
+    # Fourth pass: use 'thought' as last resort if it looks like an answer
+    return _thought_answer(observation.get("thought", ""))
+
+
+def _thought_answer(thought: object) -> str | None:
+    """Return a long ``thought`` that does not read like thinking."""
+    if not isinstance(thought, str) or len(thought) <= 20:
+        return None
+    thought_lower = thought.lower().strip()
+    if any(thought_lower.startswith(p) for p in _THINKING_PHRASES):
+        return None
+    return thought
+
+
+def _fallback_answer(last_observation: object) -> str:
     """Provide a safe fallback answer when planner args are missing.
 
-    This function extracts a human-readable answer string from various payload formats.
-    Per RFC_STRUCTURED_PLANNER_OUTPUT, the result must be a plain string (not JSON).
+    This function extracts a human-readable answer string from various payload
+    formats. Per RFC_STRUCTURED_PLANNER_OUTPUT, the result must be a plain
+    string (not JSON).
     """
-
     if isinstance(last_observation, Mapping):
-        # First pass: check for answer-like keys (prioritized order)
-        for key in (
-            "raw_answer",
-            "answer",
-            "text",
-            "result",
-            "output",
-            "response",
-            "message",
-            "content",
-            "greeting",
-            "joke",
-            "reply",
-            "summary",
-            "explanation",
-            "description",
-            "body",
-        ):
-            if key in last_observation:
-                value = last_observation[key]
-                if isinstance(value, str):
-                    return value
-                if isinstance(value, Mapping):
-                    # Recursively extract from nested dict
-                    return _fallback_answer(value)
-                if value is not None:
-                    return str(value)
-
-        # Second pass: check if there's a nested 'args' dict with answer-like keys
-        if "args" in last_observation and isinstance(last_observation["args"], Mapping):
-            nested = _fallback_answer(last_observation["args"])
-            if nested != "No answer produced.":
-                return nested
-
-        # Third pass: if observation has exactly one string value > 10 chars, use it
-        # (excluding 'thought' and 'next_node' which are planner metadata)
-        excluded_keys = {"thought", "next_node", "plan", "join"}
-        string_values = [
-            v for k, v in last_observation.items() if k not in excluded_keys and isinstance(v, str) and len(v) > 10
-        ]
-        if len(string_values) == 1:
-            return string_values[0]
-
-        # Fourth pass: use 'thought' as last resort if it looks like an answer
-        # (i.e., it doesn't start with typical thinking phrases)
-        thought = last_observation.get("thought", "")
-        if isinstance(thought, str) and len(thought) > 20:
-            thinking_phrases = (
-                "i need to",
-                "i should",
-                "i will",
-                "let me",
-                "i'll",
-                "first,",
-                "now i",
-                "the user",
-                "based on",
-                "looking at",
-                "i can see",
-                "i notice",
-                "according to",
-            )
-            thought_lower = thought.lower().strip()
-            if not any(thought_lower.startswith(p) for p in thinking_phrases):
-                return thought
-
+        answer = _mapping_answer(last_observation)
+        if answer is not None:
+            return answer
     if isinstance(last_observation, str):
         return last_observation
     if last_observation is not None:
@@ -98,10 +120,12 @@ def _fallback_answer(last_observation: Any) -> str:
             return json.dumps(last_observation, ensure_ascii=False)
         except (TypeError, ValueError):
             return str(last_observation)
-    return "No answer produced."
+    return _NO_ANSWER
 
 
-def _build_failure_payload(spec: Any, args: BaseModel, exc: Exception) -> dict[str, Any]:
+def _build_failure_payload(
+    spec: NodeSpec, args: BaseModel, exc: Exception
+) -> dict[str, Any]:
     suggestion = getattr(exc, "suggestion", None)
     if suggestion is None:
         suggestion = getattr(exc, "remedy", None)
@@ -131,8 +155,8 @@ async def _clamp_observation(
 ) -> tuple[dict[str, Any], bool]:
     """Apply observation size guardrails to prevent context overflow.
 
-    This is the final safety net after ToolNode's artifact extraction.
-    It ensures no single observation exceeds the configured limits.
+    This is the final safety net after ToolNode's artifact extraction. It
+    ensures no single observation exceeds the configured limits.
     """
     # Serialize to check total size
     try:
@@ -148,7 +172,10 @@ async def _clamp_observation(
         return observation, False
 
     # Store as artifact if above threshold and artifact store supports it
-    if config.auto_artifact_threshold > 0 and original_size >= config.auto_artifact_threshold:
+    if (
+        config.auto_artifact_threshold > 0
+        and original_size >= config.auto_artifact_threshold
+    ):
         try:
             ref = await artifact_store.put_text(
                 serialized,
@@ -160,7 +187,9 @@ async def _clamp_observation(
                 source_tool=f"observation.{spec_name}",
                 step_index=trajectory_step,
             )
-            if isinstance(active_trajectory, Trajectory) and isinstance(active_trajectory.metadata, MutableMapping):
+            if isinstance(active_trajectory, Trajectory) and isinstance(
+                active_trajectory.metadata, MutableMapping
+            ):
                 artifact_registry.write_snapshot(active_trajectory.metadata)
             preview = (
                 serialized[: config.preview_length] + "..."
@@ -170,7 +199,8 @@ async def _clamp_observation(
             clamped = {
                 "artifact": ref.model_dump(),
                 "summary": (
-                    f"Large observation stored as artifact ({original_size} chars). "
+                    "Large observation stored as artifact "
+                    f"({original_size} chars). "
                     f"Artifact ID: {ref.id}"
                 ),
                 "preview": preview,
@@ -184,10 +214,11 @@ async def _clamp_observation(
                 clamped_size=len(json.dumps(clamped)),
                 method="artifact",
             )
-            return clamped, True
         except Exception as exc:
             logger.debug(f"Failed to store observation as artifact: {exc}")
             # Fall through to truncation
+        else:
+            return clamped, True
 
     # Truncate approach
     if config.preserve_structure:
@@ -201,11 +232,17 @@ async def _clamp_observation(
         # Simple truncation of serialized form
         suffix_template = config.truncation_suffix
         suffix_len = len(suffix_template.format(truncated_chars=0))
-        truncated_chars = original_size - config.max_observation_chars + suffix_len
-        truncated_text = serialized[: config.max_observation_chars - suffix_len]
+        truncated_chars = (
+            original_size - config.max_observation_chars + suffix_len
+        )
+        truncated_text = serialized[
+            : config.max_observation_chars - suffix_len
+        ]
         clamped = {
             "truncated_observation": truncated_text,
-            "truncation_note": suffix_template.format(truncated_chars=truncated_chars),
+            "truncation_note": suffix_template.format(
+                truncated_chars=truncated_chars
+            ),
         }
 
     clamped_size = len(json.dumps(clamped, ensure_ascii=False))
@@ -237,7 +274,11 @@ def _truncate_observation_preserving_structure(
     for key, value in observation.items():
         if isinstance(value, str) and len(value) > max_field_chars:
             truncated_chars = len(value) - max_field_chars
-            result[key] = value[:max_field_chars] + config.truncation_suffix.format(truncated_chars=truncated_chars)
+            result[key] = value[
+                :max_field_chars
+            ] + config.truncation_suffix.format(
+                truncated_chars=truncated_chars
+            )
         elif isinstance(value, dict):
             # Recursively handle nested dicts
             result[key] = _truncate_observation_preserving_structure(
@@ -246,7 +287,10 @@ def _truncate_observation_preserving_structure(
         elif isinstance(value, list):
             # Truncate list if too many items
             if len(value) > 20:
-                result[key] = value[:20] + [f"... [{len(value) - 20} more items]"]
+                result[key] = [
+                    *value[:20],
+                    f"... [{len(value) - 20} more items]",
+                ]
             else:
                 result[key] = value
         else:
@@ -256,7 +300,11 @@ def _truncate_observation_preserving_structure(
     serialized = json.dumps(result, ensure_ascii=False)
     if len(serialized) > max_total_chars:
         # Further truncate the largest string fields
-        str_fields = [(k, len(json.dumps(v))) for k, v in result.items() if isinstance(v, str)]
+        str_fields = [
+            (k, len(json.dumps(v)))
+            for k, v in result.items()
+            if isinstance(v, str)
+        ]
         str_fields.sort(key=lambda x: x[1], reverse=True)
 
         for field_name, _ in str_fields:
@@ -265,7 +313,9 @@ def _truncate_observation_preserving_structure(
             current_val = result[field_name]
             if isinstance(current_val, str) and len(current_val) > 100:
                 # Truncate to preview length
-                result[field_name] = current_val[:config.preview_length] + config.truncation_suffix.format(
+                result[field_name] = current_val[
+                    : config.preview_length
+                ] + config.truncation_suffix.format(
                     truncated_chars=len(current_val) - config.preview_length
                 )
                 serialized = json.dumps(result, ensure_ascii=False)
@@ -294,7 +344,11 @@ def _emit_observation_clamped_event(
                 "original_size": original_size,
                 "clamped_size": clamped_size,
                 "method": method,
-                "reduction_pct": round((1 - clamped_size / original_size) * 100, 1) if original_size > 0 else 0,
+                "reduction_pct": round(
+                    (1 - clamped_size / original_size) * 100, 1
+                )
+                if original_size > 0
+                else 0,
             },
         )
     )
@@ -309,10 +363,79 @@ def _emit_observation_clamped_event(
     )
 
 
+def _first_fallback_answer(*sources: object) -> str | None:
+    """Return the first real fallback answer among ``sources``."""
+    for source in sources:
+        if source is None:
+            continue
+        extracted = _fallback_answer(source)
+        logger.debug(
+            "fallback_answer_extraction",
+            extra={
+                "source_type": type(source).__name__,
+                "extracted": extracted[:200] if extracted else None,
+            },
+        )
+        if extracted and extracted != _NO_ANSWER:
+            return extracted
+    return None
+
+
+def _log_no_answer(args: object, last_observation: object) -> None:
+    """Log why no answer could be extracted from the final payload."""
+    args_keys = list(args.keys()) if isinstance(args, dict) else None
+    logger.warning(
+        "no_answer_extracted",
+        extra={
+            "input_args": str(args)[:500] if args else None,
+            "input_args_type": type(args).__name__ if args else None,
+            "input_args_keys": args_keys,
+            "last_observation": str(last_observation)[:200]
+            if last_observation
+            else None,
+            "expected_keys": [
+                "raw_answer",
+                "answer",
+                "text",
+                "result",
+                "output",
+                "response",
+                "message",
+                "content",
+            ],
+        },
+    )
+
+
+def _initial_payload(args: object) -> dict[str, Any]:
+    """Seed the final payload from the finish action's args."""
+    if isinstance(args, BaseModel):
+        return args.model_dump(mode="json")
+    if isinstance(args, Mapping):
+        return dict(args)
+    if args is not None:
+        return {"raw_answer": _fallback_answer(args)}
+    return {}
+
+
+def _move_unknown_fields_to_extra(payload_data: dict[str, Any]) -> None:
+    """Nest the keys FinalPayload does not declare under ``extra``."""
+    known_fields = set(FinalPayload.model_fields)
+    extra_payload: dict[str, Any] = {}
+    existing_extra = payload_data.get("extra")
+    if isinstance(existing_extra, Mapping):
+        extra_payload.update(existing_extra)
+    for key in list(payload_data.keys()):
+        if key not in known_fields:
+            extra_payload[key] = payload_data.pop(key)
+    if extra_payload:
+        payload_data["extra"] = extra_payload
+
+
 def _build_final_payload(
     *,
-    args: Mapping[str, Any] | Any | None,
-    last_observation: Any,
+    args: object,
+    last_observation: object,
     artifacts: Mapping[str, Any],
     sources: Sequence[Mapping[str, Any]] | None,
 ) -> FinalPayload:
@@ -321,74 +444,27 @@ def _build_final_payload(
         extra={
             "args_type": type(args).__name__,
             "args_value": str(args)[:500] if args else None,
-            "last_observation_type": type(last_observation).__name__ if last_observation else None,
-            "last_observation_value": str(last_observation)[:500] if last_observation else None,
+            "last_observation_type": type(last_observation).__name__
+            if last_observation
+            else None,
+            "last_observation_value": str(last_observation)[:500]
+            if last_observation
+            else None,
         },
     )
 
-    payload_data: dict[str, Any] = {}
-    if isinstance(args, BaseModel):
-        payload_data.update(args.model_dump(mode="json"))
-    elif isinstance(args, Mapping):
-        payload_data.update(args)
-    elif args is not None:
-        payload_data["raw_answer"] = _fallback_answer(args)
-
+    payload_data = _initial_payload(args)
     if not payload_data.get("raw_answer"):
         # Try args first (the LLM's answer), then last_observation
-        for source in (args, last_observation):
-            if source is not None:
-                extracted = _fallback_answer(source)
-                logger.debug(
-                    "fallback_answer_extraction",
-                    extra={
-                        "source_type": type(source).__name__,
-                        "extracted": extracted[:200] if extracted else None,
-                    },
-                )
-                if extracted and extracted != "No answer produced.":
-                    payload_data["raw_answer"] = extracted
-                    break
-        else:
-            # Log detailed info to help debug why no answer was extracted
-            args_keys = list(args.keys()) if isinstance(args, dict) else None
-            logger.warning(
-                "no_answer_extracted",
-                extra={
-                    "input_args": str(args)[:500] if args else None,
-                    "input_args_type": type(args).__name__ if args else None,
-                    "input_args_keys": args_keys,
-                    "last_observation": str(last_observation)[:200] if last_observation else None,
-                    "expected_keys": [
-                        "raw_answer",
-                        "answer",
-                        "text",
-                        "result",
-                        "output",
-                        "response",
-                        "message",
-                        "content",
-                    ],
-                },
-            )
-            payload_data["raw_answer"] = "No answer produced."
+        raw_answer = _first_fallback_answer(args, last_observation)
+        if raw_answer is None:
+            _log_no_answer(args, last_observation)
+        payload_data["raw_answer"] = raw_answer or _NO_ANSWER
 
     payload_data["artifacts"] = dict(artifacts)
     if sources is not None:
         payload_data["sources"] = list(sources)
-
-    known_fields = set(FinalPayload.model_fields)
-    extra_payload: dict[str, Any] = {}
-    existing_extra = payload_data.get("extra")
-    if isinstance(existing_extra, Mapping):
-        extra_payload.update(existing_extra)
-
-    for key in list(payload_data.keys()):
-        if key not in known_fields:
-            extra_payload[key] = payload_data.pop(key)
-
-    if extra_payload:
-        payload_data["extra"] = extra_payload
+    _move_unknown_fields_to_extra(payload_data)
 
     try:
         return FinalPayload.model_validate(payload_data)
@@ -398,14 +474,8 @@ def _build_final_payload(
             extra={"error": str(exc)},
         )
         # Try args first, then last_observation (consistent with above)
-        raw_answer = "No answer produced."
-        for source in (args, last_observation):
-            if source is not None:
-                extracted = _fallback_answer(source)
-                if extracted and extracted != "No answer produced.":
-                    raw_answer = extracted
-                    break
         return FinalPayload(
-            raw_answer=raw_answer,
+            raw_answer=_first_fallback_answer(args, last_observation)
+            or _NO_ANSWER,
             artifacts=dict(artifacts),
         )

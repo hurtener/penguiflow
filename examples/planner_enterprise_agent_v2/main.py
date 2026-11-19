@@ -1,4 +1,4 @@
-"""Enterprise agent orchestrator with ReactPlanner and comprehensive observability.
+"""Enterprise agent orchestrator: ReactPlanner with full observability.
 
 This is the cornerstone implementation for production agent deployments,
 demonstrating:
@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 from collections import defaultdict
-from typing import Any
+from typing import Any, assert_never
 from uuid import uuid4
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
@@ -77,6 +78,7 @@ class EnterpriseAgentOrchestrator:
         *,
         telemetry: AgentTelemetry | None = None,
     ) -> None:
+        """Store ``config`` and ``telemetry``."""
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
 
@@ -120,9 +122,9 @@ class EnterpriseAgentOrchestrator:
             - Abstraction and reusability
 
         Pattern B - Individual Nodes (Bug Triage):
-            Each step is exposed as a separate planner-discoverable node.
-            The planner can dynamically decide whether to collect logs,
-            run diagnostics, or skip steps based on context.
+            Each step is exposed as a separate planner-discoverable node. The
+            planner can dynamically decide whether to collect logs, run
+            diagnostics, or skip steps based on context.
 
             Benefits:
             - Maximum flexibility and control
@@ -130,8 +132,8 @@ class EnterpriseAgentOrchestrator:
             - Better observability of each step
             - Enables conditional/parallel execution
 
-        Use Pattern A when workflows are deterministic and linear.
-        Use Pattern B when workflows need dynamic decision-making.
+        Use Pattern A when workflows are deterministic and linear. Use Pattern
+        B when workflows need dynamic decision-making.
         """
         return [
             # Router (always individual)
@@ -153,16 +155,15 @@ class EnterpriseAgentOrchestrator:
         Note the difference in registrations:
 
         Pattern A (Pipeline Tool):
-            analyze_documents: RouteDecision → FinalAnswer
-            The planner sees this as a single-step transformation.
-            Internally it runs 5 steps, but externally it's one tool.
+            analyze_documents: RouteDecision → FinalAnswer The planner sees
+            this as a single-step transformation. Internally it runs 5 steps,
+            but externally it's one tool.
 
         Pattern B (Individual Nodes):
-            init_bug: RouteDecision → BugState
-            collect_logs: BugState → BugState
-            run_diagnostics: BugState → BugState
-            recommend_fix: BugState → FinalAnswer
-            The planner sees each step and can make decisions between them.
+            init_bug: RouteDecision → BugState collect_logs: BugState →
+            BugState run_diagnostics: BugState → BugState recommend_fix:
+            BugState → FinalAnswer The planner sees each step and can make
+            decisions between them.
         """
         registry = ModelRegistry()
 
@@ -175,13 +176,15 @@ class EnterpriseAgentOrchestrator:
         # Router
         registry.register("triage_query", UserQuery, RouteDecision)
 
-        # PATTERN A: Document workflow as a pipeline tool
-        # Single registration: RouteDecision → FinalAnswer
-        # (Internal pipeline steps are NOT registered in planner catalog)
-        registry.register("analyze_documents", DocumentRouteDecision, FinalAnswer)
+        # PATTERN A: Document workflow as a pipeline tool Single registration:
+        # RouteDecision → FinalAnswer (Internal pipeline steps are NOT
+        # registered in planner catalog)
+        registry.register(
+            "analyze_documents", DocumentRouteDecision, FinalAnswer
+        )
 
-        # PATTERN B: Bug workflow as individual nodes
-        # Each step registered separately for granular control
+        # PATTERN B: Bug workflow as individual nodes Each step registered
+        # separately for granular control
         registry.register("init_bug", RouteDecision, BugState)
         registry.register("collect_logs", BugState, BugState)
         registry.register("run_diagnostics", BugState, BugState)
@@ -193,7 +196,7 @@ class EnterpriseAgentOrchestrator:
         return registry
 
     def _build_planner(self) -> ReactPlanner:
-        """Construct ReactPlanner with enterprise configuration (v2 - Enhanced).
+        """Build the ReactPlanner from the enterprise (v2) configuration.
 
         V2 Enhancements:
         - Reflection loop for answer quality assurance (FLAGSHIP)
@@ -204,11 +207,14 @@ class EnterpriseAgentOrchestrator:
         """
         catalog = build_catalog(self._nodes, self._registry)
 
-        # Use DSPy for better structured output handling across providers
-        # DSPy is especially beneficial for models that don't support native
-        # JSON schema mode (like Databricks, Cerebras), but works well with all providers
-        # Can be explicitly enabled via DSPY_CLIENT=true env var
-        use_dspy = self.config.use_dspy_client or self.config.llm_model.startswith("databricks/")
+        # Use DSPy for better structured output handling across providers DSPy
+        # is especially beneficial for models that don't support native JSON
+        # schema mode (like Databricks, Cerebras), but works well with all
+        # providers Can be explicitly enabled via DSPY_CLIENT=true env var
+        use_dspy = (
+            self.config.use_dspy_client
+            or self.config.llm_model.startswith("databricks/")
+        )
 
         # Configure LLM client
         llm_client = None
@@ -232,23 +238,34 @@ class EnterpriseAgentOrchestrator:
             reflection_config = ReflectionConfig(
                 enabled=True,
                 criteria=ReflectionCriteria(
-                    completeness="Fully addresses all parts of the user's query",
-                    accuracy="Factually correct based on observations and retrieved data",
+                    completeness=(
+                        "Fully addresses all parts of the user's query"
+                    ),
+                    accuracy=(
+                        "Factually correct based on observations and "
+                        "retrieved data"
+                    ),
                     clarity="Well-structured, clear, and easy to understand",
                 ),
                 quality_threshold=self.config.reflection_quality_threshold,
                 max_revisions=self.config.reflection_max_revisions,
                 use_separate_llm=self.config.reflection_use_separate_llm,
             )
-            if self.config.reflection_use_separate_llm and self.config.reflection_llm:
+            if (
+                self.config.reflection_use_separate_llm
+                and self.config.reflection_llm
+            ):
                 reflection_llm = self.config.reflection_llm
             self.telemetry.logger.info(
                 "reflection_enabled",
                 extra={
-                    "quality_threshold": self.config.reflection_quality_threshold,
+                    "quality_threshold": (
+                        self.config.reflection_quality_threshold
+                    ),
                     "max_revisions": self.config.reflection_max_revisions,
                     "separate_llm": self.config.reflection_use_separate_llm,
-                    "reflection_model": reflection_llm or self.config.llm_model,
+                    "reflection_model": reflection_llm
+                    or self.config.llm_model,
                 },
             )
 
@@ -264,7 +281,9 @@ class EnterpriseAgentOrchestrator:
                 "tool_policy_enabled",
                 extra={
                     "allowed_tools": (
-                        list(self.config.tool_policy_allowed_tools) if self.config.tool_policy_allowed_tools else None
+                        list(self.config.tool_policy_allowed_tools)
+                        if self.config.tool_policy_allowed_tools
+                        else None
                     ),
                     "denied_tools": list(self.config.tool_policy_denied_tools),
                     "require_tags": list(self.config.tool_policy_require_tags),
@@ -283,23 +302,24 @@ class EnterpriseAgentOrchestrator:
         # V2: Configure state store for durable pause/resume
         state_store = None
         if self.config.state_store_enabled:
-            # In production, use Redis, SQLite, or other durable backend
-            # For now, we'll pass None to use in-memory storage
+            # In production, use Redis, SQLite, or other durable backend For
+            # now, we'll pass None to use in-memory storage
             self.telemetry.logger.info(
                 "state_store_enabled",
                 extra={"backend": self.config.state_store_backend},
             )
 
-        # Document context structure for LLM
-        # This demonstrates how developers can use system_prompt_extra to document
-        # their custom context format (memories, etc.)
+        # Document context structure for LLM This demonstrates how developers
+        # can use system_prompt_extra to document their custom context format
+        # (memories, etc.)
         system_prompt_extra = """
 ## Context Usage
 
 The user message may include a 'context' field with additional information:
 
 - **memories**: Array of conversation history and user preferences
-  - Format: `[{role: "user"|"assistant"|"system", content: str, timestamp?: str, metadata?: dict}]`
+  - Format: `[{role: "user"|"assistant"|"system", content: str, timestamp?: \
+str, metadata?: dict}]`
   - Use memories to provide context-aware responses
   - Reference previous interactions when relevant
   - Respect user preferences indicated in system-role memories
@@ -317,7 +337,7 @@ When context is provided, use it appropriately to enhance your responses.
             catalog=catalog,
             max_iters=self.config.planner_max_iters,
             temperature=self.config.llm_temperature,
-            json_schema_mode=True if not use_dspy else False,
+            json_schema_mode=bool(not use_dspy),
             llm_client=llm_client,
             system_prompt_extra=system_prompt_extra,
             token_budget=self.config.planner_token_budget,
@@ -381,10 +401,12 @@ When context is provided, use it appropriately to enhance your responses.
             ...         "content": "Deploy version 2.3.1",
             ...         "timestamp": "2025-10-20",
             ...     },
-            ...     {"role": "assistant", "content": "Deployed successfully to prod"},
-            ...     {"role": "system", "content": "User prefers verbose explanations"},
+            ...     {"role": "assistant", "content": "Deployed to prod"},
+            ...     {"role": "system", "content": "User likes detail"},
             ... ]
-            >>> result = await agent.execute("What was deployed?", memories=memories)
+            >>> result = await agent.execute(
+            ...     "What was deployed?", memories=memories
+            ... )
         """
         trace_id = uuid4().hex
         status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
@@ -394,8 +416,14 @@ When context is provided, use it appropriately to enhance your responses.
             status_history.append(update)
             status_history_for_llm.append(update.model_dump())
             message_text = update.message or ""
-            step_ref = str(update.roadmap_step_id) if update.roadmap_step_id is not None else "-"
-            EXECUTION_LOGS.append(f"{trace_id}:{update.status}:{message_text}:{step_ref}")
+            step_ref = (
+                str(update.roadmap_step_id)
+                if update.roadmap_step_id is not None
+                else "-"
+            )
+            EXECUTION_LOGS.append(
+                f"{trace_id}:{update.status}:{message_text}:{step_ref}"
+            )
             self.telemetry.logger.debug(
                 "status_update_buffered",
                 extra={
@@ -407,8 +435,8 @@ When context is provided, use it appropriately to enhance your responses.
                 },
             )
 
-        # CRYSTAL CLEAR PATTERN: Split context into two explicit dicts
-        # This demonstrates the recommended pattern for PenguiFlow developers
+        # CRYSTAL CLEAR PATTERN: Split context into two explicit dicts This
+        # demonstrates the recommended pattern for PenguiFlow developers
         #
         # llm_context: Data visible to LLM (sent in user message)
         #   - Only include information useful for planning decisions
@@ -421,7 +449,8 @@ When context is provided, use it appropriately to enhance your responses.
         #   - Never sent to LLM
 
         llm_context: dict[str, Any] = {
-            "status_history": status_history_for_llm,  # Can help LLM track progress
+            # Can help LLM track progress
+            "status_history": status_history_for_llm,
         }
 
         # Add memories if provided - these ARE sent to the LLM!
@@ -439,7 +468,11 @@ When context is provided, use it appropriately to enhance your responses.
 
         self.telemetry.logger.info(
             "execute_start",
-            extra={"query": query, "tenant_id": tenant_id, "trace_id": trace_id},
+            extra={
+                "query": query,
+                "tenant_id": tenant_id,
+                "trace_id": trace_id,
+            },
         )
 
         finish: FinalAnswer | None = None
@@ -468,13 +501,17 @@ When context is provided, use it appropriately to enhance your responses.
                     },
                 )
             elif planner_result.reason == "answer_complete":
-                final_answer = FinalAnswer.model_validate(planner_result.payload)
+                final_answer = FinalAnswer.model_validate(
+                    planner_result.payload
+                )
                 metadata = dict(final_answer.metadata)
                 planner_meta = dict(planner_result.metadata)
                 metadata.setdefault("trace_id", trace_id)
                 if planner_meta:
                     metadata.setdefault("planner", planner_meta)
-                final_answer = final_answer.model_copy(update={"metadata": metadata})
+                final_answer = final_answer.model_copy(
+                    update={"metadata": metadata}
+                )
                 self.telemetry.logger.info(
                     "execute_success",
                     extra={
@@ -494,7 +531,10 @@ When context is provided, use it appropriately to enhance your responses.
                 planner_meta = dict(planner_result.metadata)
                 meta = {"error": "no_path", "planner": planner_meta}
                 finish = FinalAnswer(
-                    text=(f"I couldn't complete the task. Reason: {planner_meta.get('thought', 'Unknown')}"),
+                    text=(
+                        "I couldn't complete the task. Reason: "
+                        f"{planner_meta.get('thought', 'Unknown')}"
+                    ),
                     route="error",
                     metadata=meta,
                 )
@@ -516,7 +556,11 @@ When context is provided, use it appropriately to enhance your responses.
                 planner_meta = dict(planner_result.metadata)
                 meta = {"error": "budget_exhausted", "planner": planner_meta}
                 finish = FinalAnswer(
-                    text=("Task interrupted due to resource constraints. Partial results may be available."),
+                    text=(
+                        "Task interrupted due to resource "
+                        "constraints. Partial results may be "
+                        "available."
+                    ),
                     route="error",
                     metadata=meta,
                 )
@@ -529,13 +573,12 @@ When context is provided, use it appropriately to enhance your responses.
                     },
                 )
             else:
-                raise RuntimeError(f"Unexpected planner result: {planner_result.reason}")
+                assert_never(planner_result.reason)
 
             assert finish is not None
             metadata = dict(finish.metadata)
             metadata.setdefault("trace_id", trace_id)
-            finish = finish.model_copy(update={"metadata": metadata})
-            return finish
+            return finish.model_copy(update={"metadata": metadata})
 
         except Exception as exc:
             self.telemetry.logger.exception(
@@ -553,7 +596,7 @@ When context is provided, use it appropriately to enhance your responses.
             if self.config.enable_telemetry:
                 self.telemetry.emit_collected_events()
 
-    def get_metrics(self) -> dict:
+    def get_metrics(self) -> dict[str, object]:
         """Return current telemetry metrics."""
         return dict(self.telemetry.get_metrics())
 
@@ -562,13 +605,13 @@ When context is provided, use it appropriately to enhance your responses.
         self.telemetry.reset_metrics()
 
 
-def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
+def _format_status_for_terminal(update: StatusUpdate, _trace_id: str) -> str:
     """Format status update for terminal display (simulating WebSocket/SSE)."""
     status_icon = {
         "thinking": "🤔",
         "ok": "✅",
         "error": "❌",
-    }.get(update.status, "ℹ️")
+    }.get(update.status, "💬")
 
     step_status_icon = {
         "running": "▶️ ",
@@ -587,19 +630,23 @@ def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
     if update.message:
         parts.append(f"{update.message}")
 
-    if update.roadmap_step_id is None and update.roadmap_step_list:
-        parts.append(f"Roadmap: {len(update.roadmap_step_list)} steps")
+    if update.roadmap_step_id is None and update.roadmap:
+        parts.append(f"Roadmap: {len(update.roadmap)} steps")
 
     return " ".join(parts)
 
 
-async def _monitor_and_stream_status(stream_enabled: bool = False) -> str | None:
-    """Monitor STATUS_BUFFER for new trace_ids and stream updates in real-time."""
+async def _monitor_and_stream_status(
+    stream_enabled: bool = False,
+) -> str | None:
+    """Stream status updates of new trace ids from STATUS_BUFFER live."""
     if not stream_enabled:
         return None
 
     seen_traces = set(STATUS_BUFFER.keys())
-    trace_counts: dict[str, int] = {tid: len(updates) for tid, updates in STATUS_BUFFER.items()}
+    trace_counts: dict[str, int] = {
+        tid: len(updates) for tid, updates in STATUS_BUFFER.items()
+    }
 
     while True:
         # Check for new trace IDs
@@ -608,7 +655,7 @@ async def _monitor_and_stream_status(stream_enabled: bool = False) -> str | None
 
         if new_traces:
             # Found a new trace - this is the one we're tracking
-            trace_id = list(new_traces)[0]
+            trace_id = next(iter(new_traces))
             seen_traces.add(trace_id)
             trace_counts[trace_id] = 0
 
@@ -620,15 +667,43 @@ async def _monitor_and_stream_status(stream_enabled: bool = False) -> str | None
             if len(updates) > last_count:
                 for update in updates[last_count:]:
                     formatted = _format_status_for_terminal(update, trace_id)
-                    print(f"  │ {formatted}", file=sys.stderr, flush=True)
+                    sys.stderr.write(f"  │ {formatted}\n")
+                    sys.stderr.flush()
                 trace_counts[trace_id] = len(updates)
 
         await asyncio.sleep(0.05)  # Check every 50ms
 
 
-async def main() -> None:
-    """Example usage of enterprise agent."""
-    # Parse CLI arguments
+_EXAMPLE_QUERIES = [
+    "Analyze the latest deployment logs and summarize findings",
+    "We're seeing a ValueError in production, help diagnose",
+    "What's the status of the API service?",
+]
+
+# Example: memories passed for context-aware planning. In production, these
+# would come from a conversation database.
+_EXAMPLE_MEMORIES: list[dict[str, Any]] = [
+    {
+        "role": "user",
+        "content": "Deploy version 2.3.1 to production",
+        "timestamp": "2025-10-20T14:30:00Z",
+    },
+    {
+        "role": "assistant",
+        "content": "Deployed v2.3.1 to production successfully",
+        "timestamp": "2025-10-20T14:35:00Z",
+    },
+    {
+        "role": "system",
+        "content": "User prefers detailed explanations with code snippets",
+        "metadata": {"user_preference": "verbose"},
+    },
+]
+
+_STREAM_FOOTER = "  └───────────────────────────────────────\n\n"
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Enterprise Agent with ReactPlanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -649,122 +724,106 @@ Examples:
         type=str,
         help="Run a single custom query instead of examples",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Load environment variables from .env file
+
+def _load_env() -> None:
+    """Load ``.env`` from the example directory, else the project root."""
     from pathlib import Path
 
     from dotenv import load_dotenv
 
-    # Try loading from example directory first, then project root
     example_dir = Path(__file__).parent
-    project_root = example_dir.parent.parent
     env_path = example_dir / ".env"
     if not env_path.exists():
-        env_path = project_root / ".env"
+        env_path = example_dir.parent.parent / ".env"
     load_dotenv(env_path)
 
-    # Load configuration from environment
-    config = AgentConfig.from_env()
 
-    # Create orchestrator
-    agent = EnterpriseAgentOrchestrator(config)
+def _write_result(result: FinalAnswer) -> None:
+    """Write the route, answer, artifacts and metadata of ``result``."""
+    sys.stdout.write(f"\nRoute: {result.route}\n")
+    sys.stdout.write(f"Answer: {result.text}\n")
 
-    # Determine which queries to run
-    if args.query:
-        queries = [args.query]
-    else:
-        queries = [
-            "Analyze the latest deployment logs and summarize findings",
-            "We're seeing a ValueError in production, help diagnose",
-            "What's the status of the API service?",
-        ]
+    if result.artifacts:
+        sys.stdout.write("\nArtifacts:\n")
+        for key, value in result.artifacts.items():
+            if isinstance(value, list) and len(value) > 3:
+                sys.stdout.write(f"  {key}: [{len(value)} items]\n")
+            else:
+                sys.stdout.write(f"  {key}: {value}\n")
 
-    # Example: Passing memories for context-aware planning
-    # In production, these would come from a conversation database
-    example_memories = [
-        {
-            "role": "user",
-            "content": "Deploy version 2.3.1 to production",
-            "timestamp": "2025-10-20T14:30:00Z",
-        },
-        {
-            "role": "assistant",
-            "content": "Deployed v2.3.1 to production successfully",
-            "timestamp": "2025-10-20T14:35:00Z",
-        },
-        {
-            "role": "system",
-            "content": "User prefers detailed explanations with code snippets",
-            "metadata": {"user_preference": "verbose"},
-        },
-    ]
+    if result.metadata:
+        sys.stdout.write("\nMetadata:\n")
+        for key, value in result.metadata.items():
+            sys.stdout.write(f"  {key}: {value}\n")
+
+
+async def _run_query(
+    agent: EnterpriseAgentOrchestrator,
+    query: str,
+    *,
+    memories: list[dict[str, Any]] | None,
+    stream_task: asyncio.Task[object] | None,
+) -> None:
+    """Run ``query`` and write its result, or the error it raised."""
+    if stream_task is not None:
+        sys.stdout.write("\n  ┌─ Real-time Status Stream ─────────────\n")
+    try:
+        if memories:
+            sys.stdout.write(
+                f"\n[Using {len(memories)} memories for context]\n"
+            )
+        result = await agent.execute(query, memories=memories)
+        # Wait a bit for any final status updates
+        if stream_task is not None and not stream_task.done():
+            await asyncio.sleep(0.2)
+        if stream_task is not None:
+            sys.stdout.write(_STREAM_FOOTER)
+        _write_result(result)
+    except Exception as exc:
+        if stream_task is not None:
+            sys.stdout.write(_STREAM_FOOTER)
+        sys.stdout.write(f"\nError: {exc.__class__.__name__}: {exc}\n")
+
+
+async def main() -> None:
+    """Example usage of enterprise agent."""
+    args = _parse_args()
+    _load_env()
+
+    agent = EnterpriseAgentOrchestrator(AgentConfig.from_env())
+    queries = [args.query] if args.query else _EXAMPLE_QUERIES
 
     # Start global streaming monitor if enabled
     stream_task = None
     if args.stream:
-        stream_task = asyncio.create_task(_monitor_and_stream_status(args.stream))
+        stream_task = asyncio.create_task(
+            _monitor_and_stream_status(args.stream)
+        )
 
     for i, query in enumerate(queries, 1):
-        print(f"\n{'=' * 80}")
-        print(f"Query {i}: {query}")
-        print("=" * 80)
-
-        if args.stream:
-            print("\n  ┌─ Real-time Status Stream ─────────────")
-
-        try:
-            # Pass memories on the first query to demonstrate context awareness
-            memories = example_memories if i == 1 and not args.query else None
-            if memories:
-                print(f"\n[Using {len(memories)} memories for context]")
-
-            # Execute query
-            result = await agent.execute(query, memories=memories)
-
-            # Wait a bit for any final status updates
-            if stream_task and not stream_task.done():
-                await asyncio.sleep(0.2)
-
-            if args.stream:
-                print("  └───────────────────────────────────────\n")
-
-            print(f"\nRoute: {result.route}")
-            print(f"Answer: {result.text}")
-
-            if result.artifacts:
-                print("\nArtifacts:")
-                for key, value in result.artifacts.items():
-                    if isinstance(value, list) and len(value) > 3:
-                        print(f"  {key}: [{len(value)} items]")
-                    else:
-                        print(f"  {key}: {value}")
-
-            if result.metadata:
-                print("\nMetadata:")
-                for key, value in result.metadata.items():
-                    print(f"  {key}: {value}")
-
-        except Exception as exc:
-            if args.stream:
-                print("  └───────────────────────────────────────\n")
-            print(f"\nError: {exc.__class__.__name__}: {exc}")
+        sys.stdout.write(f"\n{'=' * 80}\n")
+        sys.stdout.write(f"Query {i}: {query}\n")
+        sys.stdout.write(f"{'=' * 80}\n")
+        # Pass memories on the first query to demonstrate context awareness
+        memories = _EXAMPLE_MEMORIES if i == 1 and not args.query else None
+        await _run_query(
+            agent, query, memories=memories, stream_task=stream_task
+        )
 
     # Clean up global streaming task
     if stream_task and not stream_task.done():
         stream_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await stream_task
-        except asyncio.CancelledError:
-            pass
 
     # Show metrics
-    print(f"\n{'=' * 80}")
-    print("Telemetry Metrics")
-    print("=" * 80)
-    metrics = agent.get_metrics()
-    for key, value in metrics.items():
-        print(f"  {key}: {value}")
+    sys.stdout.write(f"\n{'=' * 80}\n")
+    sys.stdout.write("Telemetry Metrics\n")
+    sys.stdout.write(f"{'=' * 80}\n")
+    for key, value in agent.get_metrics().items():
+        sys.stdout.write(f"  {key}: {value}\n")
 
 
 if __name__ == "__main__":

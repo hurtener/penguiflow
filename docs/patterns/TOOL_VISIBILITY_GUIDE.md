@@ -11,8 +11,8 @@ PenguiFlow has two complementary mechanisms:
 1) **Planner tool policy (init-time filtering)**
 - A `ToolPolicy` can be applied when constructing a `ReactPlanner` (or when creating a derived planner via `fork()`).
 - The policy filters the planner’s catalog during initialization, so removed tools:
-  - are not present in `planner._specs`
-  - are not in `planner._spec_by_name`
+  - are not present in `planner.specs`
+  - are not in `planner.spec_by_name`
   - are not included in the system prompt tool catalog
 
 2) **Per-run tool visibility (run-time filtering)**
@@ -31,9 +31,9 @@ That means there is **no tool-visibility-specific** thread-safety hazard in the 
 ### `tool_visibility` is **not safe** on an overlapping shared planner instance
 
 `tool_visibility` works by temporarily mutating planner internals while the run is executing (for that planner instance):
-- `planner._specs`
-- `planner._spec_by_name`, `planner._catalog_records`, `planner._tool_aliases`
-- `planner._system_prompt`
+- `planner.specs`
+- `planner.spec_by_name`, `planner.catalog_records`, `planner.tool_aliases`
+- `planner.system_prompt`
 - guardrail context `available_tools` (when guardrails are enabled)
 
 These fields are used throughout the run loop (prompt building, tool routing, guardrail context).

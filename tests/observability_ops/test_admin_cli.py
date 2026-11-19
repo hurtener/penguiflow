@@ -15,6 +15,7 @@ from . import sample_state_store
 
 @pytest.mark.asyncio
 async def test_render_events_tail_filters_history() -> None:
+    """Render events tail filters history."""
     sample_state_store.reset_state()
     store = sample_state_store.create_store()
 
@@ -55,7 +56,10 @@ async def test_render_events_tail_filters_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cli_history_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
+async def test_cli_history_outputs_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI history outputs JSON."""
     sample_state_store.reset_state()
     store = await load_state_store(
         "tests.observability_ops.sample_state_store:create_store"
@@ -93,9 +97,12 @@ async def test_cli_history_outputs_json(capsys: pytest.CaptureFixture[str]) -> N
     assert payload["remote_status"] == "error"
 
 
-def test_cli_replay_includes_header(capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_replay_includes_header(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI replay includes header."""
     sample_state_store.reset_state()
-    sample_state_store._EVENTS["trace-replay"].append(
+    sample_state_store.record_event(
         StoredEvent(
             trace_id="trace-replay",
             ts=4.0,

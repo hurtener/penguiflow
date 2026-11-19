@@ -3,24 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
 import logging
 import secrets
 import time
+import warnings
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+)
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel
 
 from penguiflow.planner.models import BackgroundTasksConfig
-from penguiflow.planner.trajectory import BackgroundTaskResult, extract_background_results
-from penguiflow.state import StateStore
+from penguiflow.planner.trajectory import (
+    BackgroundTaskResult,
+    extract_background_results,
+)
 from penguiflow.steering import (
     MAX_STEERING_PAYLOAD_BYTES,
     SteeringCancelled,
@@ -51,11 +61,22 @@ from .models import (
     UpdateType,
     _utc_now,
 )
-from .persistence import InMemorySessionStateStore, SessionStateStore, StateStoreSessionAdapter
+from .persistence import (
+    InMemorySessionStateStore,
+    SessionStateStore,
+    StateStoreSessionAdapter,
+)
 from .policy import ControlPolicy
 from .registry import TaskRegistry
-from .telemetry import NoOpTaskTelemetrySink, TaskTelemetryEvent, TaskTelemetrySink
+from .telemetry import (
+    NoOpTaskTelemetrySink,
+    TaskTelemetryEvent,
+    TaskTelemetrySink,
+)
 from .transport import SessionConnection, Transport
+
+if TYPE_CHECKING:
+    from penguiflow.state import StateStore
 
 _LOGGER = logging.getLogger(__name__)
 _SKIP_JSON_SNAPSHOT_VALUE = object()
@@ -67,7 +88,9 @@ class SessionContext:
     tool_context: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
-    background_results: dict[str, BackgroundTaskResult] = field(default_factory=dict)
+    background_results: dict[str, BackgroundTaskResult] = field(
+        default_factory=dict
+    )
     version: int = 0
     context_hash: str | None = None
 
@@ -77,17 +100,23 @@ class SessionLimits:
     """Resource and safety limits enforced by a :class:`StreamingSession`.
 
     Attributes:
-        max_tasks_per_session: Maximum number of non-terminal tasks a session may hold at once.
-        max_background_tasks: Maximum number of non-terminal background tasks per session.
-        max_concurrent_tasks: Maximum number of tasks executing concurrently (via a semaphore);
-            ``0`` disables the concurrency cap.
-        max_task_runtime_s: Wall-clock timeout applied to each task pipeline, or ``None`` for no limit.
-        update_queue_size: Maximum size of the update broker's per-subscriber queues.
+        max_tasks_per_session: Maximum number of non-terminal tasks a session
+            may hold at once.
+        max_background_tasks: Maximum number of non-terminal background tasks
+            per session.
+        max_concurrent_tasks: Maximum number of tasks executing concurrently
+            (via a semaphore); ``0`` disables the concurrency cap.
+        max_task_runtime_s: Wall-clock timeout applied to each task pipeline,
+            or ``None`` for no limit.
+        update_queue_size: Maximum size of the update broker's per-subscriber
+            queues.
         steering_queue_size: Maximum size of each task's steering-event inbox.
-        max_pending_patches: Maximum number of context patches awaiting human approval at once.
-        max_steering_payload_bytes: Maximum allowed size of a steering event payload, in bytes.
-        max_steering_events_per_task: Maximum number of recently-seen event IDs tracked per task
-            for duplicate detection.
+        max_pending_patches: Maximum number of context patches awaiting human
+            approval at once.
+        max_steering_payload_bytes: Maximum allowed size of a steering event
+            payload, in bytes.
+        max_steering_events_per_task: Maximum number of recently-seen event IDs
+            tracked per task for duplicate detection.
     """
 
     max_tasks_per_session: int = 8
@@ -106,9 +135,11 @@ class PendingContextPatch:
     """A context patch awaiting human approval (``MergeStrategy.HUMAN_GATED``).
 
     Attributes:
-        patch_id: Unique identifier used to approve or reject this patch via ``steer``/``apply_pending_patch``.
+        patch_id: Unique identifier used to approve or reject this patch via
+            ``steer``/``apply_pending_patch``.
         task_id: The task whose completion produced this patch.
-        patch: The underlying :class:`ContextPatch` payload to merge if approved.
+        patch: The underlying :class:`ContextPatch` payload to merge if
+            approved.
         strategy: The merge strategy the patch was submitted with.
         created_at: Unix timestamp (seconds) when the patch was queued.
     """
@@ -126,11 +157,14 @@ class TaskResult:
 
     Attributes:
         payload: The task's primary output value, if any.
-        context_patch: Optional patch to merge into the session context (see ``apply_context_patch``).
+        context_patch: Optional patch to merge into the session context (see
+            ``apply_context_patch``).
         digest: Human-readable summary lines describing the result.
-        artifacts: Structured artifacts produced by the task (e.g. files, generated content).
+        artifacts: Structured artifacts produced by the task (e.g. files,
+            generated content).
         sources: Structured source/citation references backing the result.
-        notification: Optional notification to surface to the user about this task's completion.
+        notification: Optional notification to surface to the user about this
+            task's completion.
         metadata: Free-form metadata associated with the result.
     """
 
@@ -143,7 +177,7 @@ class TaskResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _safe_deepcopy(value: Any) -> Any:
+def _safe_deepcopy(value: object) -> object:
     if isinstance(value, dict):
         return _deepcopy_dict(value)
     if isinstance(value, list):
@@ -164,7 +198,8 @@ def _deepcopy_list(value: list[Any]) -> list[Any]:
     return [_safe_deepcopy(item) for item in value]
 
 
-def _json_snapshot_value(value: Any) -> Any:
+def _json_snapshot_value(value: object) -> object:
+    """Convert ``value`` to JSON data, marking unserializable leaves."""
     if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, Enum):
@@ -174,21 +209,20 @@ def _json_snapshot_value(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return _json_snapshot_value(value.model_dump(mode="json"))
     if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            converted = _json_snapshot_value(item)
-            if converted is _SKIP_JSON_SNAPSHOT_VALUE:
-                continue
-            result[str(key)] = converted
-        return result
+        return {
+            str(key): converted
+            for key, converted in (
+                (key, _json_snapshot_value(item))
+                for key, item in value.items()
+            )
+            if converted is not _SKIP_JSON_SNAPSHOT_VALUE
+        }
     if isinstance(value, list | tuple | set):
-        result_list: list[Any] = []
-        for item in value:
-            converted = _json_snapshot_value(item)
-            if converted is _SKIP_JSON_SNAPSHOT_VALUE:
-                continue
-            result_list.append(converted)
-        return result_list
+        return [
+            converted
+            for converted in map(_json_snapshot_value, value)
+            if converted is not _SKIP_JSON_SNAPSHOT_VALUE
+        ]
     try:
         json.dumps(value)
     except TypeError:
@@ -221,6 +255,7 @@ class TaskRuntime:
         steering: SteeringInbox,
         context_snapshot: TaskContextSnapshot,
     ) -> None:
+        """Bind a task's state and steering inbox to its session."""
         self.session = session
         self.state = state
         self.steering = steering
@@ -229,28 +264,36 @@ class TaskRuntime:
     def emit_update(
         self,
         update_type: UpdateType,
-        content: Any,
+        content: object,
         *,
         step_index: int | None = None,
         total_steps: int | None = None,
     ) -> StateUpdate:
         """Build a :class:`StateUpdate` and publish it on the owning session.
 
-        If ``update_type`` is ``PROGRESS`` and ``content`` is a dict, the task's
-        stored progress snapshot is also updated in the registry.
+        If ``update_type`` is ``PROGRESS`` and ``content`` is a dict, the
+        task's stored progress snapshot is also updated in the registry.
 
         Args:
-            update_type: The kind of update being emitted (progress, result, etc.).
-            content: The update payload; interpretation depends on ``update_type``.
-            step_index: Optional 0-based index of the current step, for progress reporting.
-            total_steps: Optional total number of steps, for progress reporting.
+            update_type: The kind of update being emitted (progress, result,
+                etc.).
+            content: The update payload; interpretation depends on
+                ``update_type``.
+            step_index: Optional 0-based index of the current step, for
+                progress reporting.
+            total_steps: Optional total number of steps, for progress
+                reporting.
 
         Returns:
             The :class:`StateUpdate` that was published.
         """
         if update_type == UpdateType.PROGRESS and isinstance(content, dict):
             self.state.progress = dict(content)
-            asyncio.create_task(self.session.registry.update_task(self.state.task_id, progress=self.state.progress))
+            self.session.run_in_background(
+                self.session.registry.update_task(
+                    self.state.task_id, progress=self.state.progress
+                )
+            )
         update = StateUpdate(
             session_id=self.state.session_id,
             task_id=self.state.task_id,
@@ -260,16 +303,19 @@ class TaskRuntime:
             step_index=step_index,
             total_steps=total_steps,
         )
-        self.session._publish(update)
+        self.session.publish(update)
         return update
 
     def notify(self, payload: NotificationPayload) -> None:
         """Emit a notification update for this task.
 
         Args:
-            payload: The notification content (severity, title, body, actions) to publish.
+            payload: The notification content (severity, title, body, actions)
+                to publish.
         """
-        self.emit_update(UpdateType.NOTIFICATION, payload.model_dump(mode="json"))
+        self.emit_update(
+            UpdateType.NOTIFICATION, payload.model_dump(mode="json")
+        )
 
 
 TaskPipeline = Callable[[TaskRuntime], Awaitable[TaskResult | Any]]
@@ -301,7 +347,7 @@ def _coerce_proactive_hops(tool_context: dict[str, Any] | None) -> int | None:
 def _background_result_from_patch(
     patch: ContextPatch,
     *,
-    payload: Any | None,
+    payload: object,
     group_id: str | None,
 ) -> BackgroundTaskResult:
     summary = " ".join(patch.digest) if patch.digest else None
@@ -324,18 +370,48 @@ def _background_result_from_patch(
     )
 
 
-def _background_results_payload(results: dict[str, BackgroundTaskResult]) -> list[dict[str, Any]]:
+def _background_results_payload(
+    results: dict[str, BackgroundTaskResult],
+) -> list[dict[str, Any]]:
     return [result.to_payload() for result in results.values()]
+
+
+def _combine_group_patches(
+    group_id: str,
+    patches: list[ContextPatch],
+    failed_summaries: list[dict[str, Any]],
+) -> ContextPatch:
+    """Merge a group's patches into one patch for its proactive report."""
+    combined_digest: list[str] = []
+    combined_facts: dict[str, Any] = {}
+    combined_artifacts: list[dict[str, Any]] = []
+    combined_sources: list[dict[str, Any]] = []
+    for patch in patches:
+        combined_digest.extend(patch.digest or [])
+        combined_facts.update(patch.facts or {})
+        combined_artifacts.extend(patch.artifacts or [])
+        combined_sources.extend(patch.sources or [])
+    if failed_summaries:
+        combined_facts["failed_tasks"] = failed_summaries
+    return ContextPatch(
+        task_id=f"group_{group_id}",
+        digest=combined_digest,
+        facts=combined_facts,
+        artifacts=combined_artifacts,
+        sources=combined_sources,
+        context_diverged=any(patch.context_diverged for patch in patches),
+    )
 
 
 class StreamingSession:
     """Manages bidirectional communication and task lifecycle.
 
-    A ``StreamingSession`` owns the tasks, steering inboxes, update broker, task groups,
-    and shared conversation context for a single session_id. It is the primary runtime
-    surface used by transports (``connect``), planner-facing meta-tools (spawning and
-    steering tasks), and background-task orchestration (context patches, proactive
-    reporting, and task groups). Instances are typically created and cached via
+    A ``StreamingSession`` owns the tasks, steering inboxes, update broker,
+    task groups, and shared conversation context for a single session_id. It is
+    the primary runtime surface used by transports (``connect``),
+    planner-facing meta-tools (spawning and steering tasks), and
+    background-task orchestration (context patches, proactive reporting, and
+    task groups). Instances are typically created and cached via
     :class:`SessionManager` rather than constructed directly.
     """
 
@@ -348,26 +424,35 @@ class StreamingSession:
         state_store: SessionStateStore | StateStore | None = None,
         telemetry_sink: TaskTelemetrySink | None = None,
     ) -> None:
+        """Create a session with its policy, limits and state store."""
         self.session_id = session_id
         self._limits = limits or SessionLimits()
         self._state_store: SessionStateStore
         if state_store is None:
             self._state_store = InMemorySessionStateStore()
         elif hasattr(state_store, "save_task"):
-            self._state_store = cast(SessionStateStore, state_store)
-        elif hasattr(state_store, "save_event") and hasattr(state_store, "load_history"):
-            self._state_store = StateStoreSessionAdapter(cast(StateStore, state_store))
+            self._state_store = cast("SessionStateStore", state_store)
+        elif hasattr(state_store, "save_event") and hasattr(
+            state_store, "load_history"
+        ):
+            self._state_store = StateStoreSessionAdapter(state_store)
         else:  # pragma: no cover - defensive
-            raise TypeError("state_store must implement SessionStateStore or StateStore")
+            msg = "state_store must implement SessionStateStore or StateStore"
+            raise TypeError(msg)
         self._registry = TaskRegistry(persist_task=self._state_store.save_task)
-        self._broker = UpdateBroker(max_queue_size=self._limits.update_queue_size)
+        self._detached_tasks: set[asyncio.Task[object]] = set()
+        self._broker = UpdateBroker(
+            max_queue_size=self._limits.update_queue_size
+        )
         self._steering_inboxes: dict[str, SteeringInbox] = {}
         self._task_handles: dict[str, asyncio.Task[None]] = {}
         self._pending_controls: dict[str, SteeringEvent] = {}
         self._pending_patches: dict[str, PendingContextPatch] = {}
         self._seen_event_ids: dict[str, deque[str]] = {}
         self._concurrency_semaphore = (
-            asyncio.Semaphore(self._limits.max_concurrent_tasks) if self._limits.max_concurrent_tasks > 0 else None
+            asyncio.Semaphore(self._limits.max_concurrent_tasks)
+            if self._limits.max_concurrent_tasks > 0
+            else None
         )
         self._control_policy = control_policy or ControlPolicy()
         self._telemetry = telemetry_sink or NoOpTaskTelemetrySink()
@@ -375,13 +460,21 @@ class StreamingSession:
         self._foreground_task_id: str | None = None
         self._hydrated = False
         # Proactive report-back infrastructure
-        self._proactive_queue: asyncio.Queue[ProactiveReportRequest] = asyncio.Queue()
-        self._group_report_queue: asyncio.Queue[ProactiveReportRequest] = asyncio.Queue()
+        self._proactive_queue: asyncio.Queue[ProactiveReportRequest] = (
+            asyncio.Queue()
+        )
+        self._group_report_queue: asyncio.Queue[ProactiveReportRequest] = (
+            asyncio.Queue()
+        )
         self._foreground_busy = asyncio.Event()
         self._foreground_busy.set()  # Initially idle
         self._proactive_task: asyncio.Task[None] | None = None
-        self._proactive_generator: Callable[[ProactiveReportRequest], Awaitable[None]] | None = None
-        self._group_report_generator: Callable[[ProactiveReportRequest], Awaitable[None]] | None = None
+        self._proactive_generator: (
+            Callable[[ProactiveReportRequest], Awaitable[None]] | None
+        ) = None
+        self._group_report_generator: (
+            Callable[[ProactiveReportRequest], Awaitable[None]] | None
+        ) = None
         self._proactive_config: dict[str, Any] | None = None
         self._background_task_config: BackgroundTasksConfig | None = None
         self._proactive_suppressed_task_ids: set[str] = set()
@@ -393,41 +486,48 @@ class StreamingSession:
         self._group_completion_events: dict[str, asyncio.Event] = {}
 
     @property
+    def state_store(self) -> SessionStateStore | None:
+        """The store that persists this session's tasks and updates."""
+        return self._state_store
+
+    @property
     def registry(self) -> TaskRegistry:
-        """Return the :class:`TaskRegistry` tracking task state for this session."""
+        """Return the :class:`TaskRegistry` tracking this session's tasks."""
         return self._registry
 
     @property
     def limits(self) -> SessionLimits:
-        """Return the :class:`SessionLimits` configuration governing this session."""
+        """Return the :class:`SessionLimits` governing this session."""
         return self._limits
 
     @property
     def pending_patches(self) -> dict[str, PendingContextPatch]:
-        """Return a snapshot copy of patches awaiting human approval, keyed by patch_id."""
+        """Return a copy of the patches awaiting approval, by patch_id."""
         return dict(self._pending_patches)
 
     @property
     def context_version(self) -> int:
-        """Return the monotonically increasing version counter for the session context."""
+        """Return the monotonically increasing session context version."""
         return self._context.version
 
     @property
     def context_hash(self) -> str | None:
-        """Return the SHA-256 hash of the current ``llm_context``, or ``None`` if unset."""
+        """Return the SHA-256 of the current ``llm_context``, or ``None``."""
         return self._context.context_hash
 
     def get_context(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """Return copies of the session's current context dicts.
 
         Returns:
-            A ``(llm_context, tool_context)`` tuple of shallow copies, safe for callers to
-            mutate without affecting session state.
+            A ``(llm_context, tool_context)`` tuple of shallow copies, safe for
+            callers to mutate without affecting session state.
         """
-        return dict(self._context.llm_context), dict(self._context.tool_context)
+        return dict(self._context.llm_context), dict(
+            self._context.tool_context
+        )
 
     def get_background_results(self) -> dict[str, BackgroundTaskResult]:
-        """Return a copy of completed background task results, keyed by task_id.
+        """Return a copy of completed background task results, by task_id.
 
         Returns:
             A shallow copy of the session's ``background_results`` mapping.
@@ -437,7 +537,7 @@ class StreamingSession:
     def configure_background_tasks(
         self,
         config: BackgroundTasksConfig | None = None,
-        **overrides: Any,
+        **overrides: object,
     ) -> BackgroundTasksConfig:
         """Configure runtime background task behavior."""
         if config is None:
@@ -448,7 +548,7 @@ class StreamingSession:
         return config
 
     def get_background_task_config(self) -> BackgroundTasksConfig:
-        """Return the active :class:`BackgroundTasksConfig`, creating a default one if unset.
+        """Return the :class:`BackgroundTasksConfig`, creating a default.
 
         Returns:
             The current background-task configuration for this session.
@@ -464,7 +564,8 @@ class StreamingSession:
         foreground is idle.
 
         Args:
-            busy: ``True`` to mark the foreground as busy, ``False`` to mark it idle.
+            busy: ``True`` to mark the foreground as busy, ``False`` to mark it
+                idle.
         """
         if busy:
             self._foreground_busy.clear()
@@ -472,15 +573,16 @@ class StreamingSession:
             self._foreground_busy.set()
 
     async def on_foreground_yield(self, *, turn_id: str | None = None) -> int:
-        """Handle the foreground yielding control, auto-sealing open task groups if configured.
+        """Handle the foreground yielding; auto-seal open groups if configured.
 
         Args:
-            turn_id: The turn whose open groups should be sealed. Defaults to the session's
-                current turn (see ``set_turn_id``) when omitted.
+            turn_id: The turn whose open groups should be sealed. Defaults to
+                the session's current turn (see ``set_turn_id``) when omitted.
 
         Returns:
             The number of task groups sealed. Always ``0`` when
-            ``auto_seal_groups_on_foreground_yield`` is disabled in the background-task config.
+            ``auto_seal_groups_on_foreground_yield`` is disabled in the
+            background-task config.
         """
         config = self.get_background_task_config()
         if not config.auto_seal_groups_on_foreground_yield:
@@ -495,23 +597,22 @@ class StreamingSession:
     ) -> int:
         """Suppress future proactive reports for the given tasks and/or group.
 
-        Once suppressed, matching task/group completions will not enqueue proactive
-        report requests (e.g. because their results were already consumed by a
-        retained turn).
+        Once suppressed, matching task/group completions will not enqueue
+        proactive report requests (e.g. because their results were already
+        consumed by a retained turn).
 
         Args:
             task_ids: Task IDs to suppress individually.
             group_id: A group ID to suppress as a whole.
 
         Returns:
-            The number of newly-added suppressions (already-suppressed entries are not
-            counted again).
+            The number of newly-added suppressions (already-suppressed entries
+            are not counted again).
         """
         added = 0
-        if group_id:
-            if group_id not in self._proactive_suppressed_group_ids:
-                self._proactive_suppressed_group_ids.add(group_id)
-                added += 1
+        if group_id and group_id not in self._proactive_suppressed_group_ids:
+            self._proactive_suppressed_group_ids.add(group_id)
+            added += 1
         if task_ids:
             for task_id in task_ids:
                 if not task_id:
@@ -536,7 +637,10 @@ class StreamingSession:
             return True
         if is_group_report and group_task_ids:
             remaining = [task for task in group_task_ids if task]
-            if remaining and all(task in self._proactive_suppressed_task_ids for task in remaining):
+            if remaining and all(
+                task in self._proactive_suppressed_task_ids
+                for task in remaining
+            ):
                 return True
         return False
 
@@ -548,19 +652,21 @@ class StreamingSession:
         max_hops: int,
         cooldown_s: float,
     ) -> None:
-        """Schedule a background waiter that keeps polling a group after a retain-turn timeout.
+        """Keep polling a group in the background after a retain-turn timeout.
 
-        Repeatedly waits for the group's completion (up to ``max_hops`` times, sleeping
-        ``cooldown_s`` between attempts) so a group that timed out while retaining the
-        turn is still tracked to completion. A no-op if a continuation for this group
-        is already scheduled and running.
+        Repeatedly waits for the group's completion (up to ``max_hops`` times,
+        sleeping ``cooldown_s`` between attempts) so a group that timed out
+        while retaining the turn is still tracked to completion. A no-op if a
+        continuation for this group is already scheduled and running.
 
         Args:
             group_id: The task group to keep waiting on.
-            timeout_s: Per-attempt wait timeout in seconds, or ``None`` to wait indefinitely
-                (in which case only one hop is meaningful).
-            max_hops: Maximum number of wait attempts; scheduling is skipped entirely if ``<= 0``.
-            cooldown_s: Seconds to sleep between attempts when the previous attempt timed out.
+            timeout_s: Per-attempt wait timeout in seconds, or ``None`` to wait
+                indefinitely (in which case only one hop is meaningful).
+            max_hops: Maximum number of wait attempts; scheduling is skipped
+                entirely if ``<= 0``.
+            cooldown_s: Seconds to sleep between attempts when the previous
+                attempt timed out.
         """
         if max_hops <= 0:
             return
@@ -571,7 +677,9 @@ class StreamingSession:
         async def _runner() -> None:
             hops = max_hops
             while hops > 0:
-                group, timed_out = await self.wait_for_group_completion(group_id, timeout_s=timeout_s)
+                group, timed_out = await self.wait_for_group_completion(
+                    group_id, timeout_s=timeout_s
+                )
                 if group is None or not timed_out:
                     return
                 hops -= 1
@@ -589,33 +697,45 @@ class StreamingSession:
         """Bind a :class:`Transport` to this session.
 
         Args:
-            transport: The transport implementation used to send/receive messages
-                for this session.
+            transport: The transport implementation used to send/receive
+                messages for this session.
 
         Returns:
-            A new :class:`SessionConnection` wrapping this session and the transport.
+            A new :class:`SessionConnection` wrapping this session and the
+            transport.
         """
         return SessionConnection(self, transport)
 
     async def hydrate(self) -> None:
-        """Load persisted tasks from the state store into the in-memory registry.
+        """Load persisted tasks from the state store into the registry.
 
-        Idempotent: subsequent calls after the first successful hydration are no-ops.
-        Restores the most recent foreground task ID from the loaded tasks, if any.
+        Idempotent: subsequent calls after the first successful hydration are
+            no-ops.
+        Restores the most recent foreground task ID from the loaded tasks, if
+        any.
         """
         if self._hydrated:
             return
         tasks = await self._state_store.list_tasks(self.session_id)
         if tasks:
             await self._registry.seed_tasks(list(tasks))
-            foreground = [task for task in tasks if task.task_type == TaskType.FOREGROUND]
+            foreground = [
+                task for task in tasks if task.task_type == TaskType.FOREGROUND
+            ]
             if foreground:
                 self._foreground_task_id = foreground[-1].task_id
         self._hydrated = True
 
-    def _publish(self, update: StateUpdate) -> None:
+    def run_in_background(self, coro: Coroutine[Any, Any, object]) -> None:
+        """Run ``coro`` as a task, keeping a reference until it finishes."""
+        task = asyncio.create_task(coro)
+        self._detached_tasks.add(task)
+        task.add_done_callback(self._detached_tasks.discard)
+
+    def publish(self, update: StateUpdate) -> None:
+        """Broadcast ``update`` and persist it in the background."""
         self._broker.publish(update)
-        asyncio.create_task(self._state_store.save_update(update))
+        self.run_in_background(self._state_store.save_update(update))
 
     def update_context(
         self,
@@ -625,14 +745,16 @@ class StreamingSession:
     ) -> None:
         """Replace the session's ``llm_context`` and/or ``tool_context``.
 
-        Any legacy inline ``background_results``/``background_result`` entries found in
-        ``llm_context`` are extracted into the session's dedicated background-results
-        store. Bumps ``context_version`` and recomputes ``context_hash`` whenever
-        ``llm_context`` is provided.
+        Any legacy inline ``background_results``/``background_result`` entries
+        found in ``llm_context`` are extracted into the session's dedicated
+        background-results store. Bumps ``context_version`` and recomputes
+        ``context_hash`` whenever ``llm_context`` is provided.
 
         Args:
-            llm_context: Replacement dict for the LLM-facing context, or ``None`` to leave unchanged.
-            tool_context: Replacement dict for the tool-facing context, or ``None`` to leave unchanged.
+            llm_context: Replacement dict for the LLM-facing context, or
+                ``None`` to leave unchanged.
+            tool_context: Replacement dict for the tool-facing context, or
+                ``None`` to leave unchanged.
         """
         if llm_context is not None:
             cleaned, extracted = extract_background_results(llm_context)
@@ -645,7 +767,9 @@ class StreamingSession:
         self._context.context_hash = _hash_context(self._context.llm_context)
 
     def _migrate_legacy_background_results(self) -> None:
-        cleaned, extracted = extract_background_results(self._context.llm_context)
+        cleaned, extracted = extract_background_results(
+            self._context.llm_context
+        )
         if not extracted:
             return
         self._context.background_results.update(extracted)
@@ -669,11 +793,14 @@ class StreamingSession:
         Args:
             generator: Async callable to generate proactive messages.
             enabled: Master switch for proactive reporting.
-            strategies: Merge strategies that trigger reports (default: APPEND, REPLACE).
+            strategies: Merge strategies that trigger reports (default: APPEND,
+                REPLACE).
             max_queued: Maximum queued reports before dropping oldest.
             timeout_s: Timeout for proactive message generation.
-            max_hops: Maximum proactive recursion hops before disabling background spawning.
-            fallback_notification: Fall back to notification panel if generation fails.
+            max_hops: Maximum proactive recursion hops before disabling
+                background spawning.
+            fallback_notification: Fall back to notification panel if
+                generation fails.
         """
         self._proactive_generator = generator
         self._proactive_config = {
@@ -684,13 +811,57 @@ class StreamingSession:
             "max_hops": max_hops,
             "fallback_notification": fallback_notification,
         }
-        if enabled and self._proactive_task is None:
+        if enabled:
+            self.start_proactive_reporter()
+
+    def start_proactive_reporter(self) -> None:
+        """Start the background proactive reporter if it is not running."""
+        if self._proactive_task is None:
             self._proactive_task = asyncio.create_task(
                 self._run_proactive_reporter(),
                 name=f"proactive_reporter:{self.session_id}",
             )
 
-    def _enqueue_proactive_report(
+    async def stop_proactive_reporter(self) -> None:
+        """Cancel the background proactive reporter and wait for it to end.
+
+        Queued reports stay queued; :meth:`start_proactive_reporter` resumes
+        processing them.
+        """
+        task, self._proactive_task = self._proactive_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    @property
+    def proactive_task(self) -> asyncio.Task[None] | None:
+        """The running proactive reporter task, if any."""
+        return self._proactive_task
+
+    @property
+    def proactive_config(self) -> dict[str, Any] | None:
+        """The proactive reporting settings, once configured."""
+        return self._proactive_config
+
+    @property
+    def proactive_generator(
+        self,
+    ) -> Callable[[ProactiveReportRequest], Awaitable[None]] | None:
+        """The callable that turns a queued report into a message."""
+        return self._proactive_generator
+
+    @property
+    def proactive_queue(self) -> asyncio.Queue[ProactiveReportRequest]:
+        """Reports waiting for the proactive reporter."""
+        return self._proactive_queue
+
+    @property
+    def foreground_idle(self) -> bool:
+        """Whether the foreground is idle, letting reports be generated."""
+        return self._foreground_busy.is_set()
+
+    def enqueue_proactive_report(
         self,
         *,
         task_id: str,
@@ -705,7 +876,7 @@ class StreamingSession:
         combined_patches: list[ContextPatch] | None = None,
         proactive_hops_remaining: int | None = None,
     ) -> None:
-        """Queue a proactive report request for generation when foreground is idle."""
+        """Queue a proactive report to generate when the foreground is idle."""
         config = self._proactive_config
         if config is None or not config.get("enabled"):
             return
@@ -715,7 +886,11 @@ class StreamingSession:
         if strategy_name not in allowed_strategies:
             return
         max_hops = int(config.get("max_hops", 2) or 0)
-        hops_remaining = int(proactive_hops_remaining) if proactive_hops_remaining is not None else max_hops
+        hops_remaining = (
+            int(proactive_hops_remaining)
+            if proactive_hops_remaining is not None
+            else max_hops
+        )
         if hops_remaining <= 0:
             return
         if self._is_proactive_suppressed(
@@ -753,7 +928,7 @@ class StreamingSession:
         self._proactive_queue.put_nowait(request)
 
     async def _run_proactive_reporter(self) -> None:
-        """Background task that processes proactive reports when foreground is idle."""
+        """Process queued proactive reports while the foreground is idle."""
         while True:
             try:
                 # Wait for a report request
@@ -761,14 +936,16 @@ class StreamingSession:
                 # Wait for foreground to be idle
                 await self._foreground_busy.wait()
                 # Generate proactive message
-                await self._generate_proactive_message(request)
+                await self.generate_proactive_message(request)
             except asyncio.CancelledError:
                 break
             except Exception:
                 # Log error and continue processing
                 pass
 
-    async def _generate_proactive_message(self, request: ProactiveReportRequest) -> None:
+    async def generate_proactive_message(
+        self, request: ProactiveReportRequest
+    ) -> None:
         """Generate a proactive message for a completed background task."""
         config = self._proactive_config
         if config is None or self._proactive_generator is None:
@@ -789,7 +966,7 @@ class StreamingSession:
             )
         except TimeoutError:
             if fallback:
-                self._publish(
+                self.publish(
                     StateUpdate(
                         session_id=self.session_id,
                         task_id=request.task_id,
@@ -798,14 +975,15 @@ class StreamingSession:
                         content={
                             "severity": "info",
                             "title": "Background task complete",
-                            "body": "Task completed but proactive report timed out.",
+                            "body": "Task completed but proactive report "
+                            "timed out.",
                             "task_id": request.task_id,
                         },
                     )
                 )
         except Exception:
             if fallback:
-                self._publish(
+                self.publish(
                     StateUpdate(
                         session_id=self.session_id,
                         task_id=request.task_id,
@@ -814,7 +992,8 @@ class StreamingSession:
                         content={
                             "severity": "warning",
                             "title": "Background task complete",
-                            "body": "Task completed but failed to generate proactive report.",
+                            "body": "Task completed but failed to generate "
+                            "proactive report.",
                             "task_id": request.task_id,
                         },
                     )
@@ -822,26 +1001,43 @@ class StreamingSession:
 
     async def _ensure_limits(self, task_type: TaskType) -> None:
         tasks = await self._registry.list_tasks(self.session_id)
-        # Only count active tasks (not COMPLETE, FAILED, CANCELLED) towards limits
-        terminal_statuses = {TaskStatus.COMPLETE, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        # Only count active tasks (not COMPLETE, FAILED, CANCELLED) towards
+        # limits
+        terminal_statuses = {
+            TaskStatus.COMPLETE,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
         active_tasks = [t for t in tasks if t.status not in terminal_statuses]
-        if self._limits.max_tasks_per_session and len(active_tasks) >= self._limits.max_tasks_per_session:
-            raise RuntimeError("task_limit_exceeded")
-        if task_type == TaskType.BACKGROUND and self._limits.max_background_tasks:
-            background_count = len([t for t in active_tasks if t.task_type == TaskType.BACKGROUND])
+        if (
+            self._limits.max_tasks_per_session
+            and len(active_tasks) >= self._limits.max_tasks_per_session
+        ):
+            msg = "task_limit_exceeded"
+            raise RuntimeError(msg)
+        if (
+            task_type == TaskType.BACKGROUND
+            and self._limits.max_background_tasks
+        ):
+            background_count = len(
+                [t for t in active_tasks if t.task_type == TaskType.BACKGROUND]
+            )
             if background_count >= self._limits.max_background_tasks:
-                raise RuntimeError("background_task_limit_exceeded")
+                msg = "background_task_limit_exceeded"
+                raise RuntimeError(msg)
 
     async def ensure_capacity(self, task_type: TaskType) -> None:
         """Verify the session has room for another task of the given type.
 
         Args:
-            task_type: The task type (``FOREGROUND`` or ``BACKGROUND``) to check capacity for.
+            task_type: The task type (``FOREGROUND`` or ``BACKGROUND``) to
+                check capacity for.
 
         Raises:
-            RuntimeError: With ``"task_limit_exceeded"`` if the session's active-task limit
-                would be exceeded, or ``"background_task_limit_exceeded"`` if the
-                background-task limit would be exceeded.
+            RuntimeError: With ``"task_limit_exceeded"`` if the session's
+                active-task limit would be exceeded, or
+                ``"background_task_limit_exceeded"`` if the background-task
+                limit would be exceeded.
         """
         await self._ensure_limits(task_type)
 
@@ -864,32 +1060,42 @@ class StreamingSession:
         notify_on_complete: bool = True,
         group_id: str | None = None,
     ) -> str:
-        """Create a task and run its pipeline concurrently, returning immediately.
+        """Create a task and run its pipeline concurrently; return at once.
 
-        Registers the task in the registry, builds (or adapts) its context snapshot,
-        creates its steering inbox, and schedules ``pipeline`` on a background
-        ``asyncio.Task`` without waiting for it to finish. Use this for background
-        tasks, or for foreground tasks whose completion is awaited elsewhere.
+        Registers the task in the registry, builds (or adapts) its context
+        snapshot, creates its steering inbox, and schedules ``pipeline`` on a
+        background ``asyncio.Task`` without waiting for it to finish. Use this
+        for background tasks, or for foreground tasks whose completion is
+        awaited elsewhere.
 
         Args:
-            pipeline: The async callable that executes the task given a :class:`TaskRuntime`.
+            pipeline: The async callable that executes the task given a
+                :class:`TaskRuntime`.
             task_type: Whether this is a ``FOREGROUND`` or ``BACKGROUND`` task.
             priority: Scheduling priority hint stored on the task.
-            context_snapshot: An explicit context snapshot to use instead of building one from
-                the session's current context.
-            description: Human-readable description of the task, used in summaries and notifications.
-            spawn_reason: Machine-readable reason the task was spawned (e.g. ``"tasks.spawn"``).
+            context_snapshot: An explicit context snapshot to use instead of
+                building one from the session's current context.
+            description: Human-readable description of the task, used in
+                summaries and notifications.
+            spawn_reason: Machine-readable reason the task was spawned (e.g.
+                ``"tasks.spawn"``).
             parent_task_id: The task that spawned this one, if any.
-            spawned_from_event_id: The steering/event ID that triggered this spawn, if any.
+            spawned_from_event_id: The steering/event ID that triggered this
+                spawn, if any.
             query: The user-facing query this task is answering, if applicable.
-            task_id: Explicit task ID to use; a random one is generated if omitted.
+            task_id: Explicit task ID to use; a random one is generated if
+                omitted.
             trace_id: Trace ID to associate with the task's updates.
-            merge_strategy: Strategy used to merge the task's resulting context patch.
-            propagate_on_cancel: Whether cancelling this task cascades to its children
-                (``"cascade"``) or leaves them running (``"isolate"``).
-            notify_on_complete: Whether a default completion notification is emitted when
-                the task finishes without an explicit notification.
-            group_id: Task group to associate this task's completion with, if any.
+            merge_strategy: Strategy used to merge the task's resulting context
+                patch.
+            propagate_on_cancel: Whether cancelling this task cascades to its
+                children (``"cascade"``) or leaves them running
+                (``"isolate"``).
+            notify_on_complete: Whether a default completion notification is
+                emitted when the task finishes without an explicit
+                notification.
+            group_id: Task group to associate this task's completion with, if
+                any.
 
         Returns:
             The task ID (either ``task_id`` or a newly generated one).
@@ -926,7 +1132,7 @@ class StreamingSession:
             task_id=task_id,
         )
         self._emit_status_change(state, reason="created")
-        asyncio.create_task(
+        self.run_in_background(
             self._telemetry.emit(
                 TaskTelemetryEvent(
                     event_type="task_spawned",
@@ -937,7 +1143,9 @@ class StreamingSession:
                     trace_id=state.trace_id,
                     task_type=state.task_type,
                     status=state.status,
-                    mode="subagent" if state.task_type == TaskType.BACKGROUND else "foreground",
+                    mode="subagent"
+                    if state.task_type == TaskType.BACKGROUND
+                    else "foreground",
                     spawn_reason=state.context_snapshot.spawn_reason,
                 )
             )
@@ -978,39 +1186,50 @@ class StreamingSession:
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
     ) -> TaskResult:
-        """Create a task and run its pipeline to completion, awaiting the result.
+        """Create a task and run its pipeline to completion.
 
-        Unlike :meth:`spawn_task`, this awaits the pipeline directly and returns its
-        :class:`TaskResult`. When ``task_type`` is ``FOREGROUND``, the foreground-busy
-        flag is set for the duration of the call and ``on_foreground_yield`` is invoked
-        once the pipeline finishes (success, failure, or cancellation).
+        Unlike :meth:`spawn_task`, this awaits the pipeline directly and
+        returns its :class:`TaskResult`. When ``task_type`` is ``FOREGROUND``,
+        the foreground-busy flag is set for the duration of the call and
+        ``on_foreground_yield`` is invoked once the pipeline finishes (success,
+        failure, or cancellation).
 
         Args:
-            pipeline: The async callable that executes the task given a :class:`TaskRuntime`.
+            pipeline: The async callable that executes the task given a
+                :class:`TaskRuntime`.
             task_type: Whether this is a ``FOREGROUND`` or ``BACKGROUND`` task.
             priority: Scheduling priority hint stored on the task.
-            context_snapshot: An explicit context snapshot to use instead of building one from
-                the session's current context.
-            description: Human-readable description of the task, used in summaries and notifications.
+            context_snapshot: An explicit context snapshot to use instead of
+                building one from the session's current context.
+            description: Human-readable description of the task, used in
+                summaries and notifications.
             spawn_reason: Machine-readable reason the task was spawned.
             parent_task_id: The task that spawned this one, if any.
-            spawned_from_event_id: The steering/event ID that triggered this spawn, if any.
+            spawned_from_event_id: The steering/event ID that triggered this
+                spawn, if any.
             query: The user-facing query this task is answering, if applicable.
-            task_id: Explicit task ID to use; a random one is generated if omitted.
+            task_id: Explicit task ID to use; a random one is generated if
+                omitted.
             trace_id: Trace ID to associate with the task's updates.
-            merge_strategy: Strategy used to merge the task's resulting context patch.
-            propagate_on_cancel: Whether cancelling this task cascades to its children
-                (``"cascade"``) or leaves them running (``"isolate"``).
-            notify_on_complete: Whether a default completion notification is emitted when
-                the task finishes without an explicit notification.
+            merge_strategy: Strategy used to merge the task's resulting context
+                patch.
+            propagate_on_cancel: Whether cancelling this task cascades to its
+                children (``"cascade"``) or leaves them running
+                (``"isolate"``).
+            notify_on_complete: Whether a default completion notification is
+                emitted when the task finishes without an explicit
+                notification.
 
         Returns:
             The :class:`TaskResult` produced by the pipeline.
 
         Raises:
-            RuntimeError: If session/task-type limits are exceeded (see ``ensure_capacity``).
-            TimeoutError: If the pipeline exceeds ``limits.max_task_runtime_s``.
-            SteeringCancelled: If the task is cancelled via steering while running.
+            RuntimeError: If session/task-type limits are exceeded (see
+                ``ensure_capacity``).
+            TimeoutError: If the pipeline exceeds
+                ``limits.max_task_runtime_s``.
+            SteeringCancelled: If the task is cancelled via steering while
+                running.
         """
         await self._ensure_limits(task_type)
         task_id = task_id or secrets.token_hex(8)
@@ -1044,7 +1263,7 @@ class StreamingSession:
             task_id=task_id,
         )
         self._emit_status_change(state, reason="created")
-        asyncio.create_task(
+        self.run_in_background(
             self._telemetry.emit(
                 TaskTelemetryEvent(
                     event_type="task_spawned",
@@ -1055,7 +1274,9 @@ class StreamingSession:
                     trace_id=state.trace_id,
                     task_type=state.task_type,
                     status=state.status,
-                    mode="subagent" if state.task_type == TaskType.BACKGROUND else "foreground",
+                    mode="subagent"
+                    if state.task_type == TaskType.BACKGROUND
+                    else "foreground",
                     spawn_reason=state.context_snapshot.spawn_reason,
                 )
             )
@@ -1081,70 +1302,130 @@ class StreamingSession:
     async def steer(self, event: SteeringEvent) -> bool:
         """Process an inbound steering event against this session's tasks.
 
-        Handles the full steering lifecycle: session/validation checks, duplicate-event
-        detection, persistence, approve/reject routing for pending context patches and
-        gated controls, control-policy confirmation gating (emitting a ``CHECKPOINT``
-        update when confirmation is required), and dispatch of ``PRIORITIZE``, ``PAUSE``,
-        ``RESUME``, and ``CANCEL`` (including cascading cancellation to child tasks).
-        Finally, the event is pushed onto the target task's steering inbox if one exists.
+        Handles the full steering lifecycle: session/validation checks,
+        duplicate-event detection, persistence, approve/reject routing for
+        pending context patches and gated controls, control-policy confirmation
+        gating (emitting a ``CHECKPOINT`` update when confirmation is
+        required), and dispatch of ``PRIORITIZE``, ``PAUSE``, ``RESUME``, and
+        ``CANCEL`` (including cascading cancellation to child tasks). Finally,
+        the event is pushed onto the target task's steering inbox if one
+        exists.
 
         Args:
             event: The steering event to process.
 
         Returns:
-            ``True`` if the event was accepted/handled (including being pushed to the
-            task's steering inbox); ``False`` if it was rejected, invalid, a duplicate,
-            targeted a different session, or is pending confirmation.
+            ``True`` if the event was accepted/handled (including being pushed
+            to the task's steering inbox); ``False`` if it was rejected,
+            invalid, a duplicate, targeted a different session, or is pending
+            confirmation.
+        """
+        prepared = await self._prepare_steering(event)
+        if prepared is None:
+            return False
+        event = prepared
+
+        if event.event_type in {
+            SteeringEventType.APPROVE,
+            SteeringEventType.REJECT,
+        }:
+            outcome = await self._resolve_approval(event)
+            if outcome is not None:
+                return outcome
+
+        if self._control_policy.requires_confirmation(event):
+            self._request_confirmation(event)
+            return False
+
+        task = await self._registry.get_task(event.task_id)
+        if task is None:
+            return False
+
+        if event.event_type == SteeringEventType.PRIORITIZE:
+            priority_val = event.payload.get("priority")
+            if isinstance(priority_val, int):
+                await self._registry.update_priority(
+                    event.task_id, priority_val
+                )
+                self._emit_status_change(task, reason="priority_changed")
+            return True
+
+        handled = await self._apply_task_control(event, task)
+        return await self._deliver_to_inbox(event, handled=handled)
+
+    async def _prepare_steering(
+        self, event: SteeringEvent
+    ) -> SteeringEvent | None:
+        """Sanitize, validate, dedupe and persist an inbound event.
+
+        Returns:
+            The sanitized event, or ``None`` if it must be rejected.
         """
         if event.session_id != self.session_id:
-            return False
-        event = sanitize_steering_event(event, max_payload_bytes=self._limits.max_steering_payload_bytes)
+            return None
+        event = sanitize_steering_event(
+            event, max_payload_bytes=self._limits.max_steering_payload_bytes
+        )
         try:
             validate_steering_event(event)
         except SteeringValidationError:
-            return False
+            return None
         if self._is_duplicate_event(event.task_id, event.event_id):
-            return False
+            return None
         await self._state_store.save_steering(event)
+        return event
 
-        if event.event_type in {SteeringEventType.APPROVE, SteeringEventType.REJECT}:
-            patch_id = event.payload.get("patch_id")
-            if isinstance(patch_id, str) and patch_id in self._pending_patches:
-                if event.event_type == SteeringEventType.REJECT:
-                    await self._reject_pending_patch(patch_id, event)
-                    return True
+    async def _resolve_approval(self, event: SteeringEvent) -> bool | None:
+        """Route an APPROVE/REJECT to a pending patch or gated control.
+
+        Returns:
+            The steering outcome, or ``None`` when nothing was pending.
+        """
+        patch_id = event.payload.get("patch_id")
+        if isinstance(patch_id, str) and patch_id in self._pending_patches:
+            if event.event_type == SteeringEventType.REJECT:
+                await self._reject_pending_patch(patch_id, event)
+            else:
                 await self.apply_pending_patch(patch_id=patch_id)
-                return True
+            return True
 
-        if event.event_type in {SteeringEventType.APPROVE, SteeringEventType.REJECT}:
-            token = event.payload.get("resume_token") or event.payload.get("event_id")
-            if not isinstance(token, str):
-                return False
-            pending = self._pending_controls.pop(token, None)
-            if pending is not None:
-                if event.event_type == SteeringEventType.REJECT:
-                    self._publish(
-                        StateUpdate(
-                            session_id=self.session_id,
-                            task_id=pending.task_id,
-                            trace_id=pending.trace_id,
-                            update_type=UpdateType.NOTIFICATION,
-                            content={
-                                "severity": "warning",
-                                "title": "Action rejected",
-                                "body": f"Rejected {pending.event_type.value.lower()} request.",
-                            },
-                        )
-                    )
-                    return False
-                confirmed_payload = dict(pending.payload)
-                confirmed_payload["confirmed"] = True
-                pending = pending.model_copy(update={"payload": confirmed_payload, "source": "user"})
-                return await self.steer(pending)
+        token = event.payload.get("resume_token") or event.payload.get(
+            "event_id"
+        )
+        if not isinstance(token, str):
+            return False
+        pending = self._pending_controls.pop(token, None)
+        if pending is None:
+            return None
+        if event.event_type == SteeringEventType.REJECT:
+            self.publish(
+                StateUpdate(
+                    session_id=self.session_id,
+                    task_id=pending.task_id,
+                    trace_id=pending.trace_id,
+                    update_type=UpdateType.NOTIFICATION,
+                    content={
+                        "severity": "warning",
+                        "title": "Action rejected",
+                        "body": "Rejected "
+                        f"{pending.event_type.value.lower()} "
+                        "request.",
+                    },
+                )
+            )
+            return False
+        confirmed_payload = dict(pending.payload)
+        confirmed_payload["confirmed"] = True
+        pending = pending.model_copy(
+            update={"payload": confirmed_payload, "source": "user"}
+        )
+        return await self.steer(pending)
 
-        if self._control_policy.requires_confirmation(event):
-            self._pending_controls[event.event_id] = event
-            checkpoint = StateUpdate(
+    def _request_confirmation(self, event: SteeringEvent) -> None:
+        """Hold ``event`` until the user confirms it, via a checkpoint."""
+        self._pending_controls[event.event_id] = event
+        self.publish(
+            StateUpdate(
                 session_id=self.session_id,
                 task_id=event.task_id,
                 trace_id=event.trace_id,
@@ -1156,33 +1437,28 @@ class StreamingSession:
                     "options": ["approve", "reject"],
                 },
             )
-            self._publish(checkpoint)
-            return False
+        )
 
-        task = await self._registry.get_task(event.task_id)
-        if task is None:
-            return False
-
-        if event.event_type == SteeringEventType.PRIORITIZE:
-            priority_val = event.payload.get("priority")
-            if isinstance(priority_val, int):
-                await self._registry.update_priority(event.task_id, priority_val)
-                self._emit_status_change(task, reason="priority_changed")
-            return True
-
-        handled = False
+    async def _apply_task_control(
+        self, event: SteeringEvent, task: TaskState
+    ) -> bool:
+        """Apply PAUSE/RESUME/CANCEL to ``task``; return whether handled."""
         if event.event_type == SteeringEventType.PAUSE:
-            await self._registry.update_status(event.task_id, TaskStatus.PAUSED)
+            await self._registry.update_status(
+                event.task_id, TaskStatus.PAUSED
+            )
             self._emit_status_change(task, reason="paused")
-            handled = True
-
+            return True
         if event.event_type == SteeringEventType.RESUME:
-            await self._registry.update_status(event.task_id, TaskStatus.RUNNING)
+            await self._registry.update_status(
+                event.task_id, TaskStatus.RUNNING
+            )
             self._emit_status_change(task, reason="resumed")
-            handled = True
-
+            return True
         if event.event_type == SteeringEventType.CANCEL:
-            await self._registry.update_status(event.task_id, TaskStatus.CANCELLED)
+            await self._registry.update_status(
+                event.task_id, TaskStatus.CANCELLED
+            )
             self._emit_status_change(task, reason="cancel_requested")
             handle = self._task_handles.get(event.task_id)
             if handle is not None and not handle.done():
@@ -1191,14 +1467,19 @@ class StreamingSession:
                 parent_task_id=event.task_id,
                 reason=str(event.payload.get("reason") or "parent_cancelled"),
             )
-            handled = True
+            return True
+        return False
 
+    async def _deliver_to_inbox(
+        self, event: SteeringEvent, *, handled: bool
+    ) -> bool:
+        """Push ``event`` to the task's steering inbox, if it has one."""
         inbox = self._steering_inboxes.get(event.task_id)
         if inbox is None:
             return handled
         accepted = await inbox.push(event)
         if accepted:
-            self._publish(
+            self.publish(
                 StateUpdate(
                     session_id=self.session_id,
                     task_id=event.task_id,
@@ -1224,7 +1505,9 @@ class StreamingSession:
         """
         return await self._registry.get_task(task_id)
 
-    async def list_tasks(self, *, status: TaskStatus | None = None) -> list[TaskState]:
+    async def list_tasks(
+        self, *, status: TaskStatus | None = None
+    ) -> list[TaskState]:
         """List tasks belonging to this session.
 
         Args:
@@ -1235,15 +1518,19 @@ class StreamingSession:
         """
         return await self._registry.list_tasks(self.session_id, status=status)
 
-    async def cancel_task(self, task_id: str, *, reason: str | None = None) -> bool:
-        """Request cancellation of a task by sending a ``CANCEL`` steering event.
+    async def cancel_task(
+        self, task_id: str, *, reason: str | None = None
+    ) -> bool:
+        """Request a task's cancellation with a ``CANCEL`` steering event.
 
         Args:
             task_id: The task to cancel.
-            reason: Optional human-readable reason recorded on the cancellation.
+            reason: Optional human-readable reason recorded on the
+                cancellation.
 
         Returns:
-            ``True`` if the cancel event was accepted (see :meth:`steer`), ``False`` otherwise.
+            ``True`` if the cancel event was accepted (see :meth:`steer`),
+            ``False`` otherwise.
         """
         return await self.steer(
             SteeringEvent(
@@ -1265,9 +1552,11 @@ class StreamingSession:
         """Send the same steering event to every active task in this session.
 
         Args:
-            event_type: The steering event type to broadcast (e.g. ``PAUSE``, ``RESUME``).
+            event_type: The steering event type to broadcast (e.g. ``PAUSE``,
+                ``RESUME``).
             payload: Payload to attach to each event.
-            source: The ``source`` recorded on each event (e.g. ``"user"`` or ``"system"``).
+            source: The ``source`` recorded on each event (e.g. ``"user"`` or
+                ``"system"``).
 
         Returns:
             The number of tasks that accepted the event (see :meth:`steer`).
@@ -1303,8 +1592,8 @@ class StreamingSession:
             limit: Maximum number of updates to return.
 
         Returns:
-            The matching list of :class:`StateUpdate` objects, oldest constraints applied
-            by the underlying state store.
+            The matching list of :class:`StateUpdate` objects, oldest
+            constraints applied by the underlying state store.
         """
         updates = await self._state_store.list_updates(
             self.session_id,
@@ -1331,18 +1620,19 @@ class StreamingSession:
         update_types: list[UpdateType] | None = None,
         since_id: str | None = None,
     ) -> AsyncIterator[StateUpdate]:
-        """Subscribe to live state updates for this session, optionally replaying history.
+        """Subscribe to live state updates, optionally replaying history.
 
         Args:
             task_ids: If provided, only yield updates for these task IDs.
             update_types: If provided, only yield updates of these types.
-            since_id: If provided (and exactly one ``task_id`` is given), first replay
-                persisted updates after this ID before switching to live updates.
+            since_id: If provided (and exactly one ``task_id`` is given), first
+                replay persisted updates after this ID before switching to live
+                updates.
 
         Returns:
-            An async iterator of :class:`StateUpdate` objects matching the given filters.
-            The subscription is automatically released when the iterator is closed or
-            fully consumed.
+            An async iterator of :class:`StateUpdate` objects matching the
+            given filters. The subscription is automatically released when the
+            iterator is closed or fully consumed.
         """
         queue, unsubscribe = await self._broker.subscribe(
             task_ids=task_ids,
@@ -1355,16 +1645,19 @@ class StreamingSession:
         def _matches_filter(update: StateUpdate) -> bool:
             if task_id_set is not None and update.task_id not in task_id_set:
                 return False
-            if update_type_set is not None and update.update_type not in update_type_set:
-                return False
-            return True
+            return not (
+                update_type_set is not None
+                and update.update_type not in update_type_set
+            )
 
         async def _iterator() -> AsyncIterator[StateUpdate]:
             try:
                 if since_id is not None:
                     replay = await self._state_store.list_updates(
                         self.session_id,
-                        task_id=task_ids[0] if task_ids and len(task_ids) == 1 else None,
+                        task_id=task_ids[0]
+                        if task_ids and len(task_ids) == 1
+                        else None,
                         since_id=since_id,
                     )
                     for update in replay:
@@ -1384,22 +1677,23 @@ class StreamingSession:
         *,
         patch: ContextPatch,
         strategy: MergeStrategy = MergeStrategy.APPEND,
-        payload: Any | None = None,
+        payload: object = None,
         group_id: str | None = None,
     ) -> str | None:
-        """Merge a completed task's context patch into the session, per ``strategy``.
+        """Merge a completed task's context patch per ``strategy``.
 
-        Detects whether the patch was produced from a context version/hash older than
-        the session's current one (``context_diverged``) and emits a warning notification
-        when so. For ``HUMAN_GATED``, the patch is queued for approval and a ``CHECKPOINT``
-        update is published instead of being applied immediately. For ``APPEND``/``REPLACE``,
-        the patch is recorded as a background result immediately.
+        Detects whether the patch was produced from a context version/hash
+        older than the session's current one (``context_diverged``) and emits a
+        warning notification when so. For ``HUMAN_GATED``, the patch is queued
+        for approval and a ``CHECKPOINT`` update is published instead of being
+        applied immediately. For ``APPEND``/``REPLACE``, the patch is recorded
+        as a background result immediately.
 
         Args:
             patch: The context patch produced by the completed task.
             strategy: The merge strategy to apply.
-            payload: The task's raw result payload, stored alongside the patch for
-                ``APPEND``/``REPLACE`` strategies.
+            payload: The task's raw result payload, stored alongside the patch
+                for ``APPEND``/``REPLACE`` strategies.
             group_id: The task group this patch's task belongs to, if any.
 
         Returns:
@@ -1411,16 +1705,23 @@ class StreamingSession:
                 ``limits.max_pending_patches``.
         """
         diverged = False
-        if patch.source_context_version is not None and patch.source_context_version != self._context.version:
+        if (
+            patch.source_context_version is not None
+            and patch.source_context_version != self._context.version
+        ):
             diverged = True
-        if patch.source_context_hash and patch.source_context_hash != self._context.context_hash:
+        if (
+            patch.source_context_hash
+            and patch.source_context_hash != self._context.context_hash
+        ):
             diverged = True
         if diverged and not patch.context_diverged:
             patch = patch.model_copy(update={"context_diverged": True})
 
         if strategy == MergeStrategy.HUMAN_GATED:
             if len(self._pending_patches) >= self._limits.max_pending_patches:
-                raise RuntimeError("pending_patch_limit_exceeded")
+                msg = "pending_patch_limit_exceeded"
+                raise RuntimeError(msg)
             patch_id = secrets.token_hex(8)
             self._pending_patches[patch_id] = PendingContextPatch(
                 patch_id=patch_id,
@@ -1428,7 +1729,7 @@ class StreamingSession:
                 patch=patch,
                 strategy=strategy,
             )
-            self._publish(
+            self.publish(
                 StateUpdate(
                     session_id=self.session_id,
                     task_id=patch.task_id,
@@ -1440,7 +1741,8 @@ class StreamingSession:
                         "task_id": patch.task_id,
                         "digest": patch.digest,
                         "diverged": patch.context_diverged,
-                        "prompt": "Apply background results to the conversation?",
+                        "prompt": "Apply background results to "
+                        "the conversation?",
                         "options": ["approve", "reject"],
                     },
                 )
@@ -1448,10 +1750,12 @@ class StreamingSession:
             return patch_id
 
         if strategy in {MergeStrategy.APPEND, MergeStrategy.REPLACE}:
-            result = _background_result_from_patch(patch, payload=payload, group_id=group_id)
+            result = _background_result_from_patch(
+                patch, payload=payload, group_id=group_id
+            )
             self._context.background_results[result.task_id] = result
         if diverged:
-            self._publish(
+            self.publish(
                 StateUpdate(
                     session_id=self.session_id,
                     task_id=patch.task_id,
@@ -1460,7 +1764,8 @@ class StreamingSession:
                     content={
                         "severity": "warning",
                         "title": "Context changed",
-                        "body": "Background results were produced from an older context.",
+                        "body": "Background results were produced from an "
+                        "older context.",
                     },
                 )
             )
@@ -1479,13 +1784,18 @@ class StreamingSession:
             if task_id in self._context.background_results:
                 del self._context.background_results[task_id]
                 removed += 1
-        background_results = self._context.llm_context.get("background_results")
+        background_results = self._context.llm_context.get(
+            "background_results"
+        )
         if isinstance(background_results, list):
             original_len = len(background_results)
             remaining = [
                 item
                 for item in background_results
-                if not (isinstance(item, dict) and item.get("task_id") in task_id_set)
+                if not (
+                    isinstance(item, dict)
+                    and item.get("task_id") in task_id_set
+                )
             ]
             removed += original_len - len(remaining)
             if remaining:
@@ -1494,13 +1804,18 @@ class StreamingSession:
                 self._context.llm_context.pop("background_results", None)
             legacy_removed = legacy_removed or (original_len != len(remaining))
         background_result = self._context.llm_context.get("background_result")
-        if isinstance(background_result, dict) and background_result.get("task_id") in task_id_set:
+        if (
+            isinstance(background_result, dict)
+            and background_result.get("task_id") in task_id_set
+        ):
             self._context.llm_context.pop("background_result", None)
             removed += 1
             legacy_removed = True
         if legacy_removed:
             self._context.version += 1
-            self._context.context_hash = _hash_context(self._context.llm_context)
+            self._context.context_hash = _hash_context(
+                self._context.llm_context
+            )
         return removed
 
     async def apply_pending_patch(
@@ -1512,12 +1827,14 @@ class StreamingSession:
         """Approve and merge a previously human-gated pending context patch.
 
         Args:
-            patch_id: The ID of the pending patch to apply (see ``pending_patches``).
-            strategy: Merge strategy to apply the patch with; defaults to ``APPEND``.
+            patch_id: The ID of the pending patch to apply (see
+                ``pending_patches``).
+            strategy: Merge strategy to apply the patch with; defaults to
+                ``APPEND``.
 
         Returns:
-            ``True`` if a matching pending patch was found and applied, ``False`` if no
-            pending patch exists for ``patch_id``.
+            ``True`` if a matching pending patch was found and applied,
+            ``False`` if no pending patch exists for ``patch_id``.
         """
         pending = self._pending_patches.pop(patch_id, None)
         if pending is None:
@@ -1526,7 +1843,7 @@ class StreamingSession:
             patch=pending.patch,
             strategy=strategy or MergeStrategy.APPEND,
         )
-        self._publish(
+        self.publish(
             StateUpdate(
                 session_id=self.session_id,
                 task_id=pending.task_id,
@@ -1541,11 +1858,13 @@ class StreamingSession:
         )
         return True
 
-    async def _reject_pending_patch(self, patch_id: str, event: SteeringEvent) -> None:
+    async def _reject_pending_patch(
+        self, patch_id: str, event: SteeringEvent
+    ) -> None:
         pending = self._pending_patches.pop(patch_id, None)
         if pending is None:
             return
-        self._publish(
+        self.publish(
             StateUpdate(
                 session_id=self.session_id,
                 task_id=pending.task_id,
@@ -1577,12 +1896,16 @@ class StreamingSession:
                 group_id=group_id,
             )
         except asyncio.CancelledError:
-            await self._registry.update_task(state.task_id, status=TaskStatus.CANCELLED, error="cancelled")
+            await self._registry.update_task(
+                state.task_id, status=TaskStatus.CANCELLED, error="cancelled"
+            )
             self._emit_status_change(state, reason="cancelled")
             # Mark task as failed in group if applicable
             if group_id is not None:
-                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
-            asyncio.create_task(
+                await self.mark_task_complete_in_group(
+                    group_id, state.task_id, success=False
+                )
+            self.run_in_background(
                 self._telemetry.emit(
                     TaskTelemetryEvent(
                         event_type="task_cancelled",
@@ -1593,7 +1916,11 @@ class StreamingSession:
                         trace_id=state.trace_id,
                         task_type=state.task_type,
                         status=TaskStatus.CANCELLED,
-                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
+                        mode="job"
+                        if (
+                            state.context_snapshot.spawn_reason or ""
+                        ).startswith("tool:")
+                        else "subagent",
                         spawn_reason=state.context_snapshot.spawn_reason,
                         extra={"reason": "cancelled"},
                     )
@@ -1604,20 +1931,27 @@ class StreamingSession:
             self._steering_inboxes.pop(state.task_id, None)
             handle = self._task_handles.pop(state.task_id, None)
             current = asyncio.current_task()
-            if handle is not None and handle is not current and not handle.done():
+            if (
+                handle is not None
+                and handle is not current
+                and not handle.done()
+            ):
                 handle.cancel()
 
     async def close(self) -> None:
-        """Shut down the session, cancelling all in-flight tasks and background helpers.
+        """Shut down the session, cancelling tasks and background helpers.
 
-        Cancels the proactive reporter task, any scheduled group-continuation tasks, and
-        every running task handle (marking each corresponding task as ``CANCELLED`` with
-        error ``"session_closed"``). Clears internal task-handle and steering-inbox
-        tracking. Intended to be called once when a session is being torn down (see
-        :meth:`SessionManager.drop`).
+        Cancels the proactive reporter task, any scheduled group-continuation
+        tasks, and every running task handle (marking each corresponding task
+        as ``CANCELLED`` with error ``"session_closed"``). Clears internal
+        task-handle and steering-inbox tracking. Intended to be called once
+        when a session is being torn down (see :meth:`SessionManager.drop`).
         """
         # Cancel proactive reporter task
-        if self._proactive_task is not None and not self._proactive_task.done():
+        if (
+            self._proactive_task is not None
+            and not self._proactive_task.done()
+        ):
             self._proactive_task.cancel()
             self._proactive_task = None
         for handle in list(self._group_continuations.values()):
@@ -1627,7 +1961,9 @@ class StreamingSession:
         for task_id, handle in list(self._task_handles.items()):
             if not handle.done():
                 handle.cancel()
-            await self._registry.update_task(task_id, status=TaskStatus.CANCELLED, error="session_closed")
+            await self._registry.update_task(
+                task_id, status=TaskStatus.CANCELLED, error="session_closed"
+            )
         self._task_handles.clear()
         self._steering_inboxes.clear()
 
@@ -1648,7 +1984,8 @@ class StreamingSession:
         """Resolve an existing group or create a new one based on name/ID.
 
         Turn-scoped name resolution:
-        - If group_id provided, join that exact group (error if not found/joinable)
+        - If group_id provided, join that exact group (error if not
+          found/joinable)
         - If group_name provided, resolve to OPEN group with that name created
           in the same turn, or create new group if none exists
         """
@@ -1656,15 +1993,22 @@ class StreamingSession:
         if group_id is not None:
             existing = self._groups.get(group_id)
             if existing is None:
-                raise RuntimeError(f"group_not_found: {group_id}")
+                msg = f"group_not_found: {group_id}"
+                raise RuntimeError(msg)
             if existing.status != "open":
-                raise RuntimeError(f"group_not_joinable: {group_id} is {existing.status}")
+                msg = f"group_not_joinable: {group_id} is {existing.status}"
+                raise RuntimeError(msg)
             return existing
 
-        # Turn-scoped name resolution: find OPEN group with matching name + turn_id
+        # Turn-scoped name resolution: find OPEN group with matching name +
+        # turn_id
         if group_name is not None:
             for grp in self._groups.values():
-                if grp.name == group_name and grp.status == "open" and grp.turn_id == turn_id:
+                if (
+                    grp.name == group_name
+                    and grp.status == "open"
+                    and grp.turn_id == turn_id
+                ):
                     return grp
 
         # Create new group
@@ -1680,7 +2024,7 @@ class StreamingSession:
         return new_group
 
     async def add_task_to_group(self, group_id: str, task_id: str) -> bool:
-        """Add a task to a group. Returns False if group not found or not open."""
+        """Add a task to a group; False if the group is missing or closed."""
         group = self._groups.get(group_id)
         if group is None:
             return False
@@ -1691,7 +2035,7 @@ class StreamingSession:
         return True
 
     async def seal_group(self, group_id: str) -> bool:
-        """Seal a group (no more tasks can join). Returns False if already sealed."""
+        """Seal a group so no more tasks join; False if already sealed."""
         group = self._groups.get(group_id)
         if group is None:
             return False
@@ -1723,13 +2067,17 @@ class StreamingSession:
         # Name-based lookup
         if group_name is not None:
             for grp in self._groups.values():
-                if grp.name == group_name:
-                    # If turn_id specified, match it; otherwise return first match
-                    if turn_id is None or grp.turn_id == turn_id:
-                        return grp
+                # If turn_id is specified, match it; otherwise return the
+                # first match.
+                if grp.name == group_name and (
+                    turn_id is None or grp.turn_id == turn_id
+                ):
+                    return grp
         return None
 
-    async def list_groups(self, *, status: GroupStatus | None = None) -> list[TaskGroup]:
+    async def list_groups(
+        self, *, status: GroupStatus | None = None
+    ) -> list[TaskGroup]:
         """List all task groups, optionally filtered by status."""
         groups = list(self._groups.values())
         if status is not None:
@@ -1745,7 +2093,22 @@ class StreamingSession:
         patch: ContextPatch | None = None,
         patch_id: str | None = None,
     ) -> None:
-        """Mark a task as complete (success or failure) within its group."""
+        """Mark a task as complete (success or failure) within its group.
+
+        Args:
+            group_id: The task's group.
+            task_id: The finished task.
+            success: Whether the task succeeded.
+            patch: Deprecated and ignored; the group tracks ``patch_id``.
+            patch_id: Pending human-gated patch to bundle for approval.
+        """
+        if patch is not None:
+            warnings.warn(
+                "mark_task_complete_in_group(patch=...) is ignored and "
+                "deprecated; pass patch_id instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         group = self._groups.get(group_id)
         if group is None:
             return
@@ -1778,15 +2141,22 @@ class StreamingSession:
             group.status = "complete"
         group.completed_at = _utc_now()
         # Emit telemetry event
-        asyncio.create_task(
+        self.run_in_background(
             self._telemetry.emit(
                 TaskTelemetryEvent(
-                    event_type="task_group_completed" if group.status == "complete" else "task_group_failed",
-                    outcome="completed" if group.status == "complete" else "failed",
+                    event_type="task_group_completed"
+                    if group.status == "complete"
+                    else "task_group_failed",
+                    outcome="completed"
+                    if group.status == "complete"
+                    else "failed",
                     session_id=self.session_id,
                     task_id=group.group_id,
-                    task_type=TaskType.BACKGROUND,  # Groups contain background tasks
-                    status=TaskStatus.COMPLETE if group.status == "complete" else TaskStatus.FAILED,
+                    # Groups contain background tasks
+                    task_type=TaskType.BACKGROUND,
+                    status=TaskStatus.COMPLETE
+                    if group.status == "complete"
+                    else TaskStatus.FAILED,
                     extra={
                         "group_name": group.name,
                         "task_count": len(group.task_ids),
@@ -1816,7 +2186,8 @@ class StreamingSession:
 
         Args:
             group_id: The group to wait for.
-            timeout_s: Maximum time to wait in seconds. If None, wait indefinitely.
+            timeout_s: Maximum time to wait in seconds. If None, wait
+                indefinitely.
 
         Returns:
             A tuple of (group, timed_out). If timed_out is True, the group may
@@ -1837,13 +2208,11 @@ class StreamingSession:
                 await asyncio.wait_for(event.wait(), timeout=timeout_s)
             else:
                 await event.wait()
-            # Re-fetch group after wait (state may have changed)
-            group = self._groups.get(group_id)
-            return group, False
         except TimeoutError:
             # Re-fetch group to get current state
-            group = self._groups.get(group_id)
-            return group, True
+            return self._groups.get(group_id), True
+        # Re-fetch group after wait (state may have changed)
+        return self._groups.get(group_id), False
 
     async def get_group_results(self, group_id: str) -> list[dict[str, Any]]:
         """Get aggregated results/digests from a completed group's tasks."""
@@ -1861,8 +2230,12 @@ class StreamingSession:
                 results.append(
                     {
                         "task_id": task_id,
-                        "digest": result.get("digest") if isinstance(result, dict) else str(result),
-                        "facts": result.get("facts") if isinstance(result, dict) else {},
+                        "digest": result.get("digest")
+                        if isinstance(result, dict)
+                        else str(result),
+                        "facts": result.get("facts")
+                        if isinstance(result, dict)
+                        else {},
                     }
                 )
         return results
@@ -1872,53 +2245,67 @@ class StreamingSession:
         config = self._proactive_config
         if config is None or not config.get("enabled"):
             return
-        # For HUMAN_GATED groups, don't generate synthesis from unapproved results
+        # For HUMAN_GATED groups, don't generate synthesis from unapproved
+        # results; just notify that the group is ready for approval.
         if group.merge_strategy == MergeStrategy.HUMAN_GATED:
-            # Just emit a notification that group is ready for approval
-            self._publish(
-                StateUpdate(
-                    session_id=self.session_id,
-                    task_id=group.group_id,
-                    trace_id=None,
-                    update_type=UpdateType.CHECKPOINT,
-                    content={
-                        "kind": "group_approval",
-                        "group_id": group.group_id,
-                        "group_name": group.name,
-                        "task_count": len(group.task_ids),
-                        "completed_count": len(group.completed_task_ids),
-                        "failed_count": len(group.failed_task_ids),
-                        "prompt": f"Task group '{group.name}' complete. Apply results?",
-                        "options": ["approve", "reject"],
-                    },
-                )
-            )
+            self._publish_group_approval(group)
             return
-        # Build combined report request
-        combined_digest: list[str] = []
-        combined_facts: dict[str, Any] = {}
-        combined_artifacts: list[dict[str, Any]] = []
-        combined_sources: list[dict[str, Any]] = []
+        patches, failed_summaries = await self._collect_group_patches(group)
+        combined_patch = _combine_group_patches(
+            group.group_id, patches, failed_summaries
+        )
+        self.enqueue_proactive_report(
+            task_id=combined_patch.task_id,
+            trace_id=None,
+            description=(
+                f"Task group '{group.name}' ({len(group.task_ids)} tasks)"
+            ),
+            execution_time_ms=0,
+            patch=combined_patch,
+            merge_strategy=group.merge_strategy,
+            group_id=group.group_id,
+            is_group_report=True,
+            group_task_ids=list(group.task_ids),
+            combined_patches=patches,
+            proactive_hops_remaining=await self._group_hops_remaining(group),
+        )
+
+    def _publish_group_approval(self, group: TaskGroup) -> None:
+        """Ask the user to approve a completed human-gated group."""
+        self.publish(
+            StateUpdate(
+                session_id=self.session_id,
+                task_id=group.group_id,
+                trace_id=None,
+                update_type=UpdateType.CHECKPOINT,
+                content={
+                    "kind": "group_approval",
+                    "group_id": group.group_id,
+                    "group_name": group.name,
+                    "task_count": len(group.task_ids),
+                    "completed_count": len(group.completed_task_ids),
+                    "failed_count": len(group.failed_task_ids),
+                    "prompt": f"Task group '{group.name}' complete. Apply "
+                    "results?",
+                    "options": ["approve", "reject"],
+                },
+            )
+        )
+
+    async def _collect_group_patches(
+        self, group: TaskGroup
+    ) -> tuple[list[ContextPatch], list[dict[str, Any]]]:
+        """Collect a group's pending patches and its failed-task summaries."""
+        patches: list[ContextPatch] = []
         failed_summaries: list[dict[str, Any]] = []
-        combined_patches: list[ContextPatch] = []
-        context_diverged = False
-        # Collect from pending patches or merged context
         for task_id in group.task_ids:
             task = await self._registry.get_task(task_id)
             if task is None:
                 continue
-            # Check for pending patch
             for patch_id in group.patches:
                 pending = self._pending_patches.get(patch_id)
                 if pending is not None and pending.task_id == task_id:
-                    patch = pending.patch
-                    combined_digest.extend(patch.digest or [])
-                    combined_facts.update(patch.facts or {})
-                    combined_artifacts.extend(patch.artifacts or [])
-                    combined_sources.extend(patch.sources or [])
-                    combined_patches.append(patch)
-                    if patch.context_diverged:
-                        context_diverged = True
+                    patches.append(pending.patch)
             if task_id in group.failed_task_ids:
                 failed_summaries.append(
                     {
@@ -1927,10 +2314,11 @@ class StreamingSession:
                         "error": task.error,
                     }
                 )
-        if failed_summaries:
-            combined_facts = dict(combined_facts)
-            combined_facts["failed_tasks"] = failed_summaries
-        hops_candidates = []
+        return patches, failed_summaries
+
+    async def _group_hops_remaining(self, group: TaskGroup) -> int | None:
+        """Return the smallest proactive hop budget among the group's tasks."""
+        hops_candidates: list[int] = []
         for task_id in group.task_ids:
             task = await self._registry.get_task(task_id)
             if task is None:
@@ -1938,28 +2326,7 @@ class StreamingSession:
             hops = _coerce_proactive_hops(task.context_snapshot.tool_context)
             if hops is not None:
                 hops_candidates.append(hops)
-        hops_remaining = min(hops_candidates) if hops_candidates else None
-        combined_patch = ContextPatch(
-            task_id=f"group_{group.group_id}",
-            digest=combined_digest,
-            facts=combined_facts,
-            artifacts=combined_artifacts,
-            sources=combined_sources,
-            context_diverged=context_diverged,
-        )
-        self._enqueue_proactive_report(
-            task_id=combined_patch.task_id,
-            trace_id=None,
-            description=f"Task group '{group.name}' ({len(group.task_ids)} tasks)",
-            execution_time_ms=0,
-            patch=combined_patch,
-            merge_strategy=group.merge_strategy,
-            group_id=group.group_id,
-            is_group_report=True,
-            group_task_ids=list(group.task_ids),
-            combined_patches=combined_patches,
-            proactive_hops_remaining=hops_remaining,
-        )
+        return min(hops_candidates) if hops_candidates else None
 
     async def cancel_group(
         self,
@@ -1978,7 +2345,9 @@ class StreamingSession:
         group.completed_at = _utc_now()
         if propagate:
             for task_id in group.pending_task_ids:
-                await self.cancel_task(task_id, reason=reason or "group_cancelled")
+                await self.cancel_task(
+                    task_id, reason=reason or "group_cancelled"
+                )
         return True
 
     async def apply_group_patches(
@@ -2005,7 +2374,10 @@ class StreamingSession:
                 self._pending_patches.pop(patch_id, None)
         group.patches.clear()
         # Now that patches are applied, we can generate the synthesis report
-        if action == "apply" and group.merge_strategy == MergeStrategy.HUMAN_GATED:
+        if (
+            action == "apply"
+            and group.merge_strategy == MergeStrategy.HUMAN_GATED
+        ):
             # Re-queue for synthesis now that results are approved
             group.merge_strategy = MergeStrategy.APPEND  # Switch for synthesis
             group.report_queued = False
@@ -2017,7 +2389,7 @@ class StreamingSession:
         self._current_turn_id = turn_id
 
     async def auto_seal_open_groups(self, turn_id: str | None = None) -> int:
-        """Auto-seal all OPEN groups created in the given turn (or current turn).
+        """Auto-seal all OPEN groups created in the given (or current) turn.
 
         Called when foreground yields to ensure groups don't stay open.
         Returns count of groups sealed.
@@ -2054,233 +2426,312 @@ class StreamingSession:
             context_snapshot=state.context_snapshot,
         )
         try:
-            if self._limits.max_task_runtime_s is not None:
-                result = await asyncio.wait_for(
-                    pipeline(runtime),
-                    timeout=self._limits.max_task_runtime_s,
-                )
-            else:
-                result = await pipeline(runtime)
-            task_result = result if isinstance(result, TaskResult) else TaskResult(payload=result)
-            await self._registry.update_task(
-                state.task_id,
-                status=TaskStatus.COMPLETE,
-                result=task_result.payload,
+            task_result = await self._run_pipeline(pipeline, runtime)
+            await self._complete_task(
+                runtime,
+                task_result,
+                merge_strategy=merge_strategy,
+                group_id=group_id,
+                start_ts=start_ts,
             )
-            patch_id: str | None = None
-            if task_result.context_patch is not None:
-                patch_id = await self.apply_context_patch(
-                    patch=task_result.context_patch,
-                    strategy=merge_strategy,
-                    payload=task_result.payload,
-                    group_id=group_id,
-                )
-                # Check if task is in a group
-                task_group = self._groups.get(group_id) if group_id else None
-                # Enqueue proactive report for auto-merged background tasks
-                # Suppress per-task reports for grouped tasks with report_strategy="all"
-                should_report = (
-                    patch_id is None
-                    and state.task_type == TaskType.BACKGROUND
-                    and self._proactive_config is not None
-                    and self._proactive_config.get("enabled")
-                )
-                if should_report and task_group is not None:
-                    # Suppress per-task report if group uses "all" strategy
-                    if task_group.report_strategy == "all":
-                        should_report = False
-                if should_report:
-                    execution_time_ms = int((time.monotonic() - start_ts) * 1000)
-                    hops_remaining = _coerce_proactive_hops(state.context_snapshot.tool_context)
-                    self._enqueue_proactive_report(
-                        task_id=state.task_id,
-                        trace_id=state.trace_id,
-                        description=state.description,
-                        execution_time_ms=execution_time_ms,
-                        patch=task_result.context_patch,
-                        merge_strategy=merge_strategy,
-                        proactive_hops_remaining=hops_remaining,
-                    )
-            # Mark task complete in group if applicable
-            if group_id is not None:
-                await self.mark_task_complete_in_group(
-                    group_id,
-                    state.task_id,
-                    success=True,
-                    patch=task_result.context_patch,
-                    patch_id=patch_id,
-                )
-            content = {
-                "digest": task_result.digest,
-                "payload": task_result.payload,
-                "artifacts": task_result.artifacts,
-                "sources": task_result.sources,
-                "task_patch": task_result.context_patch.model_dump(mode="json") if task_result.context_patch else None,
-                "patch_id": patch_id,
-            }
-            self._publish(
-                StateUpdate(
-                    session_id=self.session_id,
-                    task_id=state.task_id,
-                    trace_id=state.trace_id,
-                    update_type=UpdateType.RESULT,
-                    content=content,
-                )
-            )
-            if task_result.notification is not None:
-                if patch_id is not None:
-                    task_result.notification.actions.append(
-                        NotificationAction(
-                            id="apply_context_patch",
-                            label="Apply to conversation",
-                            payload={"patch_id": patch_id, "task_id": state.task_id},
-                        )
-                    )
-                runtime.notify(task_result.notification)
-            self._emit_status_change(state, reason="complete")
-            if (
-                state.task_type == TaskType.BACKGROUND
-                and state.context_snapshot.notify_on_complete
-                and task_result.notification is None
-            ):
-                runtime.notify(
-                    NotificationPayload(
-                        severity="info",
-                        title="Background task complete",
-                        body=f"Task {state.task_id} completed.",
-                    )
-                )
-            asyncio.create_task(
-                self._telemetry.emit(
-                    TaskTelemetryEvent(
-                        event_type="task_completed",
-                        outcome="completed",
-                        session_id=self.session_id,
-                        task_id=state.task_id,
-                        parent_task_id=state.context_snapshot.spawned_from_task_id,
-                        trace_id=state.trace_id,
-                        task_type=state.task_type,
-                        status=TaskStatus.COMPLETE,
-                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
-                        spawn_reason=state.context_snapshot.spawn_reason,
-                        duration_ms=(time.monotonic() - start_ts) * 1000,
-                    )
-                )
-            )
-            return task_result
         except SteeringCancelled as exc:
-            await self._registry.update_task(state.task_id, status=TaskStatus.CANCELLED, error=exc.reason)
-            self._emit_status_change(state, reason="cancelled")
-            # Mark task as failed in group if applicable
-            if group_id is not None:
-                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
-            asyncio.create_task(
-                self._telemetry.emit(
-                    TaskTelemetryEvent(
-                        event_type="task_cancelled",
-                        outcome="cancelled",
-                        session_id=self.session_id,
-                        task_id=state.task_id,
-                        parent_task_id=state.context_snapshot.spawned_from_task_id,
-                        trace_id=state.trace_id,
-                        task_type=state.task_type,
-                        status=TaskStatus.CANCELLED,
-                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
-                        spawn_reason=state.context_snapshot.spawn_reason,
-                        duration_ms=(time.monotonic() - start_ts) * 1000,
-                        extra={"reason": exc.reason},
-                    )
-                )
+            await self._on_task_cancelled(
+                runtime, exc, group_id=group_id, start_ts=start_ts
             )
-            if state.task_type == TaskType.BACKGROUND:
-                runtime.notify(
-                    NotificationPayload(
-                        severity="warning",
-                        title="Background task cancelled",
-                        body=exc.reason or "Task cancelled.",
-                    )
-                )
             raise
         except TimeoutError:
-            await self._registry.update_task(state.task_id, status=TaskStatus.FAILED, error="timeout")
-            self._emit_status_change(state, reason="timeout")
-            # Mark task as failed in group if applicable
-            if group_id is not None:
-                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
-            asyncio.create_task(
-                self._telemetry.emit(
-                    TaskTelemetryEvent(
-                        event_type="task_failed",
-                        outcome="failed",
-                        session_id=self.session_id,
-                        task_id=state.task_id,
-                        parent_task_id=state.context_snapshot.spawned_from_task_id,
-                        trace_id=state.trace_id,
-                        task_type=state.task_type,
-                        status=TaskStatus.FAILED,
-                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
-                        spawn_reason=state.context_snapshot.spawn_reason,
-                        duration_ms=(time.monotonic() - start_ts) * 1000,
-                        extra={"error": "timeout"},
-                    )
-                )
+            await self._on_task_timeout(
+                runtime, group_id=group_id, start_ts=start_ts
             )
             raise
         except Exception as exc:
-            # Log immediately for terminal visibility (telemetry emit is async/fire-and-forget)
-            _LOGGER.exception(
-                "Task %s failed with %s: %s",
-                state.task_id,
-                exc.__class__.__name__,
-                exc,
+            await self._on_task_failed(
+                runtime, exc, group_id=group_id, start_ts=start_ts
             )
-            await self._registry.update_task(state.task_id, status=TaskStatus.FAILED, error=str(exc))
-            self._publish(
-                StateUpdate(
-                    session_id=self.session_id,
-                    task_id=state.task_id,
-                    trace_id=state.trace_id,
-                    update_type=UpdateType.ERROR,
-                    content={"error": str(exc), "error_type": exc.__class__.__name__},
-                )
-            )
-            self._emit_status_change(state, reason="failed")
-            # Mark task as failed in group if applicable
-            if group_id is not None:
-                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
-            asyncio.create_task(
-                self._telemetry.emit(
-                    TaskTelemetryEvent(
-                        event_type="task_failed",
-                        outcome="failed",
-                        session_id=self.session_id,
-                        task_id=state.task_id,
-                        parent_task_id=state.context_snapshot.spawned_from_task_id,
-                        trace_id=state.trace_id,
-                        task_type=state.task_type,
-                        status=TaskStatus.FAILED,
-                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
-                        spawn_reason=state.context_snapshot.spawn_reason,
-                        duration_ms=(time.monotonic() - start_ts) * 1000,
-                        extra={"error": str(exc), "error_type": exc.__class__.__name__},
-                    )
-                )
-            )
-            if state.task_type == TaskType.BACKGROUND:
-                runtime.notify(
-                    NotificationPayload(
-                        severity="error",
-                        title="Background task failed",
-                        body=str(exc),
-                    )
-                )
             raise
+        else:
+            return task_result
         finally:
             if semaphore is not None:
                 semaphore.release()
 
-    def _emit_status_change(self, state: TaskState, *, reason: str | None = None) -> None:
-        self._publish(
+    async def _run_pipeline(
+        self, pipeline: TaskPipeline, runtime: TaskRuntime
+    ) -> TaskResult:
+        """Run the task pipeline under the runtime limit, if any."""
+        if self._limits.max_task_runtime_s is not None:
+            result = await asyncio.wait_for(
+                pipeline(runtime),
+                timeout=self._limits.max_task_runtime_s,
+            )
+        else:
+            result = await pipeline(runtime)
+        return (
+            result
+            if isinstance(result, TaskResult)
+            else TaskResult(payload=result)
+        )
+
+    def _emit_task_telemetry(
+        self,
+        state: TaskState,
+        *,
+        event_type: str,
+        outcome: str,
+        status: TaskStatus,
+        start_ts: float,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a task lifecycle telemetry event in the background."""
+        spawn_reason = state.context_snapshot.spawn_reason
+        self.run_in_background(
+            self._telemetry.emit(
+                TaskTelemetryEvent(
+                    event_type=event_type,
+                    outcome=outcome,
+                    session_id=self.session_id,
+                    task_id=state.task_id,
+                    parent_task_id=state.context_snapshot.spawned_from_task_id,
+                    trace_id=state.trace_id,
+                    task_type=state.task_type,
+                    status=status,
+                    mode="job"
+                    if (spawn_reason or "").startswith("tool:")
+                    else "subagent",
+                    spawn_reason=spawn_reason,
+                    duration_ms=(time.monotonic() - start_ts) * 1000,
+                    extra=extra or {},
+                )
+            )
+        )
+
+    def _should_report_task(
+        self, state: TaskState, patch_id: str | None, group_id: str | None
+    ) -> bool:
+        """Whether an auto-merged background task gets a proactive report.
+
+        Grouped tasks whose report strategy is "all" get no per-task report.
+        """
+        if patch_id is not None or state.task_type != TaskType.BACKGROUND:
+            return False
+        if self._proactive_config is None or not self._proactive_config.get(
+            "enabled"
+        ):
+            return False
+        task_group = self._groups.get(group_id) if group_id else None
+        return task_group is None or task_group.report_strategy != "all"
+
+    async def _complete_task(
+        self,
+        runtime: TaskRuntime,
+        task_result: TaskResult,
+        *,
+        merge_strategy: MergeStrategy,
+        group_id: str | None,
+        start_ts: float,
+    ) -> None:
+        """Record a successful task, merge its patch and notify listeners."""
+        state = runtime.state
+        await self._registry.update_task(
+            state.task_id,
+            status=TaskStatus.COMPLETE,
+            result=task_result.payload,
+        )
+        patch_id: str | None = None
+        if task_result.context_patch is not None:
+            patch_id = await self.apply_context_patch(
+                patch=task_result.context_patch,
+                strategy=merge_strategy,
+                payload=task_result.payload,
+                group_id=group_id,
+            )
+            if self._should_report_task(state, patch_id, group_id):
+                self.enqueue_proactive_report(
+                    task_id=state.task_id,
+                    trace_id=state.trace_id,
+                    description=state.description,
+                    execution_time_ms=int(
+                        (time.monotonic() - start_ts) * 1000
+                    ),
+                    patch=task_result.context_patch,
+                    merge_strategy=merge_strategy,
+                    proactive_hops_remaining=_coerce_proactive_hops(
+                        state.context_snapshot.tool_context
+                    ),
+                )
+        # Mark task complete in group if applicable
+        if group_id is not None:
+            await self.mark_task_complete_in_group(
+                group_id,
+                state.task_id,
+                success=True,
+                patch_id=patch_id,
+            )
+        self.publish(
+            StateUpdate(
+                session_id=self.session_id,
+                task_id=state.task_id,
+                trace_id=state.trace_id,
+                update_type=UpdateType.RESULT,
+                content={
+                    "digest": task_result.digest,
+                    "payload": task_result.payload,
+                    "artifacts": task_result.artifacts,
+                    "sources": task_result.sources,
+                    "task_patch": task_result.context_patch.model_dump(
+                        mode="json"
+                    )
+                    if task_result.context_patch
+                    else None,
+                    "patch_id": patch_id,
+                },
+            )
+        )
+        if task_result.notification is not None:
+            if patch_id is not None:
+                task_result.notification.actions.append(
+                    NotificationAction(
+                        id="apply_context_patch",
+                        label="Apply to conversation",
+                        payload={
+                            "patch_id": patch_id,
+                            "task_id": state.task_id,
+                        },
+                    )
+                )
+            runtime.notify(task_result.notification)
+        self._emit_status_change(state, reason="complete")
+        if (
+            state.task_type == TaskType.BACKGROUND
+            and state.context_snapshot.notify_on_complete
+            and task_result.notification is None
+        ):
+            runtime.notify(
+                NotificationPayload(
+                    severity="info",
+                    title="Background task complete",
+                    body=f"Task {state.task_id} completed.",
+                )
+            )
+        self._emit_task_telemetry(
+            state,
+            event_type="task_completed",
+            outcome="completed",
+            status=TaskStatus.COMPLETE,
+            start_ts=start_ts,
+        )
+
+    async def _fail_in_group(self, group_id: str | None, task_id: str) -> None:
+        """Mark a task as failed in its group, if it has one."""
+        if group_id is not None:
+            await self.mark_task_complete_in_group(
+                group_id, task_id, success=False
+            )
+
+    async def _on_task_cancelled(
+        self,
+        runtime: TaskRuntime,
+        exc: SteeringCancelled,
+        *,
+        group_id: str | None,
+        start_ts: float,
+    ) -> None:
+        """Record a cancelled task."""
+        state = runtime.state
+        await self._registry.update_task(
+            state.task_id, status=TaskStatus.CANCELLED, error=exc.reason
+        )
+        self._emit_status_change(state, reason="cancelled")
+        await self._fail_in_group(group_id, state.task_id)
+        self._emit_task_telemetry(
+            state,
+            event_type="task_cancelled",
+            outcome="cancelled",
+            status=TaskStatus.CANCELLED,
+            start_ts=start_ts,
+            extra={"reason": exc.reason},
+        )
+        if state.task_type == TaskType.BACKGROUND:
+            runtime.notify(
+                NotificationPayload(
+                    severity="warning",
+                    title="Background task cancelled",
+                    body=exc.reason or "Task cancelled.",
+                )
+            )
+
+    async def _on_task_timeout(
+        self, runtime: TaskRuntime, *, group_id: str | None, start_ts: float
+    ) -> None:
+        """Record a task that exceeded its runtime limit."""
+        state = runtime.state
+        await self._registry.update_task(
+            state.task_id, status=TaskStatus.FAILED, error="timeout"
+        )
+        self._emit_status_change(state, reason="timeout")
+        await self._fail_in_group(group_id, state.task_id)
+        self._emit_task_telemetry(
+            state,
+            event_type="task_failed",
+            outcome="failed",
+            status=TaskStatus.FAILED,
+            start_ts=start_ts,
+            extra={"error": "timeout"},
+        )
+
+    async def _on_task_failed(
+        self,
+        runtime: TaskRuntime,
+        exc: Exception,
+        *,
+        group_id: str | None,
+        start_ts: float,
+    ) -> None:
+        """Record a task that raised, and report the error."""
+        state = runtime.state
+        # Log immediately for terminal visibility (telemetry emit is
+        # async/fire-and-forget)
+        _LOGGER.exception(
+            "Task %s failed with %s",
+            state.task_id,
+            exc.__class__.__name__,
+        )
+        await self._registry.update_task(
+            state.task_id, status=TaskStatus.FAILED, error=str(exc)
+        )
+        error = {"error": str(exc), "error_type": exc.__class__.__name__}
+        self.publish(
+            StateUpdate(
+                session_id=self.session_id,
+                task_id=state.task_id,
+                trace_id=state.trace_id,
+                update_type=UpdateType.ERROR,
+                content=dict(error),
+            )
+        )
+        self._emit_status_change(state, reason="failed")
+        await self._fail_in_group(group_id, state.task_id)
+        self._emit_task_telemetry(
+            state,
+            event_type="task_failed",
+            outcome="failed",
+            status=TaskStatus.FAILED,
+            start_ts=start_ts,
+            extra=error,
+        )
+        if state.task_type == TaskType.BACKGROUND:
+            runtime.notify(
+                NotificationPayload(
+                    severity="error",
+                    title="Background task failed",
+                    body=str(exc),
+                )
+            )
+
+    def _emit_status_change(
+        self, state: TaskState, *, reason: str | None = None
+    ) -> None:
+        self.publish(
             StateUpdate(
                 session_id=self.session_id,
                 task_id=state.task_id,
@@ -2311,10 +2762,16 @@ class StreamingSession:
     ) -> TaskContextSnapshot:
         self._migrate_legacy_background_results()
         if task_type == TaskType.BACKGROUND:
-            llm_context = _json_snapshot_dict(_deepcopy_dict(self._context.llm_context))
-            tool_context = _json_snapshot_dict(_deepcopy_dict(self._context.tool_context))
+            llm_context = _json_snapshot_dict(
+                _deepcopy_dict(self._context.llm_context)
+            )
+            tool_context = _json_snapshot_dict(
+                _deepcopy_dict(self._context.tool_context)
+            )
             memory = _json_snapshot_dict(_deepcopy_dict(self._context.memory))
-            artifacts = _json_snapshot_list(_deepcopy_list(self._context.artifacts))
+            artifacts = _json_snapshot_list(
+                _deepcopy_list(self._context.artifacts)
+            )
         else:
             llm_context = dict(self._context.llm_context)
             tool_context = dict(self._context.tool_context)
@@ -2322,12 +2779,15 @@ class StreamingSession:
             artifacts = list(self._context.artifacts)
         if self._context.background_results:
             llm_context = dict(llm_context)
-            llm_context["background_results"] = _background_results_payload(self._context.background_results)
+            llm_context["background_results"] = _background_results_payload(
+                self._context.background_results
+            )
         return TaskContextSnapshot(
             session_id=self.session_id,
             task_id=task_id,
             trace_id=trace_id,
-            spawned_from_task_id=parent_task_id or (self._foreground_task_id or "foreground"),
+            spawned_from_task_id=parent_task_id
+            or (self._foreground_task_id or "foreground"),
             spawned_from_event_id=spawned_from_event_id,
             spawn_reason=spawn_reason,
             query=query,
@@ -2341,7 +2801,9 @@ class StreamingSession:
             artifacts=artifacts,
         )
 
-    async def _cascade_cancel_children(self, *, parent_task_id: str, reason: str) -> None:
+    async def _cascade_cancel_children(
+        self, *, parent_task_id: str, reason: str
+    ) -> None:
         visited = {parent_task_id}
         queue = [parent_task_id]
         while queue:
@@ -2357,7 +2819,11 @@ class StreamingSession:
                 snapshot = child.context_snapshot
                 if snapshot and snapshot.propagate_on_cancel == "isolate":
                     continue
-                if child.status in {TaskStatus.COMPLETE, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                if child.status in {
+                    TaskStatus.COMPLETE,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                }:
                     continue
 
                 propagated = sanitize_steering_event(
@@ -2386,7 +2852,9 @@ class StreamingSession:
                     error="cancelled",
                 )
                 if updated is not None:
-                    self._emit_status_change(updated, reason="parent_cancelled")
+                    self._emit_status_change(
+                        updated, reason="parent_cancelled"
+                    )
 
                 handle = self._task_handles.get(child_id)
                 if handle is not None and not handle.done():
@@ -2406,6 +2874,7 @@ class SessionManager:
         control_policy: ControlPolicy | None = None,
         telemetry_sink: TaskTelemetrySink | None = None,
     ) -> None:
+        """Configure the settings applied to every session it creates."""
         self._sessions: dict[str, StreamingSession] = {}
         self._lock = asyncio.Lock()
         self._limits = limits
@@ -2414,14 +2883,14 @@ class SessionManager:
         self._telemetry_sink = telemetry_sink
 
     async def get_or_create(self, session_id: str) -> StreamingSession:
-        """Return the existing session for ``session_id``, creating and hydrating one if needed.
+        """Return the session for ``session_id``, creating it if needed.
 
         Args:
             session_id: The session identifier to look up or create.
 
         Returns:
-            The (possibly newly created) :class:`StreamingSession`, hydrated from the
-            configured state store.
+            The (possibly newly created) :class:`StreamingSession`, hydrated
+            from the configured state store.
         """
         async with self._lock:
             session = self._sessions.get(session_id)
@@ -2438,13 +2907,14 @@ class SessionManager:
         return session
 
     async def get(self, session_id: str) -> StreamingSession | None:
-        """Return the session for ``session_id`` if it already exists, without creating one.
+        """Return the session for ``session_id`` if it exists, or ``None``.
 
         Args:
             session_id: The session identifier to look up.
 
         Returns:
-            The existing :class:`StreamingSession`, or ``None`` if none has been created yet.
+            The existing :class:`StreamingSession`, or ``None`` if none has
+            been created yet.
         """
         async with self._lock:
             return self._sessions.get(session_id)
@@ -2463,8 +2933,8 @@ class SessionManager:
 
 __all__ = [
     "PendingContextPatch",
-    "SessionManager",
     "SessionLimits",
+    "SessionManager",
     "StreamingSession",
     "TaskPipeline",
     "TaskResult",

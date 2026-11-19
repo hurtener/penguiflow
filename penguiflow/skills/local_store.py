@@ -7,9 +7,8 @@ import json
 import re
 import sqlite3
 import time
-from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .models import (
     SkillDefinition,
@@ -20,22 +19,29 @@ from .models import (
     SkillTaskType,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
 _SCHEMA_VERSION = 1
 
 
 class LocalSkillStore:
+    """SQLite-backed skill store with FTS search and a regex fallback."""
+
     def __init__(
         self,
         *,
         db_path: str | Path,
         fts_fallback_to_regex: bool = True,
     ) -> None:
+        """Open the store at ``db_path``; FTS can fall back to regex."""
         self._db_path = Path(db_path)
         self._fts_fallback_to_regex = bool(fts_fallback_to_regex)
         self._fts_available: bool | None = None
 
     @property
     def fts_available(self) -> bool:
+        """Whether the SQLite build supports FTS5."""
         if self._fts_available is None:
             self._ensure_schema()
         return bool(self._fts_available)
@@ -48,8 +54,10 @@ class LocalSkillStore:
         scope_mode: SkillScopeMode,
         update_existing: bool,
     ) -> tuple[bool, bool]:
+        """Insert or update a pack skill; return ``(inserted, updated)``."""
         if not skill.name:
-            raise ValueError("Skill name is required for upsert")
+            msg = "Skill name is required for upsert"
+            raise ValueError(msg)
         now = int(time.time())
         content_hash = _hash_payload(_canonical_skill_payload(skill))
         payload = _serialise_skill_payload(skill)
@@ -91,7 +99,8 @@ class LocalSkillStore:
                         use_count,
                         extra
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+?, ?, ?, ?, ?)
                     """,
                     (
                         skill_id,
@@ -169,7 +178,6 @@ class LocalSkillStore:
         keep_names: Sequence[str],
     ) -> int:
         """Remove pack-origin skills that are no longer present in the pack."""
-
         self._ensure_schema()
         keep = [name for name in keep_names if name]
         with sqlite3.connect(self._db_path) as conn:
@@ -178,13 +186,15 @@ class LocalSkillStore:
                 placeholders = ", ".join("?" for _ in keep)
                 sql = (
                     "DELETE FROM skills "
-                    "WHERE origin = 'pack' AND origin_ref = ? AND scope_mode = ? "
+                    "WHERE origin = 'pack' AND origin_ref = ? AND scope_mode "
+                    "= ? "
                     f"AND name NOT IN ({placeholders})"
                 )
                 cur = conn.execute(sql, (pack_name, scope_mode, *keep))
             else:
                 cur = conn.execute(
-                    "DELETE FROM skills WHERE origin = 'pack' AND origin_ref = ? AND scope_mode = ?",
+                    "DELETE FROM skills WHERE origin = 'pack' AND "
+                    "origin_ref = ? AND scope_mode = ?",
                     (pack_name, scope_mode),
                 )
         return int(cur.rowcount or 0)
@@ -196,9 +206,9 @@ class LocalSkillStore:
     ) -> list[tuple[str, SkillScopeMode, int]]:
         """Remove pack-origin skills whose pack is not in keep_packs.
 
-        Returns a list of (pack_name, scope_mode, removed_count) for removed packs.
+        Returns a list of (pack_name, scope_mode, removed_count) for removed
+        packs.
         """
-
         self._ensure_schema()
         removed: list[tuple[str, SkillScopeMode, int]] = []
         with sqlite3.connect(self._db_path) as conn:
@@ -221,10 +231,17 @@ class LocalSkillStore:
                 if key in keep_packs:
                     continue
                 cur = conn.execute(
-                    "DELETE FROM skills WHERE origin = 'pack' AND origin_ref = ? AND scope_mode = ?",
+                    "DELETE FROM skills WHERE origin = 'pack' AND "
+                    "origin_ref = ? AND scope_mode = ?",
                     (str(origin_ref), scope_text),
                 )
-                removed.append((str(origin_ref), coerced_scope, int(cur.rowcount or count or 0)))
+                removed.append(
+                    (
+                        str(origin_ref),
+                        coerced_scope,
+                        int(cur.rowcount or count or 0),
+                    )
+                )
         return removed
 
     def get_by_name(
@@ -234,7 +251,10 @@ class LocalSkillStore:
         scope_clause: str,
         scope_params: Sequence[Any],
     ) -> list[SkillRecord]:
-        cleaned = [name for name in names if isinstance(name, str) and name.strip()]
+        """Return the skills with the given names within the scope filter."""
+        cleaned = [
+            name for name in names if isinstance(name, str) and name.strip()
+        ]
         if not cleaned:
             return []
         placeholders = ", ".join("?" for _ in cleaned)
@@ -261,6 +281,7 @@ class LocalSkillStore:
         tags: Sequence[str] = (),
         namespace: str | None = None,
     ) -> tuple[list[dict[str, Any]], SkillSearchType]:
+        """Search skills by FTS, regex or exact match, within the scope."""
         cleaned_query = query.strip()
         if not cleaned_query:
             return [], search_type
@@ -269,7 +290,9 @@ class LocalSkillStore:
             effective = "regex" if self._fts_fallback_to_regex else "exact"
 
         required_tags = _normalise_tag_filter(tags)
-        namespace_filter = namespace.strip() if isinstance(namespace, str) else None
+        namespace_filter = (
+            namespace.strip() if isinstance(namespace, str) else None
+        )
         if namespace_filter == "":
             namespace_filter = None
 
@@ -277,27 +300,61 @@ class LocalSkillStore:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("PRAGMA case_sensitive_like = OFF")
             if effective == "fts":
-                results, executed = _search_fts(conn, cleaned_query, task_type, scope_clause, scope_params)
+                results, executed = _search_fts(
+                    conn, cleaned_query, task_type, scope_clause, scope_params
+                )
                 if not executed and cleaned_query:
                     if self._fts_fallback_to_regex:
                         effective = "regex"
                         results = _search_regex_exact(
-                            conn, cleaned_query, "regex", task_type, scope_clause, scope_params
+                            conn,
+                            cleaned_query,
+                            "regex",
+                            task_type,
+                            scope_clause,
+                            scope_params,
                         )
                     else:
                         effective = "exact"
                         results = _search_regex_exact(
-                            conn, cleaned_query, "exact", task_type, scope_clause, scope_params
+                            conn,
+                            cleaned_query,
+                            "exact",
+                            task_type,
+                            scope_clause,
+                            scope_params,
                         )
             else:
-                results = _search_regex_exact(conn, cleaned_query, effective, task_type, scope_clause, scope_params)
+                results = _search_regex_exact(
+                    conn,
+                    cleaned_query,
+                    effective,
+                    task_type,
+                    scope_clause,
+                    scope_params,
+                )
 
         if required_tags:
-            results = [item for item in results if _matches_tag_filter(item.get("tags", ()), required_tags)]
+            results = [
+                item
+                for item in results
+                if _matches_tag_filter(item.get("tags", ()), required_tags)
+            ]
         if namespace_filter is not None:
-            results = [item for item in results if _matches_namespace(item["name"], namespace_filter)]
+            results = [
+                item
+                for item in results
+                if _matches_namespace(item["name"], namespace_filter)
+            ]
 
-        results = sorted(results, key=lambda item: (-float(item["score"]), len(item["name"]), item["name"]))
+        results = sorted(
+            results,
+            key=lambda item: (
+                -float(item["score"]),
+                len(item["name"]),
+                item["name"],
+            ),
+        )
         start = max(int(offset), 0)
         end = start + max(int(limit), 1)
         limited = results[start:end]
@@ -326,6 +383,7 @@ class LocalSkillStore:
         tags: Sequence[str] = (),
         namespace: str | None = None,
     ) -> tuple[list[SkillRecord], int]:
+        """List skills page by page, optionally filtered by type and origin."""
         page = max(int(page), 1)
         page_size = max(int(page_size), 1)
         filters: list[str] = []
@@ -342,7 +400,9 @@ class LocalSkillStore:
         where = " AND ".join(filters) if filters else "1=1"
 
         required_tags = _normalise_tag_filter(tags)
-        namespace_filter = namespace.strip() if isinstance(namespace, str) else None
+        namespace_filter = (
+            namespace.strip() if isinstance(namespace, str) else None
+        )
         if namespace_filter == "":
             namespace_filter = None
         post_filter = bool(required_tags) or namespace_filter is not None
@@ -356,21 +416,33 @@ class LocalSkillStore:
                     f"SELECT {_SKILL_COLUMNS} FROM skills WHERE {where} "
                     "ORDER BY name LIMIT ? OFFSET ?"
                 )
-                rows = conn.execute(sql, params + [limit, offset]).fetchall()
+                rows = conn.execute(sql, [*params, limit, offset]).fetchall()
                 total = conn.execute(
                     f"SELECT COUNT(1) FROM skills WHERE {where}",
                     params,
                 ).fetchone()[0]
                 return [_row_to_skill(row) for row in rows], int(total)
 
-            # Filtered path: load all candidates, apply Python filter, then page.
-            sql = f"SELECT {_SKILL_COLUMNS} FROM skills WHERE {where} ORDER BY name"
+            # Filtered path: load all candidates, apply Python filter, then
+            # page.
+            sql = (
+                f"SELECT {_SKILL_COLUMNS} FROM skills WHERE {where} ORDER "
+                "BY name"
+            )
             all_rows = conn.execute(sql, params).fetchall()
         records = [_row_to_skill(row) for row in all_rows]
         if required_tags:
-            records = [record for record in records if _matches_tag_filter(record.tags, required_tags)]
+            records = [
+                record
+                for record in records
+                if _matches_tag_filter(record.tags, required_tags)
+            ]
         if namespace_filter is not None:
-            records = [record for record in records if _matches_namespace(record.name, namespace_filter)]
+            records = [
+                record
+                for record in records
+                if _matches_namespace(record.name, namespace_filter)
+            ]
         total = len(records)
         start = (page - 1) * page_size
         end = start + page_size
@@ -384,6 +456,7 @@ class LocalSkillStore:
         scope_clause: str,
         scope_params: Sequence[Any],
     ) -> Sequence[SkillRecord]:
+        """Return the most recently used skills."""
         return self._list_ranked(
             order_by="last_used DESC",
             limit=limit,
@@ -400,6 +473,7 @@ class LocalSkillStore:
         scope_clause: str,
         scope_params: Sequence[Any],
     ) -> Sequence[SkillRecord]:
+        """Return the most used skills."""
         return self._list_ranked(
             order_by="use_count DESC",
             limit=limit,
@@ -409,11 +483,15 @@ class LocalSkillStore:
         )
 
     def touch(self, names: Sequence[str]) -> None:
+        """Record a use of each named skill."""
         if not names:
             return
         now = int(time.time())
         placeholders = ", ".join("?" for _ in names)
-        sql = f"UPDATE skills SET last_used = ?, use_count = use_count + 1 WHERE name IN ({placeholders})"
+        sql = (
+            "UPDATE skills SET last_used = ?, use_count = use_count + 1 "
+            f"WHERE name IN ({placeholders})"
+        )
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(sql, (now, *names))
 
@@ -437,9 +515,12 @@ class LocalSkillStore:
             filters.append(f"name NOT IN ({placeholders})")
             params.extend(exclude)
         where = " AND ".join(filters) if filters else "1=1"
-        sql = f"SELECT {_SKILL_COLUMNS} FROM skills WHERE {where} ORDER BY {order_by} LIMIT ?"
+        sql = (
+            f"SELECT {_SKILL_COLUMNS} FROM skills WHERE {where} ORDER BY "
+            f"{order_by} LIMIT ?"
+        )
         with sqlite3.connect(self._db_path) as conn:
-            rows = conn.execute(sql, params + [max(int(limit), 1)]).fetchall()
+            rows = conn.execute(sql, [*params, max(int(limit), 1)]).fetchall()
         return [_row_to_skill(row) for row in rows]
 
     def _ensure_schema(self) -> None:
@@ -481,17 +562,26 @@ class LocalSkillStore:
                 """
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_skills_scope ON skills(scope_mode, scope_tenant_id, scope_project_id)"
+                "CREATE INDEX IF NOT EXISTS idx_skills_scope ON "
+                "skills(scope_mode, scope_tenant_id, scope_project_id)"
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_task_type ON skills(task_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_origin ON skills(origin)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_skills_task_type ON "
+                "skills(task_type)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_skills_origin ON "
+                "skills(origin)"
+            )
             self._fts_available = _ensure_fts(conn)
             _set_meta(conn, "schema_version", str(_SCHEMA_VERSION))
 
 
 _SKILL_COLUMNS = (
-    "id, scope_mode, scope_tenant_id, scope_project_id, name, title, description, trigger, task_type, tags, "
-    "steps, preconditions, failure_modes, origin, origin_ref, content_hash, created_at, updated_at, last_used, "
+    "id, scope_mode, scope_tenant_id, scope_project_id, name, title, "
+    "description, trigger, task_type, tags, "
+    "steps, preconditions, failure_modes, origin, origin_ref, content_hash, "
+    "created_at, updated_at, last_used, "
     "use_count, extra"
 )
 
@@ -520,18 +610,26 @@ def _ensure_fts(conn: sqlite3.Connection) -> bool:
     conn.executescript(
         """
         CREATE TRIGGER IF NOT EXISTS skills_ai AFTER INSERT ON skills BEGIN
-            INSERT INTO skills_fts(rowid, name, title, trigger, description, tags)
-            VALUES (new.rowid, new.name, new.title, new.trigger, new.description, new.tags);
+            INSERT INTO skills_fts(rowid, name, title, trigger, description, \
+tags)
+            VALUES (new.rowid, new.name, new.title, new.trigger, \
+new.description, new.tags);
         END;
         CREATE TRIGGER IF NOT EXISTS skills_ad AFTER DELETE ON skills BEGIN
-            INSERT INTO skills_fts(skills_fts, rowid, name, title, trigger, description, tags)
-            VALUES('delete', old.rowid, old.name, old.title, old.trigger, old.description, old.tags);
+            INSERT INTO skills_fts(skills_fts, rowid, name, title, trigger, \
+description, tags)
+            VALUES('delete', old.rowid, old.name, old.title, old.trigger, \
+old.description, old.tags);
         END;
         CREATE TRIGGER IF NOT EXISTS skills_au AFTER UPDATE ON skills BEGIN
-            INSERT INTO skills_fts(skills_fts, rowid, name, title, trigger, description, tags)
-            VALUES('delete', old.rowid, old.name, old.title, old.trigger, old.description, old.tags);
-            INSERT INTO skills_fts(rowid, name, title, trigger, description, tags)
-            VALUES (new.rowid, new.name, new.title, new.trigger, new.description, new.tags);
+            INSERT INTO skills_fts(skills_fts, rowid, name, title, trigger, \
+description, tags)
+            VALUES('delete', old.rowid, old.name, old.title, old.trigger, \
+old.description, old.tags);
+            INSERT INTO skills_fts(rowid, name, title, trigger, description, \
+tags)
+            VALUES (new.rowid, new.name, new.title, new.trigger, \
+new.description, new.tags);
         END;
         """
     )
@@ -550,7 +648,7 @@ def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 
 def _canonical_skill_payload(skill: SkillDefinition) -> dict[str, Any]:
-    payload = {
+    return {
         "name": skill.name,
         "title": skill.title,
         "description": skill.description,
@@ -566,10 +664,9 @@ def _canonical_skill_payload(skill: SkillDefinition) -> dict[str, Any]:
         "tools": skill.tools,
         "extra": skill.extra_payload(),
     }
-    return payload
 
 
-def _hash_payload(payload: Any) -> str:
+def _hash_payload(payload: object) -> str:
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -586,15 +683,15 @@ def _serialise_skill_payload(skill: SkillDefinition) -> dict[str, str]:
         extra = dict(extra)
         extra["required_tags"] = list(skill.required_tags)
     if skill.tools is not None:
-        # Persist structured tool hints in the JSON column (v2.12 MVP).
-        # The SkillStore schema does not have a dedicated tools column.
+        # Persist structured tool hints in the JSON column (v2.12 MVP). The
+        # SkillStore schema does not have a dedicated tools column.
         extra = dict(extra)
         extra["tools"] = skill.tools
     return {
         "title": skill.title or "",
         "description": skill.description or "",
         "trigger": skill.trigger,
-        "task_type": skill.task_type or "unknown",
+        "task_type": skill.task_type,
         "tags": json.dumps(skill.tags, ensure_ascii=False),
         "steps": json.dumps(skill.steps, ensure_ascii=False),
         "preconditions": json.dumps(skill.preconditions, ensure_ascii=False),
@@ -622,10 +719,12 @@ def _parse_json_dict(raw: str) -> dict[str, Any]:
 
 
 def _parse_extra_list(payload: dict[str, Any], key: str) -> list[str]:
-    return _parse_json_list(json.dumps(payload.get(key, []), ensure_ascii=False))
+    return _parse_json_list(
+        json.dumps(payload.get(key, []), ensure_ascii=False)
+    )
 
 
-def _coerce_scope_mode(value: Any) -> SkillScopeMode:
+def _coerce_scope_mode(value: object) -> SkillScopeMode:
     text = str(value).strip().lower() if value is not None else ""
     if text == "tenant":
         return "tenant"
@@ -634,7 +733,7 @@ def _coerce_scope_mode(value: Any) -> SkillScopeMode:
     return "project"
 
 
-def _coerce_task_type(value: Any) -> SkillTaskType:
+def _coerce_task_type(value: object) -> SkillTaskType:
     text = str(value).strip().lower() if value is not None else ""
     if text == "browser":
         return "browser"
@@ -647,7 +746,7 @@ def _coerce_task_type(value: Any) -> SkillTaskType:
     return "unknown"
 
 
-def _coerce_origin(value: Any) -> SkillOrigin:
+def _coerce_origin(value: object) -> SkillOrigin:
     text = str(value).strip().lower() if value is not None else ""
     if text == "learned":
         return "learned"
@@ -693,8 +792,12 @@ def _row_to_skill(row: Sequence[Any]) -> SkillRecord:
         steps=_parse_json_list(str(steps or "[]")),
         preconditions=_parse_json_list(str(preconditions or "[]")),
         failure_modes=_parse_json_list(str(failure_modes or "[]")),
-        required_tool_names=_parse_extra_list(extra_payload, "required_tool_names"),
-        required_namespaces=_parse_extra_list(extra_payload, "required_namespaces"),
+        required_tool_names=_parse_extra_list(
+            extra_payload, "required_tool_names"
+        ),
+        required_namespaces=_parse_extra_list(
+            extra_payload, "required_namespaces"
+        ),
         required_tags=_parse_extra_list(extra_payload, "required_tags"),
         origin=_coerce_origin(origin),
         origin_ref=str(origin_ref) if origin_ref else None,
@@ -728,7 +831,8 @@ def _search_fts(
         clause += " AND skills.task_type = ?"
         params.append(task_type)
     sql = (
-        "SELECT skills.name, skills.title, skills.trigger, skills.task_type, skills.tags, bm25(skills_fts) as rank "
+        "SELECT skills.name, skills.title, skills.trigger, "
+        "skills.task_type, skills.tags, bm25(skills_fts) as rank "
         "FROM skills_fts JOIN skills ON skills_fts.rowid = skills.rowid "
         "WHERE skills_fts MATCH ?" + clause
     )
@@ -743,22 +847,21 @@ def _search_fts(
             raise
 
     rows = _run(strict_query)
-    if rows is None:
-        return [], False
-    if not rows:
+    if rows == []:
         # AND queries are often too strict for fuzzy user text. Retry with OR.
         rows = _run(relaxed_query)
-        if rows is None:
-            return [], False
-    if not rows:
-        return [], True
+    if rows is None:
+        return [], False
+    return _normalized_fts_scores(rows), True
+
+
+def _normalized_fts_scores(
+    rows: Sequence[tuple[Any, ...]],
+) -> list[dict[str, Any]]:
+    """Turn FTS rows into matches with BM25 scores scaled to 0..1."""
     scored: list[dict[str, Any]] = []
-    raw_scores: list[float] = []
     for name, title, trigger, task_type_value, tags, raw in rows:
-        raw_value = float(raw) if raw is not None else 0.0
-        raw_value = max(raw_value, 0.0)
-        score_raw = 1.0 / (1.0 + raw_value)
-        raw_scores.append(score_raw)
+        raw_value = max(float(raw) if raw is not None else 0.0, 0.0)
         scored.append(
             {
                 "name": str(name),
@@ -767,19 +870,20 @@ def _search_fts(
                 "task_type": str(task_type_value) if task_type_value else None,
                 "tags": _parse_json_list(str(tags or "[]")),
                 "match_type": "fts",
-                "score_raw": score_raw,
+                "score": 1.0 / (1.0 + raw_value),
             }
         )
-    min_score = min(raw_scores)
-    max_score = max(raw_scores)
+    if not scored:
+        return scored
+    min_score = min(item["score"] for item in scored)
+    max_score = max(item["score"] for item in scored)
     for item in scored:
         if max_score == min_score:
             score = 0.5
         else:
-            score = (item["score_raw"] - min_score) / (max_score - min_score)
+            score = (item["score"] - min_score) / (max_score - min_score)
         item["score"] = max(0.0, min(1.0, score))
-        item.pop("score_raw", None)
-    return scored, True
+    return scored
 
 
 def _coerce_fts_query(value: str) -> str:
@@ -788,7 +892,6 @@ def _coerce_fts_query(value: str) -> str:
     SQLite FTS5 MATCH has its own query grammar; raw user input may contain
     punctuation (e.g. '!') that triggers parser errors.
     """
-
     return " ".join(_fts_tokens(value))
 
 
@@ -815,7 +918,9 @@ def _normalise_tag_filter(tags: Sequence[str]) -> list[str]:
     return cleaned
 
 
-def _matches_tag_filter(declared_tags: Sequence[str], required: Sequence[str]) -> bool:
+def _matches_tag_filter(
+    declared_tags: Sequence[str], required: Sequence[str]
+) -> bool:
     if not required:
         return True
     declared = {str(tag) for tag in declared_tags or ()}
@@ -859,7 +964,10 @@ def _fetch_rows(
         filters.append("task_type = ?")
         params.append(task_type)
     where = " AND ".join(filters) if filters else "1=1"
-    sql = f"SELECT name, title, trigger, tags, task_type FROM skills WHERE {where}"
+    sql = (
+        "SELECT name, title, trigger, tags, task_type FROM skills WHERE "
+        f"{where}"
+    )
     return [
         (
             str(name),
@@ -868,11 +976,15 @@ def _fetch_rows(
             str(tags or "[]"),
             str(task_type_value or "unknown"),
         )
-        for name, title, trigger, tags, task_type_value in conn.execute(sql, params)
+        for name, title, trigger, tags, task_type_value in conn.execute(
+            sql, params
+        )
     ]
 
 
-def _score_exact(query: str, rows: list[tuple[str, str | None, str | None, str, str]]) -> list[dict[str, Any]]:
+def _score_exact(
+    query: str, rows: list[tuple[str, str | None, str | None, str, str]]
+) -> list[dict[str, Any]]:
     query_lower = query.lower()
     results: list[dict[str, Any]] = []
     for name, title, trigger, tags_raw, task_type_value in rows:
@@ -893,14 +1005,17 @@ def _score_exact(query: str, rows: list[tuple[str, str | None, str | None, str, 
     return results
 
 
-def _score_regex(query: str, rows: list[tuple[str, str | None, str | None, str, str]]) -> list[dict[str, Any]]:
+def _score_regex(
+    query: str, rows: list[tuple[str, str | None, str | None, str, str]]
+) -> list[dict[str, Any]]:
     regex: re.Pattern[str] | None = None
     try:
         regex = re.compile(query, re.IGNORECASE)
     except re.error:
         regex = None
 
-    # Natural language queries with whitespace are rarely intended as literal regex.
+    # Natural language queries with whitespace are rarely intended as literal
+    # regex.
     if regex is None or any(ch.isspace() for ch in query):
         tokens = _fts_tokens(query)
         if not tokens:
@@ -960,7 +1075,9 @@ def _regex_score(
             return 0.90
         return 0.85
     tags_blob = " ".join(tags)
-    search_space = " ".join([value for value in [title, trigger, tags_blob] if value])
+    search_space = " ".join(
+        [value for value in [title, trigger, tags_blob] if value]
+    )
     if regex.search(search_space):
         return 0.75
     return None

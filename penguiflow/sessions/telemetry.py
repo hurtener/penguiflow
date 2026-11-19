@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
+from typing_extensions import override
 
 from .models import TaskStatus, TaskType
 
-if TYPE_CHECKING:
-    pass
-
 
 class TaskTelemetryEvent(BaseModel):
+    """A task lifecycle event for telemetry sinks."""
+
     event_type: Literal[
         "task_spawned",
         "task_completed",
@@ -42,13 +42,19 @@ class TaskTelemetryEvent(BaseModel):
 
 
 class TaskTelemetrySink(Protocol):
-    async def emit(self, event: TaskTelemetryEvent) -> None: ...
+    """Destination for task lifecycle telemetry events."""
 
-
-class NoOpTaskTelemetrySink:
     async def emit(self, event: TaskTelemetryEvent) -> None:
-        _ = event
-        return None
+        """Record ``event``."""
+        ...
+
+
+class NoOpTaskTelemetrySink(TaskTelemetrySink):
+    """Telemetry sink that discards every event."""
+
+    @override
+    async def emit(self, event: TaskTelemetryEvent) -> None:
+        return
 
 
 class LoggingTaskTelemetrySink:
@@ -82,94 +88,87 @@ class LoggingTaskTelemetrySink:
 
     async def emit(self, event: TaskTelemetryEvent) -> None:
         """Emit a telemetry event to the logger."""
-        # Build common context for all events
-        context: dict[str, Any] = {
-            "session_id": event.session_id,
-            "task_id": event.task_id,
-            "task_type": event.task_type.value if event.task_type else None,
-            "trace_id": event.trace_id,
-        }
+        log = {
+            "task_spawned": self._log_spawned,
+            "task_completed": self._log_completed,
+            "task_failed": self._log_failed,
+            "task_cancelled": self._log_cancelled,
+            "task_group_completed": self._log_group_completed,
+            "task_group_failed": self._log_group_failed,
+        }.get(event.event_type)
+        if log is not None:
+            log(event, _context_string(event))
 
-        # Add optional fields if present
-        if event.parent_task_id:
-            context["parent_task_id"] = event.parent_task_id
-        if event.mode:
-            context["mode"] = event.mode
-        if event.duration_ms is not None:
-            context["duration_ms"] = round(event.duration_ms, 2)
+    def _log_spawned(self, event: TaskTelemetryEvent, ctx_str: str) -> None:
+        reason = event.spawn_reason or "unspecified"
+        self._logger.info(
+            "Task spawned: %s reason=%s %s", event.task_id, reason, ctx_str
+        )
 
-        # Format context for log message
-        ctx_str = " ".join(f"{k}={v}" for k, v in context.items() if v is not None)
+    def _log_completed(self, event: TaskTelemetryEvent, ctx_str: str) -> None:
+        duration = f" ({event.duration_ms:.0f}ms)" if event.duration_ms else ""
+        self._logger.info(
+            "Task completed: %s%s %s", event.task_id, duration, ctx_str
+        )
 
-        # Route to appropriate log level based on event type
-        if event.event_type == "task_spawned":
-            reason = event.spawn_reason or "unspecified"
-            self._logger.info(
-                "Task spawned: %s reason=%s %s",
-                event.task_id,
-                reason,
-                ctx_str,
-            )
+    def _log_failed(self, event: TaskTelemetryEvent, ctx_str: str) -> None:
+        error = event.extra.get("error", "unknown error")
+        self._logger.error(
+            "Task FAILED: %s error=%s %s", event.task_id, error, ctx_str
+        )
+        # Log additional error details if present
+        if self._include_extra and event.extra:
+            extra_info = {k: v for k, v in event.extra.items() if k != "error"}
+            if extra_info:
+                self._logger.debug("Task failure details: %s", extra_info)
 
-        elif event.event_type == "task_completed":
-            duration = f" ({event.duration_ms:.0f}ms)" if event.duration_ms else ""
-            self._logger.info(
-                "Task completed: %s%s %s",
-                event.task_id,
-                duration,
-                ctx_str,
-            )
+    def _log_cancelled(self, event: TaskTelemetryEvent, ctx_str: str) -> None:
+        reason = event.extra.get("reason", "no reason")
+        self._logger.warning(
+            "Task cancelled: %s reason=%s %s", event.task_id, reason, ctx_str
+        )
 
-        elif event.event_type == "task_failed":
-            error = event.extra.get("error", "unknown error")
-            self._logger.error(
-                "Task FAILED: %s error=%s %s",
-                event.task_id,
-                error,
-                ctx_str,
-            )
-            # Log additional error details if present
-            if self._include_extra and event.extra:
-                extra_info = {k: v for k, v in event.extra.items() if k != "error"}
-                if extra_info:
-                    self._logger.debug("Task failure details: %s", extra_info)
+    def _log_group_completed(
+        self, event: TaskTelemetryEvent, ctx_str: str
+    ) -> None:
+        group_name = event.extra.get("group_name", "")
+        self._logger.info(
+            "Task group completed: %s%s completed=%d/%d %s",
+            event.extra.get("group_id", "unknown"),
+            f" ({group_name})" if group_name else "",
+            event.extra.get("completed_count", 0),
+            event.extra.get("task_count", 0),
+            ctx_str,
+        )
 
-        elif event.event_type == "task_cancelled":
-            reason = event.extra.get("reason", "no reason")
-            self._logger.warning(
-                "Task cancelled: %s reason=%s %s",
-                event.task_id,
-                reason,
-                ctx_str,
-            )
+    def _log_group_failed(
+        self, event: TaskTelemetryEvent, ctx_str: str
+    ) -> None:
+        group_name = event.extra.get("group_name", "")
+        self._logger.error(
+            "Task group FAILED: %s%s failed_count=%d %s",
+            event.extra.get("group_id", "unknown"),
+            f" ({group_name})" if group_name else "",
+            event.extra.get("failed_count", 0),
+            ctx_str,
+        )
 
-        elif event.event_type == "task_group_completed":
-            group_id = event.extra.get("group_id", "unknown")
-            group_name = event.extra.get("group_name", "")
-            completed = event.extra.get("completed_count", 0)
-            total = event.extra.get("task_count", 0)
-            name_part = f" ({group_name})" if group_name else ""
-            self._logger.info(
-                "Task group completed: %s%s completed=%d/%d %s",
-                group_id,
-                name_part,
-                completed,
-                total,
-                ctx_str,
-            )
 
-        elif event.event_type == "task_group_failed":
-            group_id = event.extra.get("group_id", "unknown")
-            group_name = event.extra.get("group_name", "")
-            failed = event.extra.get("failed_count", 0)
-            name_part = f" ({group_name})" if group_name else ""
-            self._logger.error(
-                "Task group FAILED: %s%s failed_count=%d %s",
-                group_id,
-                name_part,
-                failed,
-                ctx_str,
-            )
+def _context_string(event: TaskTelemetryEvent) -> str:
+    """Format an event's common fields as ``key=value`` pairs."""
+    context: dict[str, Any] = {
+        "session_id": event.session_id,
+        "task_id": event.task_id,
+        "task_type": event.task_type.value if event.task_type else None,
+        "trace_id": event.trace_id,
+    }
+    if event.parent_task_id:
+        context["parent_task_id"] = event.parent_task_id
+    if event.mode:
+        context["mode"] = event.mode
+    if event.duration_ms is not None:
+        context["duration_ms"] = round(event.duration_ms, 2)
+    return " ".join(f"{k}={v}" for k, v in context.items() if v is not None)
 
 
 __all__ = [

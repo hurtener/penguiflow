@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from penguiflow.planner.guardrails.async_eval import AsyncRuleEvaluator
-from penguiflow.planner.guardrails.models import GuardrailDecision
+from typing_extensions import override
+
+if TYPE_CHECKING:
+    from penguiflow.planner.guardrails.async_eval import AsyncRuleEvaluator
+    from penguiflow.planner.guardrails.models import GuardrailDecision
 
 
 class SteeringGuardInbox(ABC):
@@ -21,7 +24,9 @@ class SteeringGuardInbox(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def await_response(self, correlation_id: str, timeout_s: float) -> SteeringGuardResponse:
+    async def await_response(
+        self, correlation_id: str, timeout_s: float
+    ) -> SteeringGuardResponse:
         """Wait for response. Raises TimeoutError if exceeded."""
         raise NotImplementedError
 
@@ -57,14 +62,19 @@ class InMemoryGuardInbox(SteeringGuardInbox):
     """In-process async evaluation."""
 
     def __init__(self, evaluator: AsyncRuleEvaluator) -> None:
+        """Create an inbox that evaluates events with ``evaluator``."""
         self._evaluator = evaluator
         self._pending: dict[str, asyncio.Future[SteeringGuardResponse]] = {}
         self._completed: dict[str, SteeringGuardResponse] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
 
+    @override
     async def submit(self, event: SteeringGuardEvent) -> str:
         future: asyncio.Future[SteeringGuardResponse] = asyncio.Future()
         self._pending[event.correlation_id] = future
-        asyncio.create_task(self._evaluate(event, future))
+        task = asyncio.create_task(self._evaluate(event, future))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         return event.correlation_id
 
     async def _evaluate(
@@ -90,16 +100,21 @@ class InMemoryGuardInbox(SteeringGuardInbox):
         if not future.done():
             future.set_result(response)
 
-    async def await_response(self, correlation_id: str, timeout_s: float) -> SteeringGuardResponse:
+    @override
+    async def await_response(
+        self, correlation_id: str, timeout_s: float
+    ) -> SteeringGuardResponse:
         if correlation_id in self._completed:
             return self._completed[correlation_id]
 
         future = self._pending.get(correlation_id)
         if future is None:
-            raise KeyError(f"Unknown correlation_id: {correlation_id}")
+            msg = f"Unknown correlation_id: {correlation_id}"
+            raise KeyError(msg)
 
         return await asyncio.wait_for(future, timeout=timeout_s)
 
+    @override
     def drain_responses(self, run_id: str) -> list[SteeringGuardResponse]:
         # NOTE: Simple implementation drains globally.
         responses = list(self._completed.values())

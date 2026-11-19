@@ -1,11 +1,14 @@
+"""Tests for rich output nodes."""
+
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from typing_extensions import override
 
-from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.planner import Trajectory
 from penguiflow.planner.artifact_registry import ArtifactRegistry
 from penguiflow.planner.trajectory import BackgroundTaskResult
@@ -30,7 +33,11 @@ from penguiflow.rich_output.nodes import (
     ui_form,
     ui_select_option,
 )
-from penguiflow.rich_output.runtime import RichOutputConfig, configure_rich_output, reset_runtime
+from penguiflow.rich_output.runtime import (
+    RichOutputConfig,
+    configure_rich_output,
+    reset_runtime,
+)
 from penguiflow.rich_output.tools import (
     AccordionItem,
     BuildAccordionArgs,
@@ -39,6 +46,7 @@ from penguiflow.rich_output.tools import (
     BuildTableArgs,
     BuildTabsArgs,
     DataGridColumn,
+    DescribeComponentArgs,
     GridItem,
     ListArtifactsArgs,
     RenderAccordionArgs,
@@ -55,60 +63,47 @@ from penguiflow.rich_output.tools import (
     UISelectOptionArgs,
 )
 
+from .tool_context_doubles import FakeToolContext
 
-class PauseSignal(Exception):
-    def __init__(self, payload: dict) -> None:
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from pydantic import BaseModel
+
+    from penguiflow.artifacts import ScopedArtifacts
+    from penguiflow.planner.context import PlannerPauseReason, ToolContext
+    from penguiflow.rich_output.tools import BuildComponentResult
+
+
+class PauseSignalError(Exception):
+    """Pause signal error raised by a test double."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        """Store ``payload``."""
         super().__init__("paused")
         self.payload = payload
 
 
-class DummyContext:
+class DummyContext(FakeToolContext):
+    """Tool context whose pause raises; tests may attach a planner."""
+
     def __init__(self) -> None:
-        self._llm_context: dict = {}
-        self._artifacts_store = InMemoryArtifactStore()
-        self._scoped_artifacts = ScopedArtifacts(
-            self._artifacts_store,
-            tenant_id=None,
-            user_id=None,
-            session_id=None,
-            trace_id=None,
-        )
-        self.tool_context: dict = {}
-        self.emitted: list[dict] = []
+        """Start without a planner."""
+        super().__init__()
+        self.planner: object | None = None
 
     @property
-    def llm_context(self):  # type: ignore[no-untyped-def]
-        return self._llm_context
+    def emitted(self) -> list[dict[str, Any]]:
+        """The artifact chunks emitted so far."""
+        return self.artifact_chunks
 
-    @property
-    def _artifacts(self):  # type: ignore[no-untyped-def]
-        return self._artifacts_store
-
-    @property
-    def artifacts(self):  # type: ignore[no-untyped-def]
-        return self._scoped_artifacts
-
-    async def emit_artifact(
+    @override
+    async def pause(
         self,
-        stream_id: str,
-        chunk: dict,
-        *,
-        done: bool = False,
-        artifact_type: str | None = None,
-        meta: dict | None = None,
-    ) -> None:
-        self.emitted.append(
-            {
-                "stream_id": stream_id,
-                "chunk": chunk,
-                "done": done,
-                "artifact_type": artifact_type,
-                "meta": meta,
-            }
-        )
-
-    async def pause(self, reason: str, payload: dict | None = None):
-        raise PauseSignal(payload or {})
+        reason: PlannerPauseReason,
+        payload: Mapping[str, Any] | None = None,
+    ) -> object:
+        raise PauseSignalError(dict(payload or {}))
 
 
 @pytest.fixture(autouse=True)
@@ -118,11 +113,19 @@ def _reset_runtime() -> None:
 
 @pytest.mark.asyncio
 async def test_render_component_emits_artifact() -> None:
+    """Render component emits artifact."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["markdown"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
-    args = RenderComponentArgs(component="markdown", props={"content": "Hello"})
+    args = RenderComponentArgs(
+        component="markdown", props={"content": "Hello"}
+    )
     result = await render_component(args, ctx)
     assert result.ok is True
     assert ctx.emitted
@@ -133,8 +136,14 @@ async def test_render_component_emits_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_render_report_emits_report_component_artifact() -> None:
+    """Render report emits report component artifact."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "markdown"], max_payload_bytes=4000, max_total_bytes=8000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "markdown"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
     )
     ctx = DummyContext()
     args = RenderReportArgs(
@@ -151,11 +160,20 @@ async def test_render_report_emits_report_component_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_render_chart_echarts_injects_title_when_missing() -> None:
+    """Render chart echarts injects title when missing."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["echarts"], max_payload_bytes=4000, max_total_bytes=8000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["echarts"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
     )
     ctx = DummyContext()
-    args = RenderChartEChartsArgs(title="Revenue", option={"series": [{"type": "line", "data": [1, 2, 3]}]})
+    args = RenderChartEChartsArgs(
+        title="Revenue",
+        option={"series": [{"type": "line", "data": [1, 2, 3]}]},
+    )
     result = await render_chart_echarts(args, ctx)
     assert result.ok is True
     emitted = ctx.emitted[0]
@@ -166,8 +184,14 @@ async def test_render_chart_echarts_injects_title_when_missing() -> None:
 
 @pytest.mark.asyncio
 async def test_render_table_emits_datagrid_component_artifact() -> None:
+    """Render table emits datagrid component artifact."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["datagrid"], max_payload_bytes=4000, max_total_bytes=8000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["datagrid"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
     )
     ctx = DummyContext()
     args = RenderTableArgs(
@@ -185,13 +209,27 @@ async def test_render_table_emits_datagrid_component_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_render_grid_emits_grid_component_artifact() -> None:
+    """Render grid emits grid component artifact."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["grid", "metric"], max_payload_bytes=4000, max_total_bytes=8000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["grid", "metric"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
     )
     ctx = DummyContext()
     args = RenderGridArgs(
         title="Dashboard",
-        items=[GridItem(component="metric", props={"label": "Users", "value": 42}, colSpan=2)],
+        items=[
+            GridItem.model_validate(
+                {
+                    "component": "metric",
+                    "props": {"label": "Users", "value": 42},
+                    "colSpan": 2,
+                }
+            )
+        ],
     )
     result = await render_grid(args, ctx)
     assert result.ok is True
@@ -203,17 +241,29 @@ async def test_render_grid_emits_grid_component_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_render_tabs_emits_tabs_component_artifact() -> None:
+    """Render tabs emits tabs component artifact."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["tabs", "markdown"], max_payload_bytes=4000, max_total_bytes=8000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["tabs", "markdown"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
     )
     ctx = DummyContext()
-    args = RenderTabsArgs(
-        title="Views",
-        tabs=[
-            TabItem(label="Overview", content="Hello"),
-            TabItem(label="Details", component="markdown", props={"content": "World"}),
-        ],
-        defaultTab=1,
+    args = RenderTabsArgs.model_validate(
+        {
+            "title": "Views",
+            "tabs": [
+                TabItem(label="Overview", content="Hello"),
+                TabItem(
+                    label="Details",
+                    component="markdown",
+                    props={"content": "World"},
+                ),
+            ],
+            "defaultTab": 1,
+        }
     )
     result = await render_tabs(args, ctx)
     assert result.ok is True
@@ -225,6 +275,7 @@ async def test_render_tabs_emits_tabs_component_artifact() -> None:
 
 @pytest.mark.asyncio
 async def test_render_accordion_emits_accordion_component_artifact() -> None:
+    """Render accordion emits accordion component artifact."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -234,10 +285,16 @@ async def test_render_accordion_emits_accordion_component_artifact() -> None:
         )
     )
     ctx = DummyContext()
-    args = RenderAccordionArgs(
-        title="FAQ",
-        items=[AccordionItem(title="One", content="First", defaultOpen=True)],
-        allowMultiple=True,
+    args = RenderAccordionArgs.model_validate(
+        {
+            "title": "FAQ",
+            "items": [
+                AccordionItem.model_validate(
+                    {"title": "One", "content": "First", "defaultOpen": True}
+                )
+            ],
+            "allowMultiple": True,
+        }
     )
     result = await render_accordion(args, ctx)
     assert result.ok is True
@@ -255,7 +312,10 @@ async def test_render_accordion_emits_accordion_component_artifact() -> None:
         (
             ["echarts"],
             build_chart_echarts,
-            BuildChartEChartsArgs(option={"series": [{"type": "line", "data": [1, 2, 3]}]}, title="Revenue"),
+            BuildChartEChartsArgs(
+                option={"series": [{"type": "line", "data": [1, 2, 3]}]},
+                title="Revenue",
+            ),
         ),
         (
             ["datagrid"],
@@ -269,7 +329,9 @@ async def test_render_accordion_emits_accordion_component_artifact() -> None:
         (
             ["grid", "markdown"],
             build_grid,
-            BuildGridArgs(items=[GridItem(component="markdown", props={"content": "A"})]),
+            BuildGridArgs(
+                items=[GridItem(component="markdown", props={"content": "A"})]
+            ),
         ),
         (
             ["tabs"],
@@ -279,21 +341,31 @@ async def test_render_accordion_emits_accordion_component_artifact() -> None:
         (
             ["accordion"],
             build_accordion,
-            BuildAccordionArgs(items=[AccordionItem(title="Details", content="More")]),
+            BuildAccordionArgs(
+                items=[AccordionItem(title="Details", content="More")]
+            ),
         ),
     ],
 )
 async def test_build_tools_register_artifacts_without_emitting(
     allowlist: list[str],
-    builder,
-    args,
+    builder: Callable[
+        [BaseModel, ToolContext], Awaitable[BuildComponentResult]
+    ],
+    args: BaseModel,
 ) -> None:
+    """Build tools register artifacts without emitting."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=allowlist, max_payload_bytes=4000, max_total_bytes=8000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=allowlist,
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
     )
     ctx = DummyContext()
     registry = ArtifactRegistry()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
 
     result = await builder(args, ctx)
 
@@ -308,14 +380,18 @@ async def test_build_tools_register_artifacts_without_emitting(
 
 @pytest.mark.asyncio
 async def test_render_component_raises_when_disabled() -> None:
+    """Render component raises when disabled."""
     configure_rich_output(RichOutputConfig(enabled=False))
     ctx = DummyContext()
-    args = RenderComponentArgs(component="markdown", props={"content": "Hello"})
+    args = RenderComponentArgs(
+        component="markdown", props={"content": "Hello"}
+    )
     with pytest.raises(RuntimeError, match="Rich output is disabled"):
         await render_component(args, ctx)
 
 
 def test_dedupe_key_falls_back_for_unserializable_payload() -> None:
+    """Dedupe key falls back for unserializable payload."""
     payload: dict[str, object] = {}
     payload["self"] = payload
     key = _dedupe_key(payload)
@@ -333,14 +409,25 @@ def test_dedupe_key_falls_back_for_unserializable_payload() -> None:
         ("custom", {}, "Rendered custom"),
     ],
 )
-def test_summarise_component_variants(component: str, props: dict, expected: str) -> None:
+def test_summarise_component_variants(
+    component: str, props: dict[str, object], expected: str
+) -> None:
+    """Summarise component variants."""
     assert _summarise_component(component, props) == expected
 
 
 @pytest.mark.asyncio
-async def test_render_component_validation_error_includes_schema_hint() -> None:
+async def test_render_component_validation_error_includes_schema_hint() -> (
+    None
+):
+    """Render component validation error includes schema hint."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
     # report requires sections, so this should fail validation.
@@ -352,25 +439,42 @@ async def test_render_component_validation_error_includes_schema_hint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_component_rejects_invalid_component_and_props_types() -> None:
+async def test_render_component_rejects_invalid_types() -> None:
+    """Render component rejects invalid component and props types."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["markdown"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
 
-    with pytest.raises(RuntimeError, match="requires a component name"):
-        bad_component = RenderComponentArgs.model_construct(component=123, props={})
+    with pytest.raises(TypeError, match="requires a component name"):
+        # model_copy skips validation, so the bad value reaches the tool.
+        bad_component = RenderComponentArgs(
+            component="markdown", props={}
+        ).model_copy(update={"component": 123})
         await render_component(bad_component, ctx)
 
-    with pytest.raises(RuntimeError, match="props must be an object"):
-        bad_props = RenderComponentArgs.model_construct(component="markdown", props="nope")
+    with pytest.raises(TypeError, match="props must be an object"):
+        bad_props = RenderComponentArgs(
+            component="markdown", props={}
+        ).model_copy(update={"props": "nope"})
         await render_component(bad_props, ctx)
 
 
 @pytest.mark.asyncio
 async def test_render_component_requires_registry_for_artifact_refs() -> None:
+    """Render component requires registry for artifact refs."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
     args = RenderComponentArgs(
@@ -378,39 +482,64 @@ async def test_render_component_requires_registry_for_artifact_refs() -> None:
         props={"sections": [{"components": [{"artifact_ref": "artifact_0"}]}]},
     )
 
-    with pytest.raises(RuntimeError, match="artifact_ref usage requires an active planner run"):
+    with pytest.raises(
+        RuntimeError, match="artifact_ref usage requires an active planner run"
+    ):
         await render_component(args, ctx)
 
 
 @pytest.mark.asyncio
 async def test_render_component_rejects_invalid_resolved_props() -> None:
+    """Render component rejects invalid resolved props."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=ArtifactRegistry())
+    ctx.planner = SimpleNamespace(artifact_registry=ArtifactRegistry())
     args = RenderComponentArgs(
         component="report",
         props={"sections": [{"components": [{"artifact_ref": "artifact_0"}]}]},
     )
 
-    async def _resolve_invalid(*_args, **_kwargs):
+    async def _resolve_invalid(
+        *_args: dict[str, object],
+        **_kwargs: ArtifactRegistry | ScopedArtifacts | None,
+    ) -> list[object]:
         return []
 
-    with pytest.raises(RuntimeError, match="artifact_ref resolution returned invalid props"):
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("penguiflow.rich_output.nodes.resolve_artifact_refs_async", _resolve_invalid)
-            await render_component(args, ctx)
+    with (
+        pytest.raises(
+            TypeError,
+            match="artifact_ref resolution returned invalid props",
+        ),
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(
+            "penguiflow.rich_output.nodes.resolve_artifact_refs_async",
+            _resolve_invalid,
+        )
+        await render_component(args, ctx)
 
 
 @pytest.mark.asyncio
 async def test_ui_form_pauses_with_payload() -> None:
+    """UI form pauses with payload."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["form"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["form"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
     args = UIFormArgs(fields=[{"name": "title", "type": "text"}])
-    with pytest.raises(PauseSignal) as exc:
+    with pytest.raises(PauseSignalError) as exc:
         await ui_form(args, ctx)
     assert exc.value.payload["component"] == "form"
     assert exc.value.payload["tool"] == "ui_form"
@@ -418,8 +547,14 @@ async def test_ui_form_pauses_with_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_render_component_resolves_artifact_refs() -> None:
+    """Render component resolves artifact refs."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=2000, max_total_bytes=4000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "echarts"],
+            max_payload_bytes=2000,
+            max_total_bytes=4000,
+        )
     )
     registry = ArtifactRegistry()
     record = registry.register_tool_artifact(
@@ -427,19 +562,24 @@ async def test_render_component_resolves_artifact_refs() -> None:
         "chart_artifacts",
         {
             "type": "echarts",
-            "config": {"title": {"text": "Revenue"}, "series": [{"data": [1, 2, 3]}]},
+            "config": {
+                "title": {"text": "Revenue"},
+                "series": [{"data": [1, 2, 3]}],
+            },
         },
         step_index=0,
     )
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
     args = RenderComponentArgs(
         component="report",
         props={
             "sections": [
                 {
                     "title": "Section",
-                    "components": [{"artifact_ref": record.ref, "caption": "Chart"}],
+                    "components": [
+                        {"artifact_ref": record.ref, "caption": "Chart"}
+                    ],
                 }
             ],
         },
@@ -453,6 +593,7 @@ async def test_render_component_resolves_artifact_refs() -> None:
 
 @pytest.mark.asyncio
 async def test_build_artifact_refs_render_report_cleanly() -> None:
+    """Build artifact refs render report cleanly."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -463,10 +604,15 @@ async def test_build_artifact_refs_render_report_cleanly() -> None:
     )
     registry = ArtifactRegistry()
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
 
     built = await build_grid(
-        BuildGridArgs(items=[GridItem(component="markdown", props={"content": "Nested"})], title="Nested Grid"),
+        BuildGridArgs(
+            items=[
+                GridItem(component="markdown", props={"content": "Nested"})
+            ],
+            title="Nested Grid",
+        ),
         ctx,
     )
     result = await render_report(
@@ -475,7 +621,12 @@ async def test_build_artifact_refs_render_report_cleanly() -> None:
             sections=[
                 ReportSection(
                     title="Summary",
-                    components=[{"artifact_ref": built.artifact_ref, "caption": "Embedded grid"}],
+                    components=[
+                        {
+                            "artifact_ref": built.artifact_ref,
+                            "caption": "Embedded grid",
+                        }
+                    ],
                 )
             ],
         ),
@@ -484,13 +635,16 @@ async def test_build_artifact_refs_render_report_cleanly() -> None:
 
     assert result.ok is True
     assert len(ctx.emitted) == 1
-    component = ctx.emitted[0]["chunk"]["props"]["sections"][0]["components"][0]
+    component = ctx.emitted[0]["chunk"]["props"]["sections"][0]["components"][
+        0
+    ]
     assert component["component"] == "grid"
     assert component["caption"] == "Embedded grid"
 
 
 @pytest.mark.asyncio
-async def test_build_artifact_refs_render_grid_cleanly_with_mixed_inline_items() -> None:
+async def test_build_artifact_refs_render_mixed_grid() -> None:
+    """Build artifact refs render grid cleanly with mixed inline items."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -501,10 +655,13 @@ async def test_build_artifact_refs_render_grid_cleanly_with_mixed_inline_items()
     )
     registry = ArtifactRegistry()
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
 
     chart = await build_chart_echarts(
-        BuildChartEChartsArgs(title="Revenue", option={"series": [{"type": "line", "data": [1, 2, 3]}]}),
+        BuildChartEChartsArgs(
+            title="Revenue",
+            option={"series": [{"type": "line", "data": [1, 2, 3]}]},
+        ),
         ctx,
     )
     table = await build_table(
@@ -519,9 +676,13 @@ async def test_build_artifact_refs_render_grid_cleanly_with_mixed_inline_items()
         RenderGridArgs(
             title="Dashboard",
             items=[
-                GridItem.model_validate({"artifact_ref": chart.artifact_ref, "colSpan": 2}),
+                GridItem.model_validate(
+                    {"artifact_ref": chart.artifact_ref, "colSpan": 2}
+                ),
                 GridItem.model_validate({"artifact_ref": table.artifact_ref}),
-                GridItem(component="markdown", props={"content": "Inline note"}),
+                GridItem(
+                    component="markdown", props={"content": "Inline note"}
+                ),
             ],
         ),
         ctx,
@@ -538,6 +699,7 @@ async def test_build_artifact_refs_render_grid_cleanly_with_mixed_inline_items()
 
 @pytest.mark.asyncio
 async def test_build_artifact_refs_render_tabs_cleanly() -> None:
+    """Build artifact refs render tabs cleanly."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -548,17 +710,21 @@ async def test_build_artifact_refs_render_tabs_cleanly() -> None:
     )
     registry = ArtifactRegistry()
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
 
     table = await build_table(
-        BuildTableArgs(columns=[DataGridColumn(field="name")], rows=[{"name": "A"}]),
+        BuildTableArgs(
+            columns=[DataGridColumn(field="name")], rows=[{"name": "A"}]
+        ),
         ctx,
     )
     result = await render_tabs(
         RenderTabsArgs(
             tabs=[
                 TabItem(label="Overview", content="Hello"),
-                TabItem.model_validate({"label": "Data", "artifact_ref": table.artifact_ref}),
+                TabItem.model_validate(
+                    {"label": "Data", "artifact_ref": table.artifact_ref}
+                ),
             ]
         ),
         ctx,
@@ -572,6 +738,7 @@ async def test_build_artifact_refs_render_tabs_cleanly() -> None:
 
 @pytest.mark.asyncio
 async def test_build_artifact_refs_render_accordion_cleanly() -> None:
+    """Build artifact refs render accordion cleanly."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -582,17 +749,21 @@ async def test_build_artifact_refs_render_accordion_cleanly() -> None:
     )
     registry = ArtifactRegistry()
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
 
     grid = await build_grid(
-        BuildGridArgs(items=[GridItem(component="markdown", props={"content": "Nested"})]),
+        BuildGridArgs(
+            items=[GridItem(component="markdown", props={"content": "Nested"})]
+        ),
         ctx,
     )
     result = await render_accordion(
         RenderAccordionArgs(
             items=[
                 AccordionItem(title="Inline", content="Text"),
-                AccordionItem.model_validate({"title": "Built", "artifact_ref": grid.artifact_ref}),
+                AccordionItem.model_validate(
+                    {"title": "Built", "artifact_ref": grid.artifact_ref}
+                ),
             ]
         ),
         ctx,
@@ -606,8 +777,14 @@ async def test_build_artifact_refs_render_accordion_cleanly() -> None:
 
 @pytest.mark.asyncio
 async def test_list_artifacts_reads_registry() -> None:
+    """List artifacts reads registry."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=2000, max_total_bytes=4000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "echarts"],
+            max_payload_bytes=2000,
+            max_total_bytes=4000,
+        )
     )
     registry = ArtifactRegistry()
     record = registry.register_tool_artifact(
@@ -617,7 +794,7 @@ async def test_list_artifacts_reads_registry() -> None:
         step_index=0,
     )
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
     result = await list_artifacts(ListArtifactsArgs(), ctx)
     assert result.artifacts
     assert result.artifacts[0].ref == record.ref
@@ -625,8 +802,14 @@ async def test_list_artifacts_reads_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_list_artifacts_returns_empty_without_registry() -> None:
+    """List artifacts returns empty without registry."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
     result = await list_artifacts(ListArtifactsArgs(), ctx)
@@ -635,6 +818,7 @@ async def test_list_artifacts_returns_empty_without_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_list_artifacts_raises_when_disabled() -> None:
+    """List artifacts raises when disabled."""
     configure_rich_output(RichOutputConfig(enabled=False))
     ctx = DummyContext()
     with pytest.raises(RuntimeError, match="Rich output is disabled"):
@@ -643,24 +827,59 @@ async def test_list_artifacts_raises_when_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_list_artifacts_ignores_ingest_exceptions() -> None:
+    """List artifacts ignores ingest exceptions."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "echarts"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
-    registry = ArtifactRegistry()
-    registry.ingest_background_results = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bg"))  # type: ignore[assignment]
-    registry.ingest_llm_context = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ctx"))  # type: ignore[assignment]
+
+    class _FailingRegistry(ArtifactRegistry):
+        """Registry whose ingestion always fails."""
+
+        @override
+        def ingest_background_results(
+            self,
+            background_results: object,
+            *,
+            step_index: int | None = None,
+        ) -> None:
+            msg = "bg"
+            raise RuntimeError(msg)
+
+        @override
+        def ingest_llm_context(
+            self, llm_context: object, *, step_index: int | None = None
+        ) -> None:
+            msg = "ctx"
+            raise RuntimeError(msg)
+
+    registry = _FailingRegistry()
     ctx = DummyContext()
     trajectory = Trajectory(query="x")
-    ctx._planner = SimpleNamespace(_artifact_registry=registry, _active_trajectory=trajectory)
+    ctx.planner = SimpleNamespace(
+        artifact_registry=registry, active_trajectory=trajectory
+    )
 
     result = await list_artifacts(ListArtifactsArgs(), ctx)
     assert result.artifacts == []
 
 
 @pytest.mark.asyncio
-async def test_list_artifacts_tool_artifact_kind_includes_ui_components() -> None:
+async def test_list_artifacts_tool_artifact_kind_includes_ui_components() -> (
+    None
+):
+    """List artifacts tool artifact kind includes UI components."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=2000, max_total_bytes=4000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "echarts"],
+            max_payload_bytes=2000,
+            max_total_bytes=4000,
+        )
     )
     registry = ArtifactRegistry()
     record = registry.register_tool_artifact(
@@ -670,25 +889,36 @@ async def test_list_artifacts_tool_artifact_kind_includes_ui_components() -> Non
         step_index=0,
     )
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
     result = await list_artifacts(ListArtifactsArgs(kind="tool_artifact"), ctx)
     assert [item.ref for item in result.artifacts] == [record.ref]
 
 
 @pytest.mark.asyncio
-async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> None:
+async def test_list_artifacts_ingests_background_results() -> None:
+    """List artifacts ingests background results for artifact refs."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "echarts"],
+            max_payload_bytes=5000,
+            max_total_bytes=10000,
+        )
     )
     registry = ArtifactRegistry()
     ctx = DummyContext()
     trajectory = Trajectory(query="test")
-    ctx._planner = SimpleNamespace(_artifact_registry=registry, _active_trajectory=trajectory)
+    ctx.planner = SimpleNamespace(
+        artifact_registry=registry, active_trajectory=trajectory
+    )
     stored_payload = {
         "type": "echarts",
-        "config": {"title": {"text": "From background"}, "series": [{"data": [1, 2, 3]}]},
+        "config": {
+            "title": {"text": "From background"},
+            "series": [{"data": [1, 2, 3]}],
+        },
     }
-    ref = await ctx._artifacts.put_text(
+    ref = await ctx.artifact_store.put_text(
         json.dumps(stored_payload, ensure_ascii=False),
         mime_type="application/json",
         filename="bg.echarts.json",
@@ -700,12 +930,21 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
             {
                 "node": "gather_data_from_genie",
                 "field": "chart_artifacts",
-                "artifact": {"type": "echarts", "artifact": ref.model_dump(mode="json"), "title": "From bg"},
+                "artifact": {
+                    "type": "echarts",
+                    "artifact": ref.model_dump(mode="json"),
+                    "title": "From bg",
+                },
             }
         ],
     )
 
-    listed = await list_artifacts(ListArtifactsArgs(sourceTool="gather_data_from_genie"), ctx)
+    listed = await list_artifacts(
+        ListArtifactsArgs.model_validate(
+            {"sourceTool": "gather_data_from_genie"}
+        ),
+        ctx,
+    )
     assert listed.artifacts
     artifact_ref = listed.artifacts[0].ref
 
@@ -715,7 +954,9 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
             "sections": [
                 {
                     "title": "Section",
-                    "components": [{"artifact_ref": artifact_ref, "caption": "Chart"}],
+                    "components": [
+                        {"artifact_ref": artifact_ref, "caption": "Chart"}
+                    ],
                 }
             ],
         },
@@ -729,6 +970,7 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
 
 @pytest.mark.asyncio
 async def test_ui_confirm_and_select_option_pause() -> None:
+    """UI confirm and select option pause."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -739,12 +981,12 @@ async def test_ui_confirm_and_select_option_pause() -> None:
     )
     ctx = DummyContext()
 
-    with pytest.raises(PauseSignal) as confirm_exc:
+    with pytest.raises(PauseSignalError) as confirm_exc:
         await ui_confirm(UIConfirmArgs(message="Proceed?"), ctx)
     assert confirm_exc.value.payload["tool"] == "ui_confirm"
     assert confirm_exc.value.payload["component"] == "confirm"
 
-    with pytest.raises(PauseSignal) as select_exc:
+    with pytest.raises(PauseSignalError) as select_exc:
         await ui_select_option(
             UISelectOptionArgs(
                 options=[{"label": "One", "value": "one"}],
@@ -757,6 +999,7 @@ async def test_ui_confirm_and_select_option_pause() -> None:
 
 @pytest.mark.asyncio
 async def test_ui_interactions_return_when_pause_does_not_raise() -> None:
+    """UI interactions return when pause does not raise."""
     configure_rich_output(
         RichOutputConfig(
             enabled=True,
@@ -767,13 +1010,21 @@ async def test_ui_interactions_return_when_pause_does_not_raise() -> None:
     )
 
     class SoftPauseContext(DummyContext):
-        async def pause(self, reason: str, payload: dict | None = None):
+        """Context whose pause records the request instead of raising."""
+
+        @override
+        async def pause(
+            self,
+            reason: PlannerPauseReason,
+            payload: Mapping[str, Any] | None = None,
+        ) -> None:
             self.tool_context["pause"] = {"reason": reason, "payload": payload}
-            return None
 
     ctx = SoftPauseContext()
 
-    form_result = await ui_form(UIFormArgs(fields=[{"name": "title", "type": "text"}]), ctx)
+    form_result = await ui_form(
+        UIFormArgs(fields=[{"name": "title", "type": "text"}]), ctx
+    )
     confirm_result = await ui_confirm(UIConfirmArgs(message="Proceed?"), ctx)
     select_result = await ui_select_option(
         UISelectOptionArgs(options=[{"label": "One", "value": "one"}]),
@@ -787,22 +1038,36 @@ async def test_ui_interactions_return_when_pause_does_not_raise() -> None:
 
 @pytest.mark.asyncio
 async def test_describe_component_returns_component_schema() -> None:
+    """Describe component returns component schema."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["markdown"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
-    result = await describe_component(args=SimpleNamespace(name="markdown"), ctx=ctx)  # type: ignore[arg-type]
+    result = await describe_component(
+        DescribeComponentArgs(name="markdown"), ctx
+    )
     assert result.component["name"] == "markdown"
 
 
 @pytest.mark.asyncio
 async def test_list_artifacts_persistent_store_fallback() -> None:
-    """Persistent store artifacts are returned even when no in-run registry exists."""
+    """Stored artifacts are listed even without an in-run registry."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
-    # No registry -- ctx._planner is not set, so get_artifact_registry returns None.
+    # No registry -- ctx.planner is not set, so get_artifact_registry returns
+    # None.
     ref = await ctx.artifacts.upload(
         b"binary content",
         mime_type="application/octet-stream",
@@ -819,9 +1084,14 @@ async def test_list_artifacts_persistent_store_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
-    """When registry and persistent store have the same artifact_id, persistent store wins."""
+    """On a shared artifact_id the persistent store wins."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "echarts"],
+            max_payload_bytes=5000,
+            max_total_bytes=10000,
+        )
     )
     ctx = DummyContext()
     # Upload a binary artifact to the persistent store
@@ -831,8 +1101,9 @@ async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
         filename="chart.png",
         meta={"tool": "gather_data"},
     )
-    # Register an artifact in the in-run registry, then manually set its artifact_id
-    # to match the persistent store entry (register_tool_artifact does not accept artifact_id).
+    # Register an artifact in the in-run registry, then manually set its
+    # artifact_id to match the persistent store entry (register_tool_artifact
+    # does not accept artifact_id).
     registry = ArtifactRegistry()
     record = registry.register_tool_artifact(
         "gather_data",
@@ -841,9 +1112,10 @@ async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
         step_index=0,
     )
     record.artifact_id = ref.id
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    ctx.planner = SimpleNamespace(artifact_registry=registry)
     result = await list_artifacts(ListArtifactsArgs(), ctx)
-    # The persistent store entry should replace the registry entry with the same artifact_id.
+    # The persistent store entry should replace the registry entry with the
+    # same artifact_id.
     matching = [a for a in result.artifacts if a.artifact_id == ref.id]
     assert len(matching) == 1
     assert matching[0].kind == "binary"
@@ -853,7 +1125,12 @@ async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
 async def test_list_artifacts_source_tool_filter_persistent_store() -> None:
     """source_tool filter is applied to persistent store entries."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
     await ctx.artifacts.upload(
@@ -862,19 +1139,30 @@ async def test_list_artifacts_source_tool_filter_persistent_store() -> None:
         meta={"tool": "web_fetch"},
     )
     # Filter for a different tool -- should exclude the persistent artifact
-    result = await list_artifacts(ListArtifactsArgs(sourceTool="other_tool"), ctx)
+    result = await list_artifacts(
+        ListArtifactsArgs.model_validate({"sourceTool": "other_tool"}), ctx
+    )
     assert result.artifacts == []
 
     # Filter for the correct tool -- should include it
-    result = await list_artifacts(ListArtifactsArgs(sourceTool="web_fetch"), ctx)
+    result = await list_artifacts(
+        ListArtifactsArgs.model_validate({"sourceTool": "web_fetch"}), ctx
+    )
     assert len(result.artifacts) == 1
 
 
 @pytest.mark.asyncio
-async def test_list_artifacts_ui_component_kind_skips_persistent_store() -> None:
-    """kind='ui_component' skips persistent store (persistent artifacts are 'binary')."""
+async def test_list_artifacts_ui_component_kind_skips_persistent_store() -> (
+    None
+):
+    """kind='ui_component' skips the (binary) persistent store."""
     configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
     )
     ctx = DummyContext()
     await ctx.artifacts.upload(

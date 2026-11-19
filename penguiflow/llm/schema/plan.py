@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .transformer import estimate_object_key_count, has_composition_keywords, has_refs
+from .transformer import (
+    estimate_object_key_count,
+    has_composition_keywords,
+    has_refs,
+)
 
 if TYPE_CHECKING:
     from ..profiles import ModelProfile
@@ -28,8 +32,8 @@ class OutputMode(Enum):
 class SchemaPlan:
     """Result of schema planning for a specific provider.
 
-    Contains the transformed schema along with compatibility information
-    that guides mode selection and degradation.
+    Contains the transformed schema along with compatibility information that
+    guides mode selection and degradation.
     """
 
     requested_schema: dict[str, Any]
@@ -71,32 +75,52 @@ def plan_schema(
     strict_applied = strict_requested
 
     # Apply schema transformation
-    transformer = get_schema_transformer(profile, schema, strict=strict_requested)
+    transformer = get_schema_transformer(
+        profile, schema, strict=strict_requested
+    )
     if transformer:
         transformed = transformer.transform()
         if strict_requested and not transformer.is_strict_compatible:
             strict_applied = False
-            reasons.append("Schema required lossy transformations; strict disabled.")
-        reasons.extend(transformer._warnings)
+            reasons.append(
+                "Schema required lossy transformations; strict disabled."
+            )
+        reasons.extend(transformer.warnings)
 
     # Analyze schema complexity
     estimated_keys = estimate_object_key_count(transformed)
     has_composition = has_composition_keywords(schema)
-    has_recursive = has_refs(schema) and transformer is not None and bool(transformer._recursive_refs)
+    has_recursive = (
+        has_refs(schema)
+        and transformer is not None
+        and bool(transformer.recursive_refs)
+    )
 
     # Provider-specific viability checks
     compatible_with_native = True
     compatible_with_tools = True
 
     # Check key limits (e.g., Databricks max 64 keys)
-    if profile.max_schema_keys is not None and estimated_keys > profile.max_schema_keys:
+    if (
+        profile.max_schema_keys is not None
+        and estimated_keys > profile.max_schema_keys
+    ):
         compatible_with_native = False
-        reasons.append(f"Schema exceeds {profile.max_schema_keys}-key limit ({estimated_keys} keys).")
+        reasons.append(
+            f"Schema exceeds {profile.max_schema_keys}-key limit "
+            f"({estimated_keys} keys)."
+        )
 
     # Check for composition support
-    if profile.native_structured_kind == "databricks_constrained_decoding" and has_composition:
+    if (
+        profile.native_structured_kind == "databricks_constrained_decoding"
+        and has_composition
+    ):
         compatible_with_native = False
-        reasons.append("Databricks constrained decoding does not support anyOf/oneOf/allOf.")
+        reasons.append(
+            "Databricks constrained decoding does not support "
+            "anyOf/oneOf/allOf."
+        )
 
     # Check for recursive refs
     if has_recursive:
@@ -171,7 +195,10 @@ def choose_output_mode(
         last_plan = plan
 
         if mode == OutputMode.NATIVE:
-            if profile.supports_schema_guided_output and plan.compatible_with_native:
+            if (
+                profile.supports_schema_guided_output
+                and plan.compatible_with_native
+            ):
                 return mode, plan
 
         elif mode == OutputMode.TOOLS:

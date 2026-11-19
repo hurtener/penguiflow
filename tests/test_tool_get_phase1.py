@@ -1,6 +1,8 @@
+"""Tests for tool get phase1."""
+
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel
@@ -10,12 +12,23 @@ from penguiflow.node import Node
 from penguiflow.planner.tool_get_tool import ToolGetArgs, tool_get
 from penguiflow.registry import ModelRegistry
 
+from .tool_context_doubles import FakeToolContext
+
+if TYPE_CHECKING:
+    from penguiflow.catalog import NodeSpec
+    from penguiflow.planner.context import ToolContext
+    from penguiflow.planner.models import PlannerEvent
+
 
 class EchoArgs(BaseModel):
+    """Arguments of the echo tool."""
+
     text: str
 
 
 class EchoOut(BaseModel):
+    """Output of the echo tool."""
+
     text: str
 
 
@@ -23,36 +36,45 @@ class EchoOut(BaseModel):
     desc="Echo the provided text.",
     loading_mode=ToolLoadingMode.DEFERRED,
     examples=[
-        {"args": {"text": "hello"}, "description": "Basic usage", "tags": ["minimal"]},
+        {
+            "args": {"text": "hello"},
+            "description": "Basic usage",
+            "tags": ["minimal"],
+        },
     ],
 )
-async def echo_tool(args: EchoArgs, ctx: Any) -> EchoOut:
-    del ctx
+async def echo_tool(args: EchoArgs, _ctx: ToolContext) -> EchoOut:
+    """Echo the input back."""
     return EchoOut(text=args.text)
 
 
 class _DummyPlanner:
-    def __init__(self, spec: Any, *, allowed: set[str]) -> None:
-        self._execution_specs = [spec]
-        self._execution_spec_by_name = {spec.name: spec}
-        self._tool_visibility_allowed_names = allowed
-        self._tool_aliases: dict[str, str] = {}
-        self._events: list[Any] = []
+    def __init__(self, spec: NodeSpec, *, allowed: set[str]) -> None:
+        self.execution_specs = [spec]
+        self.execution_spec_by_name = {spec.name: spec}
+        self.tool_visibility_allowed_names = allowed
+        self.tool_aliases: dict[str, str] = {}
+        self.events: list[Any] = []
 
-    def _emit_event(self, event: Any) -> None:
-        self._events.append(event)
+    def emit_event(self, event: PlannerEvent) -> None:
+        self.events.append(event)
 
-    def _time_source(self) -> float:
+    def time_source(self) -> float:
         return 0.0
 
 
-class _DummyCtx:
+class _DummyCtx(FakeToolContext):
+    """Tool context bound to ``planner``."""
+
     def __init__(self, planner: _DummyPlanner) -> None:
-        self._planner = planner
+        """Bind ``planner`` as the context's planner."""
+        super().__init__()
+        self.planner = planner
 
 
 @pytest.mark.asyncio
 async def test_tool_get_returns_schema_and_examples() -> None:
+    """Tool get returns schema and examples."""
     registry = ModelRegistry()
     registry.register("echo_tool", EchoArgs, EchoOut)
     specs = build_catalog([Node(echo_tool, name="echo_tool")], registry)
@@ -72,6 +94,7 @@ async def test_tool_get_returns_schema_and_examples() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_get_respects_visibility() -> None:
+    """Tool get respects visibility."""
     registry = ModelRegistry()
     registry.register("echo_tool", EchoArgs, EchoOut)
     specs = build_catalog([Node(echo_tool, name="echo_tool")], registry)

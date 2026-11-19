@@ -1,3 +1,5 @@
+"""Tests for guardrails models."""
+
 from __future__ import annotations
 
 from penguiflow.planner.guardrails import (
@@ -11,6 +13,7 @@ from penguiflow.planner.guardrails import (
 
 
 def test_guardrail_decision_with_effects() -> None:
+    """Guardrail decision with effects."""
     decision = GuardrailDecision(
         action=GuardrailAction.ALLOW,
         rule_id="rule-1",
@@ -23,9 +26,13 @@ def test_guardrail_decision_with_effects() -> None:
 
 
 def test_context_snapshot_builder_signals() -> None:
+    """Context snapshot builder signals."""
     ctx = GuardrailContext(
         run_id="run",
-        tool_context={"available_tools": ["danger"], "contains_untrusted": True},
+        tool_context={
+            "available_tools": ["danger"],
+            "contains_untrusted": True,
+        },
         strike_counts={"jb": 2},
     )
     event = GuardrailEvent(

@@ -4,37 +4,50 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import ReactPlanner, ToolContext
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
 class UpstreamUnavailableError(RuntimeError):
     """Raised when a search provider cannot be reached."""
 
     def __init__(self, *, code: str, message: str) -> None:
+        """Store ``code`` and ``message``."""
         super().__init__(message)
         self.code = code
         self.message = message
 
 
 class SearchArgs(BaseModel):
+    """Arguments of the search tool."""
+
     topic: str
     provider: str
 
 
 class SearchResult(BaseModel):
+    """Output of the search tool."""
+
     provider: str
     docs: list[str]
 
 
 class JoinArgs(BaseModel):
+    """Arguments of the join tool."""
+
     branch_outputs: list[SearchResult]
     total_requests: int
     failures: list[dict[str, Any]] = Field(default_factory=list)
@@ -43,12 +56,18 @@ class JoinArgs(BaseModel):
 
 
 class JoinResult(BaseModel):
+    """Output of the join tool."""
+
     merged: list[str]
     failures: list[dict[str, Any]]
     note: str
 
 
-@tool(desc="Parallel-friendly document search", side_effects="read", tags=["search"])
+@tool(
+    desc="Parallel-friendly document search",
+    side_effects="read",
+    tags=["search"],
+)
 async def search_catalog(args: SearchArgs, ctx: ToolContext) -> SearchResult:
     """Return canned results; simulate a flaky provider."""
     publisher = ctx.tool_context.get("status_publisher")
@@ -75,38 +94,48 @@ async def search_catalog(args: SearchArgs, ctx: ToolContext) -> SearchResult:
     side_effects="read",
 )
 async def merge_results(args: JoinArgs, ctx: ToolContext) -> JoinResult:
+    """Merge the documents of all shards."""
     publisher = ctx.tool_context.get("status_publisher")
     if callable(publisher):
         publisher(
-            f"joining {len(args.branch_outputs)} of {args.total_requests} branches "
+            f"joining {len(args.branch_outputs)} of "
+            f"{args.total_requests} branches "
             f"(failures={args.failure_count})"
         )
 
-    merged = [f"{item.provider}: {doc}" for item in args.branch_outputs for doc in item.docs]
-    note = "partial success" if args.failure_count else "all branches succeeded"
+    merged = [
+        f"{item.provider}: {doc}"
+        for item in args.branch_outputs
+        for doc in item.docs
+    ]
+    note = (
+        "partial success" if args.failure_count else "all branches succeeded"
+    )
 
     return JoinResult(merged=merged, failures=args.failures, note=note)
 
 
-class ScriptedPlannerLLM:
+class ScriptedPlannerLLM(JSONLLMClient):
     """LiteLLM-compatible stub returning predefined planner actions."""
 
     def __init__(self, actions: Sequence[Mapping[str, Any]]) -> None:
+        """Replay ``actions`` in order."""
         self._payloads = [json.dumps(item) for item in actions]
 
+    @override
     async def complete(
         self,
         *,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> str:
-        del messages, response_format
         return self._payloads.pop(0)
 
 
 async def build_planner() -> ReactPlanner:
+    """Build the planner with the search and join tools."""
     registry = ModelRegistry()
     registry.register("search_catalog", SearchArgs, SearchResult)
     registry.register("merge_results", JoinArgs, JoinResult)
@@ -117,12 +146,18 @@ async def build_planner() -> ReactPlanner:
     ]
     catalog = build_catalog(nodes, registry)
 
-    scripted_actions = [
+    scripted_actions: list[dict[str, object]] = [
         {
             "thought": "fan out to multiple providers",
             "plan": [
-                {"node": "search_catalog", "args": {"topic": "penguins", "provider": "wiki"}},
-                {"node": "search_catalog", "args": {"topic": "penguins", "provider": "unstable"}},
+                {
+                    "node": "search_catalog",
+                    "args": {"topic": "penguins", "provider": "wiki"},
+                },
+                {
+                    "node": "search_catalog",
+                    "args": {"topic": "penguins", "provider": "unstable"},
+                },
             ],
             "join": {
                 "node": "merge_results",
@@ -150,12 +185,13 @@ async def build_planner() -> ReactPlanner:
 
 
 async def main() -> None:
+    """Run the example."""
     planner = await build_planner()
     status_updates: list[str] = []
 
     def publish_status(message: str) -> None:
         status_updates.append(message)
-        print(f"STATUS: {message}")
+        sys.stdout.write(f"STATUS: {message}\n")
 
     result = await planner.run(
         "Find recent penguin research",
@@ -163,11 +199,11 @@ async def main() -> None:
         tool_context={"status_publisher": publish_status},
     )
 
-    print("\nPlanner result:")
-    print(result.payload)
-    print("\nStatus updates:")
+    sys.stdout.write("\nPlanner result:\n")
+    sys.stdout.write(f"{result.payload}\n")
+    sys.stdout.write("\nStatus updates:\n")
     for line in status_updates:
-        print(f"- {line}")
+        sys.stdout.write(f"- {line}\n")
 
 
 if __name__ == "__main__":

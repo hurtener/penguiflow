@@ -1,9 +1,23 @@
+"""Tests for A2A extended agent card."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from fastapi.testclient import TestClient
 
 from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
-from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+from penguiflow_a2a.models import (
+    AgentCapabilities,
+    AgentCard,
+    AgentInterface,
+    AgentSkill,
+)
 
 from .planner_doubles import echo_planner
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 def _agent_card(*, extended: bool) -> AgentCard:
@@ -11,7 +25,11 @@ def _agent_card(*, extended: bool) -> AgentCard:
         protocol_versions=["0.3"],
         name="Test Agent",
         description="Test",
-        supported_interfaces=[AgentInterface(url="https://example.com/a2a", protocol_binding="HTTP+JSON")],
+        supported_interfaces=[
+            AgentInterface(
+                url="https://example.com/a2a", protocol_binding="HTTP+JSON"
+            )
+        ],
         version="1.0.0",
         capabilities=AgentCapabilities(
             streaming=True,
@@ -21,7 +39,11 @@ def _agent_card(*, extended: bool) -> AgentCard:
         ),
         default_input_modes=["application/json"],
         default_output_modes=["application/json"],
-        skills=[AgentSkill(id="echo", name="Echo", description="Echo", tags=["test"])],
+        skills=[
+            AgentSkill(
+                id="echo", name="Echo", description="Echo", tags=["test"]
+            )
+        ],
     )
 
 
@@ -29,7 +51,7 @@ def _build_client(
     *,
     extended: bool,
     extended_card: AgentCard | None = None,
-    auth_cb=None,
+    auth_cb: Callable[[Mapping[str, str]], bool] | None = None,
 ) -> TestClient:
     planner = echo_planner()
     service = A2AService(
@@ -48,7 +70,11 @@ def _extended_card() -> AgentCard:
         protocol_versions=["0.3"],
         name="Extended Agent",
         description="Extended",
-        supported_interfaces=[AgentInterface(url="https://example.com/a2a", protocol_binding="HTTP+JSON")],
+        supported_interfaces=[
+            AgentInterface(
+                url="https://example.com/a2a", protocol_binding="HTTP+JSON"
+            )
+        ],
         version="1.0.1",
         capabilities=AgentCapabilities(
             streaming=True,
@@ -58,30 +84,48 @@ def _extended_card() -> AgentCard:
         ),
         default_input_modes=["application/json"],
         default_output_modes=["application/json"],
-        skills=[AgentSkill(id="echo", name="Echo", description="Echo", tags=["test"])],
+        skills=[
+            AgentSkill(
+                id="echo", name="Echo", description="Echo", tags=["test"]
+            )
+        ],
     )
 
 
 def test_extended_agent_card_not_supported() -> None:
+    """Extended agent card not supported."""
     with _build_client(extended=False) as client:
-        response = client.get("/extendedAgentCard", headers={"A2A-Version": "0.3"})
+        response = client.get(
+            "/extendedAgentCard", headers={"A2A-Version": "0.3"}
+        )
         assert response.status_code == 400
         assert response.json()["type"].endswith("unsupported-operation")
 
 
 def test_extended_agent_card_not_configured() -> None:
+    """Extended agent card not configured."""
     with _build_client(extended=True) as client:
-        response = client.get("/extendedAgentCard", headers={"A2A-Version": "0.3"})
+        response = client.get(
+            "/extendedAgentCard", headers={"A2A-Version": "0.3"}
+        )
         assert response.status_code == 400
-        assert response.json()["type"].endswith("extended-agent-card-not-configured")
+        assert response.json()["type"].endswith(
+            "extended-agent-card-not-configured"
+        )
 
 
 def test_extended_agent_card_requires_auth() -> None:
-    def auth(headers) -> bool:
+    """Extended agent card requires auth."""
+
+    def auth(headers: Mapping[str, str]) -> bool:
         return headers.get("authorization") == "Bearer secret"
 
-    with _build_client(extended=True, extended_card=_extended_card(), auth_cb=auth) as client:
-        response = client.get("/extendedAgentCard", headers={"A2A-Version": "0.3"})
+    with _build_client(
+        extended=True, extended_card=_extended_card(), auth_cb=auth
+    ) as client:
+        response = client.get(
+            "/extendedAgentCard", headers={"A2A-Version": "0.3"}
+        )
         assert response.status_code == 401
 
         response = client.get(

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+import contextlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .models import StateUpdate, UpdateType
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable
 
 
 @dataclass(slots=True)
@@ -36,19 +40,22 @@ class UpdateBroker:
         task_ids: Iterable[str] | None = None,
         update_types: Iterable[UpdateType] | None = None,
     ) -> tuple[asyncio.Queue[StateUpdate], Callable[[], Awaitable[None]]]:
-        """Register a new subscriber and return its queue plus an unsubscribe callback.
+        """Register a subscriber; return its queue and an unsubscribe callback.
 
         Args:
-            task_ids: If given, only updates for these task IDs are delivered to this
-                subscriber. None means all task IDs are delivered.
-            update_types: If given, only updates of these types are delivered to this
-                subscriber. None means all update types are delivered.
+            task_ids: If given, only updates for these task IDs are delivered
+                to this subscriber. None means all task IDs are delivered.
+            update_types: If given, only updates of these types are delivered
+                to this subscriber. None means all update types are delivered.
 
         Returns:
             A tuple of `(queue, unsubscribe)`: the queue receives matching
-            `StateUpdate`s, and calling `unsubscribe()` removes the subscription.
+            `StateUpdate`s, and calling `unsubscribe()` removes the
+            subscription.
         """
-        queue: asyncio.Queue[StateUpdate] = asyncio.Queue(maxsize=self._max_queue_size)
+        queue: asyncio.Queue[StateUpdate] = asyncio.Queue(
+            maxsize=self._max_queue_size
+        )
         sub = _Subscription(
             queue=queue,
             task_ids=set(task_ids) if task_ids else None,
@@ -67,26 +74,33 @@ class UpdateBroker:
     def publish(self, update: StateUpdate) -> None:
         """Deliver an update to every matching subscriber's queue.
 
-        Non-critical updates are dropped (not blocked on) when a subscriber's queue
-        is full. Critical updates (RESULT, ERROR, NOTIFICATION, STATUS_CHANGE) evict
-        the oldest queued item to make room instead of being dropped.
+        Non-critical updates are dropped (not blocked on) when a subscriber's
+        queue is full. Critical updates (RESULT, ERROR, NOTIFICATION,
+        STATUS_CHANGE) evict the oldest queued item to make room instead of
+        being dropped.
 
         Args:
             update: The state update to publish.
         """
-        critical_types = {UpdateType.RESULT, UpdateType.ERROR, UpdateType.NOTIFICATION, UpdateType.STATUS_CHANGE}
+        critical_types = {
+            UpdateType.RESULT,
+            UpdateType.ERROR,
+            UpdateType.NOTIFICATION,
+            UpdateType.STATUS_CHANGE,
+        }
         for sub in list(self._subs):
             if sub.task_ids is not None and update.task_id not in sub.task_ids:
                 continue
-            if sub.update_types is not None and update.update_type not in sub.update_types:
+            if (
+                sub.update_types is not None
+                and update.update_type not in sub.update_types
+            ):
                 continue
             try:
                 if sub.queue.full():
                     if update.update_type in critical_types:
-                        try:
+                        with contextlib.suppress(asyncio.QueueEmpty):
                             sub.queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
                     else:
                         continue
                 sub.queue.put_nowait(update)

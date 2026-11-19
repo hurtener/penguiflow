@@ -21,13 +21,17 @@ def adapt_mcp_error(exc: Exception) -> ToolNodeError:
     exc_type = type(exc).__name__
     exc_msg = str(exc)
 
-    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    status_code = getattr(exc, "status_code", None) or getattr(
+        exc, "code", None
+    )
 
     if "McpError" in exc_type or "ToolError" in exc_type:
         return ToolClientError(f"MCP tool error: {exc_msg}", cause=exc)
 
     if "ConnectionError" in exc_type or "connection" in exc_msg.lower():
-        return ToolConnectionError(f"MCP connection failed: {exc_msg}", cause=exc)
+        return ToolConnectionError(
+            f"MCP connection failed: {exc_msg}", cause=exc
+        )
 
     if status_code:
         return _from_status(status_code, exc_msg, exc)
@@ -40,10 +44,14 @@ def adapt_utcp_error(exc: Exception) -> ToolNodeError:
     exc_type = type(exc).__name__
     exc_msg = str(exc)
 
-    status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    status_code = getattr(exc, "status_code", None) or getattr(
+        exc, "status", None
+    )
 
     if status_code is None:
-        match = re.search(r"(?:HTTP|status)[:\s]*(\d{3})", exc_msg, re.IGNORECASE)
+        match = re.search(
+            r"(?:HTTP|status)[:\s]*(\d{3})", exc_msg, re.IGNORECASE
+        )
         if match:
             status_code = int(match.group(1))
 
@@ -51,7 +59,9 @@ def adapt_utcp_error(exc: Exception) -> ToolNodeError:
         return _from_status(status_code, exc_msg, exc)
 
     if "UtcpConnectionError" in exc_type or "connection" in exc_msg.lower():
-        return ToolConnectionError(f"UTCP connection failed: {exc_msg}", cause=exc)
+        return ToolConnectionError(
+            f"UTCP connection failed: {exc_msg}", cause=exc
+        )
 
     if "UtcpTimeoutError" in exc_type or "timeout" in exc_msg.lower():
         return ToolTimeoutError(f"UTCP timeout: {exc_msg}", cause=exc)
@@ -62,9 +72,12 @@ def adapt_utcp_error(exc: Exception) -> ToolNodeError:
     return ToolNodeError(f"UTCP error: {exc_msg}", cause=exc)
 
 
-def adapt_exception(exc: Exception, transport: str) -> ToolNodeError:
-    """Route to appropriate adapter based on transport."""
-    if isinstance(exc, asyncio.CancelledError):
+def adapt_exception(exc: BaseException, transport: str) -> ToolNodeError:
+    """Route to appropriate adapter based on transport.
+
+    Cancellation and other non-``Exception`` errors are re-raised as is.
+    """
+    if not isinstance(exc, Exception):
         raise exc
 
     if isinstance(exc, asyncio.TimeoutError):
@@ -81,7 +94,9 @@ def adapt_exception(exc: Exception, transport: str) -> ToolNodeError:
     return adapt_utcp_error(exc)
 
 
-def _from_status(status_code: int | None, exc_msg: str, exc: Exception) -> ToolNodeError:
+def _from_status(
+    status_code: int | None, exc_msg: str, exc: Exception
+) -> ToolNodeError:
     """Map HTTP-like status codes into concrete ToolNodeError subclasses."""
     if status_code is None:
         return ToolNodeError(exc_msg, cause=exc)

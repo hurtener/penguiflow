@@ -28,7 +28,12 @@ from .models import (
     SkillSearchType,
 )
 from .pack_loader import SkillPackLoader
-from .provider import CompositeSkillProvider, LocalSkillProvider, SkillProvider, SkillProviderFactory
+from .provider import (
+    CompositeSkillProvider,
+    LocalSkillProvider,
+    SkillProvider,
+    SkillProviderFactory,
+)
 
 __all__ = [
     "CompositeSkillProvider",

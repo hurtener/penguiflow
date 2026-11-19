@@ -3,44 +3,56 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner, ToolPolicy
+from penguiflow.planner import PlannerFinish, ReactPlanner, ToolPolicy
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
 class Query(BaseModel):
+    """Query payload."""
+
     question: str
 
 
 class Answer(BaseModel):
+    """Answer payload."""
+
     answer: str
 
 
-class StubClient:
+class StubClient(JSONLLMClient):
     """Deterministic LLM stub returning scripted planner actions."""
 
     def __init__(self, responses: list[Mapping[str, object]]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
         self.calls: list[list[Mapping[str, str]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
-            raise AssertionError("No stub responses remaining")
+            msg = "No stub responses remaining"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.0
 
 
@@ -54,6 +66,7 @@ def _register(
 
 @pytest.mark.asyncio()
 async def test_tool_policy_filters_catalog() -> None:
+    """Tool policy filters catalog."""
     registry = ModelRegistry()
     _register(
         registry,
@@ -63,18 +76,15 @@ async def test_tool_policy_filters_catalog() -> None:
     )
 
     @tool(desc="Tool A", tags=["safe"])
-    async def tool_a(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def tool_a(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"A:{args.question}")
 
     @tool(desc="Tool B", tags=["safe", "expensive"])
-    async def tool_b(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def tool_b(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"B:{args.question}")
 
     @tool(desc="Tool C", tags=["unsafe"])
-    async def tool_c(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def tool_c(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"C:{args.question}")
 
     nodes = [
@@ -87,7 +97,11 @@ async def test_tool_policy_filters_catalog() -> None:
     policy = ToolPolicy(allowed_tools={"tool_a", "tool_b"})
     client = StubClient(
         [
-            {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}},
+            {
+                "thought": "Done",
+                "next_node": None,
+                "args": {"raw_answer": "OK"},
+            },
         ]
     )
 
@@ -97,22 +111,23 @@ async def test_tool_policy_filters_catalog() -> None:
         tool_policy=policy,
     )
 
-    assert set(planner._spec_by_name) == {"tool_a", "tool_b"}
+    assert set(planner.spec_by_name) == {"tool_a", "tool_b"}
 
 
 @pytest.mark.asyncio()
 async def test_tool_policy_denies_tools() -> None:
+    """Tool policy denies tools."""
     registry = ModelRegistry()
-    _register(registry, ("good_tool", Query, Answer), ("bad_tool", Query, Answer))
+    _register(
+        registry, ("good_tool", Query, Answer), ("bad_tool", Query, Answer)
+    )
 
     @tool(desc="Good tool", tags=["safe"])
-    async def good_tool(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def good_tool(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"good:{args.question}")
 
     @tool(desc="Bad tool", tags=["safe"])
-    async def bad_tool(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def bad_tool(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"bad:{args.question}")
 
     catalog = build_catalog(
@@ -126,60 +141,79 @@ async def test_tool_policy_denies_tools() -> None:
     )
     client = StubClient(
         [
-            {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}},
+            {
+                "thought": "Done",
+                "next_node": None,
+                "args": {"raw_answer": "OK"},
+            },
         ]
     )
 
-    planner = ReactPlanner(llm_client=client, catalog=catalog, tool_policy=policy)
+    planner = ReactPlanner(
+        llm_client=client, catalog=catalog, tool_policy=policy
+    )
 
-    assert set(planner._spec_by_name) == {"good_tool"}
-    assert "bad_tool" not in planner._spec_by_name
+    assert set(planner.spec_by_name) == {"good_tool"}
+    assert "bad_tool" not in planner.spec_by_name
 
 
 @pytest.mark.asyncio()
 async def test_tool_policy_requires_tags() -> None:
+    """Tool policy requires tags."""
     registry = ModelRegistry()
-    _register(registry, ("safe_tool", Query, Answer), ("unsafe_tool", Query, Answer))
+    _register(
+        registry, ("safe_tool", Query, Answer), ("unsafe_tool", Query, Answer)
+    )
 
     @tool(desc="Safe tool", tags=["safe", "approved"])
-    async def safe_tool(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def safe_tool(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"safe:{args.question}")
 
     @tool(desc="Unsafe tool", tags=["unsafe"])
-    async def unsafe_tool(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def unsafe_tool(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"unsafe:{args.question}")
 
     catalog = build_catalog(
-        [Node(safe_tool, name="safe_tool"), Node(unsafe_tool, name="unsafe_tool")],
+        [
+            Node(safe_tool, name="safe_tool"),
+            Node(unsafe_tool, name="unsafe_tool"),
+        ],
         registry,
     )
 
     policy = ToolPolicy(require_tags={"safe"})
-    client = StubClient([
-        {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}},
-    ])
+    client = StubClient(
+        [
+            {
+                "thought": "Done",
+                "next_node": None,
+                "args": {"raw_answer": "OK"},
+            },
+        ]
+    )
 
-    planner = ReactPlanner(llm_client=client, catalog=catalog, tool_policy=policy)
+    planner = ReactPlanner(
+        llm_client=client, catalog=catalog, tool_policy=policy
+    )
 
-    assert set(planner._spec_by_name) == {"safe_tool"}
-    assert "unsafe_tool" not in planner._spec_by_name
+    assert set(planner.spec_by_name) == {"safe_tool"}
+    assert "unsafe_tool" not in planner.spec_by_name
 
 
 @pytest.mark.asyncio()
 async def test_tool_policy_llm_error_on_forbidden_tool() -> None:
+    """Tool policy LLM error on forbidden tool."""
     registry = ModelRegistry()
-    _register(registry, ("allowed", Query, Answer), ("forbidden", Query, Answer))
+    _register(
+        registry, ("allowed", Query, Answer), ("forbidden", Query, Answer)
+    )
 
     @tool(desc="Allowed tool", tags=["safe"])
-    async def allowed(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def allowed(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"allowed:{args.question}")
 
     @tool(desc="Forbidden tool", tags=["restricted"])
-    async def forbidden(args: Query, ctx: object) -> Answer:
-        del ctx
+    async def forbidden(args: Query, _ctx: object) -> Answer:
         return Answer(answer=f"forbidden:{args.question}")
 
     catalog = build_catalog(
@@ -208,11 +242,14 @@ async def test_tool_policy_llm_error_on_forbidden_tool() -> None:
         ]
     )
 
-    planner = ReactPlanner(llm_client=client, catalog=catalog, tool_policy=policy)
+    planner = ReactPlanner(
+        llm_client=client, catalog=catalog, tool_policy=policy
+    )
 
     result = await planner.run("Test forbidden tool")
 
+    assert isinstance(result, PlannerFinish)
     errors = [step.get("error") for step in result.metadata["steps"]]
     assert any("forbidden" in (error or "") for error in errors)
-    assert "allowed" in planner._spec_by_name
-    assert "forbidden" not in planner._spec_by_name
+    assert "allowed" in planner.spec_by_name
+    assert "forbidden" not in planner.spec_by_name

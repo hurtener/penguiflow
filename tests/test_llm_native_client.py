@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import BaseModel
@@ -24,12 +24,17 @@ from penguiflow.llm.types import (
 
 
 class SampleOutput(BaseModel):
+    """Structured output used by the tests."""
+
     answer: str
     confidence: float
 
 
 class TestLLMClientConfig:
+    """Tests for LLM client config."""
+
     def test_defaults(self) -> None:
+        """Defaults."""
         config = LLMClientConfig()
         assert config.max_retries == 3
         assert config.retry_on_validation is True
@@ -42,6 +47,7 @@ class TestLLMClientConfig:
         assert config.enable_cost_tracking is True
 
     def test_custom_config(self) -> None:
+        """Custom config."""
         config = LLMClientConfig(
             max_retries=5,
             timeout_s=60.0,
@@ -55,7 +61,10 @@ class TestLLMClientConfig:
 
 
 class TestLLMResult:
+    """Tests for LLM result."""
+
     def test_create(self) -> None:
+        """Create."""
         data = SampleOutput(answer="42", confidence=0.95)
         usage = Usage(input_tokens=100, output_tokens=50, total_tokens=150)
         cost = Cost(input_cost=0.01, output_cost=0.02, total_cost=0.03)
@@ -75,6 +84,7 @@ class TestLLMResult:
         assert result.attempts == 1
 
     def test_with_raw_response(self) -> None:
+        """With raw response."""
         data = SampleOutput(answer="test", confidence=0.5)
 
         result = LLMResult(
@@ -91,7 +101,10 @@ class TestLLMResult:
 
 
 class TestLLMClient:
+    """Tests for LLM client."""
+
     def test_init_with_provider(self) -> None:
+        """Init with provider."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
@@ -102,6 +115,7 @@ class TestLLMClient:
         assert client.model == "test-model"
 
     def test_init_with_profile(self) -> None:
+        """Init with profile."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
@@ -109,11 +123,14 @@ class TestLLMClient:
         mock_profile = MagicMock()
         mock_profile.model_pattern = "test-*"
 
-        client = LLMClient("test-model", provider=mock_provider, profile=mock_profile)
+        client = LLMClient(
+            "test-model", provider=mock_provider, profile=mock_profile
+        )
 
         assert client.profile is mock_profile
 
     def test_total_cost_initial(self) -> None:
+        """Total cost initial."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
@@ -122,58 +139,77 @@ class TestLLMClient:
 
         assert client.total_cost.total_cost == 0.0
 
-    def test_reset_cost(self) -> None:
+    @pytest.mark.asyncio
+    async def test_reset_cost(self) -> None:
+        """Reset cost."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
 
         client = LLMClient("test-model", provider=mock_provider)
-        client._total_cost = Cost(input_cost=0.1, output_cost=0.2, total_cost=0.3)
+        parsed = SampleOutput(answer="42", confidence=0.9)
+        with patch(
+            "penguiflow.llm.client.call_with_retry",
+            AsyncMock(return_value=(parsed, 0.3)),
+        ):
+            await client.generate(
+                [LLMMessage(role="user", parts=[TextPart(text="hi")])],
+                SampleOutput,
+            )
+        assert client.total_cost.total_cost == 0.3
 
         client.reset_cost()
 
         assert client.total_cost.total_cost == 0.0
 
     def test_get_strategy_native(self) -> None:
+        """Get strategy native."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
 
         client = LLMClient("test-model", provider=mock_provider)
 
-        strategy = client._get_strategy(OutputMode.NATIVE)
+        strategy = client.get_strategy(OutputMode.NATIVE)
         assert strategy.__class__.__name__ == "NativeOutputStrategy"
 
     def test_get_strategy_tools(self) -> None:
+        """Get strategy tools."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
 
         client = LLMClient("test-model", provider=mock_provider)
 
-        strategy = client._get_strategy(OutputMode.TOOLS)
+        strategy = client.get_strategy(OutputMode.TOOLS)
         assert strategy.__class__.__name__ == "ToolsOutputStrategy"
 
     def test_get_strategy_prompted(self) -> None:
+        """Get strategy prompted."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
 
         client = LLMClient("test-model", provider=mock_provider)
 
-        strategy = client._get_strategy(OutputMode.PROMPTED)
+        strategy = client.get_strategy(OutputMode.PROMPTED)
         assert strategy.__class__.__name__ == "PromptedOutputStrategy"
 
 
 class TestLLMClientAsync:
+    """Tests for LLM client async."""
+
     @pytest.mark.asyncio
     async def test_complete_raw(self) -> None:
+        """Complete raw."""
         mock_provider = MagicMock()
         mock_provider.model = "test-model"
         mock_provider.provider_name = "test"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
-                message=LLMMessage(role="assistant", parts=[TextPart(text="Hello!")]),
+                message=LLMMessage(
+                    role="assistant", parts=[TextPart(text="Hello!")]
+                ),
                 usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
             )
         )

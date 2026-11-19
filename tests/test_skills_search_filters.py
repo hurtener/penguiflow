@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -13,8 +13,13 @@ from penguiflow.skills.models import (
     SkillQuery,
     SkillsConfig,
     SkillSearchQuery,
+    SkillSearchType,
+    SkillTaskType,
 )
 from penguiflow.skills.provider import LocalSkillProvider
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _store(tmp_path: Path) -> LocalSkillStore:
@@ -63,14 +68,14 @@ def _search(
     tags: tuple[str, ...] = (),
     namespace: str | None = None,
     limit: int = 10,
-    search_type: str = "fts",
-    task_type: str | None = None,
-) -> list[dict]:
+    search_type: SkillSearchType = "fts",
+    task_type: SkillTaskType | None = None,
+) -> list[dict[str, object]]:
     results, _ = store.search(
         query,
-        search_type=search_type,  # type: ignore[arg-type]
+        search_type=search_type,
         limit=limit,
-        task_type=task_type,  # type: ignore[arg-type]
+        task_type=task_type,
         scope_clause="",
         scope_params=(),
         tags=tags,
@@ -80,6 +85,7 @@ def _search(
 
 
 def test_tags_filter_single(tmp_path: Path) -> None:
+    """Tags filter single."""
     store = _store(tmp_path)
     results = _search(store, "mail", tags=("microsoft365",))
     assert {item["name"] for item in results} == {
@@ -89,18 +95,23 @@ def test_tags_filter_single(tmp_path: Path) -> None:
 
 
 def test_tags_filter_and_match(tmp_path: Path) -> None:
+    """Tags filter and match."""
     store = _store(tmp_path)
     results = _search(store, "mail", tags=("microsoft365", "write"))
-    assert [item["name"] for item in results] == ["canvas.microsoft365.mail.send_mail"]
+    assert [item["name"] for item in results] == [
+        "canvas.microsoft365.mail.send_mail"
+    ]
 
 
 def test_tags_filter_unknown_tag_returns_empty(tmp_path: Path) -> None:
+    """Tags filter unknown tag returns empty."""
     store = _store(tmp_path)
     results = _search(store, "mail", tags=("microsoft365", "nonexistent"))
     assert results == []
 
 
 def test_namespace_filter_dot_prefix(tmp_path: Path) -> None:
+    """Namespace filter dot prefix."""
     store = _store(tmp_path)
     results = _search(store, "mail", namespace="canvas.microsoft365")
     assert {item["name"] for item in results} == {
@@ -110,6 +121,7 @@ def test_namespace_filter_dot_prefix(tmp_path: Path) -> None:
 
 
 def test_namespace_filter_exact_bare_name(tmp_path: Path) -> None:
+    """Namespace filter exact bare name."""
     store = _store(tmp_path)
     results = _search(store, "finish", namespace="finish", search_type="exact")
     assert [item["name"] for item in results] == ["finish"]
@@ -123,6 +135,7 @@ def test_namespace_filter_no_underscore_separator(tmp_path: Path) -> None:
 
 
 def test_tags_and_namespace_compose_as_and(tmp_path: Path) -> None:
+    """Tags and namespace compose as and."""
     store = _store(tmp_path)
     results = _search(
         store,
@@ -130,10 +143,14 @@ def test_tags_and_namespace_compose_as_and(tmp_path: Path) -> None:
         tags=("write",),
         namespace="canvas.microsoft365",
     )
-    assert [item["name"] for item in results] == ["canvas.microsoft365.mail.send_mail"]
+    assert [item["name"] for item in results] == [
+        "canvas.microsoft365.mail.send_mail"
+    ]
 
     # No skill in canvas.bigquery has the 'mail' tag → empty.
-    results = _search(store, "datasets", tags=("mail",), namespace="canvas.bigquery")
+    results = _search(
+        store, "datasets", tags=("mail",), namespace="canvas.bigquery"
+    )
     assert results == []
 
 
@@ -149,6 +166,7 @@ def test_filters_compose_with_task_type(tmp_path: Path) -> None:
 
 
 def test_defaults_preserve_back_compat(tmp_path: Path) -> None:
+    """Defaults preserve back compat."""
     store = _store(tmp_path)
     baseline, _ = store.search(
         "mail",
@@ -172,6 +190,7 @@ def test_defaults_preserve_back_compat(tmp_path: Path) -> None:
 
 
 def test_filters_apply_before_paging(tmp_path: Path) -> None:
+    """Filters apply before paging."""
     store = _store(tmp_path)
     # With tag filter, only 2 of 4 skills match.
     results = _search(store, "mail", tags=("microsoft365",), limit=5)
@@ -179,13 +198,22 @@ def test_filters_apply_before_paging(tmp_path: Path) -> None:
 
     results = _search(store, "mail", tags=("microsoft365",), limit=1)
     assert len(results) == 1
-    assert results[0]["name"].startswith("canvas.microsoft365.")
+    name = results[0]["name"]
+    assert isinstance(name, str)
+    assert name.startswith("canvas.microsoft365.")
 
 
 @pytest.mark.parametrize("search_type", ["fts", "regex", "exact"])
-def test_filters_apply_across_search_types(search_type: str, tmp_path: Path) -> None:
+def test_filters_apply_across_search_types(
+    search_type: SkillSearchType, tmp_path: Path
+) -> None:
+    """Filters apply across search types."""
     store = _store(tmp_path)
-    query = "canvas.microsoft365.mail.send_mail" if search_type == "exact" else "mail"
+    query = (
+        "canvas.microsoft365.mail.send_mail"
+        if search_type == "exact"
+        else "mail"
+    )
     results = _search(
         store,
         query,
@@ -193,7 +221,9 @@ def test_filters_apply_across_search_types(search_type: str, tmp_path: Path) -> 
         namespace="canvas.microsoft365",
         search_type=search_type,
     )
-    assert [item["name"] for item in results] == ["canvas.microsoft365.mail.send_mail"]
+    assert [item["name"] for item in results] == [
+        "canvas.microsoft365.mail.send_mail"
+    ]
 
 
 # -----------------------------------------------------------------------------
@@ -202,6 +232,7 @@ def test_filters_apply_across_search_types(search_type: str, tmp_path: Path) -> 
 
 
 def test_list_applies_tags_and_namespace(tmp_path: Path) -> None:
+    """List applies tags and namespace."""
     store = _store(tmp_path)
     records, total = store.list(
         page=1,
@@ -232,6 +263,7 @@ def test_list_applies_tags_and_namespace(tmp_path: Path) -> None:
 
 
 def test_list_defaults_preserve_back_compat(tmp_path: Path) -> None:
+    """List defaults preserve back compat."""
     store = _store(tmp_path)
     baseline = store.list(
         page=1,
@@ -260,6 +292,7 @@ def test_list_defaults_preserve_back_compat(tmp_path: Path) -> None:
 
 
 def test_skill_search_query_accepts_new_fields() -> None:
+    """Skill search query accepts new fields."""
     query = SkillSearchQuery(
         query="mail",
         tags=["microsoft365", "write"],
@@ -275,7 +308,10 @@ def test_skill_search_query_accepts_new_fields() -> None:
 
 
 def test_skill_query_accepts_new_fields() -> None:
-    query = SkillQuery(task="search", tags=["mail"], namespace="canvas.microsoft365")
+    """Skill query accepts new fields."""
+    query = SkillQuery(
+        task="search", tags=["mail"], namespace="canvas.microsoft365"
+    )
     assert query.tags == ["mail"]
     assert query.namespace == "canvas.microsoft365"
 
@@ -285,7 +321,10 @@ def test_skill_query_accepts_new_fields() -> None:
 
 
 def test_skill_list_request_accepts_new_fields() -> None:
-    req = SkillListRequest(tags=["microsoft365"], namespace="canvas.microsoft365")
+    """Skill list request accepts new fields."""
+    req = SkillListRequest(
+        tags=["microsoft365"], namespace="canvas.microsoft365"
+    )
     assert req.tags == ["microsoft365"]
     assert req.namespace == "canvas.microsoft365"
 
@@ -303,9 +342,12 @@ def _provider(tmp_path: Path) -> LocalSkillProvider:
 
 @pytest.mark.asyncio
 async def test_provider_search_forwards_filters(tmp_path: Path) -> None:
+    """Provider search forwards filters."""
     provider = _provider(tmp_path)
     response = await provider.search(
-        SkillSearchQuery(query="mail", tags=["write"], namespace="canvas.microsoft365"),
+        SkillSearchQuery(
+            query="mail", tags=["write"], namespace="canvas.microsoft365"
+        ),
         tool_context={},
     )
     assert [skill.name for skill in response.skills] == [
@@ -315,9 +357,12 @@ async def test_provider_search_forwards_filters(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_provider_get_relevant_forwards_filters(tmp_path: Path) -> None:
+    """Provider get relevant forwards filters."""
     provider = _provider(tmp_path)
     response = await provider.get_relevant(
-        SkillQuery(task="mail", tags=["write"], namespace="canvas.microsoft365"),
+        SkillQuery(
+            task="mail", tags=["write"], namespace="canvas.microsoft365"
+        ),
         tool_context={},
     )
     assert [skill.name for skill in response.skills] == [
@@ -327,6 +372,7 @@ async def test_provider_get_relevant_forwards_filters(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_provider_list_forwards_filters(tmp_path: Path) -> None:
+    """Provider list forwards filters."""
     provider = _provider(tmp_path)
     response = await provider.list(
         SkillListRequest(tags=["microsoft365"]),

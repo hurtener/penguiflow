@@ -1,6 +1,7 @@
 """Model profiles for the LLM layer.
 
-Declarative capability descriptions per model, adapted from PydanticAI patterns.
+Declarative capability descriptions per model, adapted from PydanticAI
+patterns.
 """
 
 from __future__ import annotations
@@ -24,8 +25,12 @@ class ModelProfile:
     """
 
     # Output capabilities
-    supports_schema_guided_output: bool = False  # Provider-native schema-guided structured output
-    supports_json_only_output: bool = True  # Provider-native "JSON only" mode (if supported)
+    supports_schema_guided_output: bool = (
+        False  # Provider-native schema-guided structured output
+    )
+    supports_json_only_output: bool = (
+        True  # Provider-native "JSON only" mode (if supported)
+    )
     supports_tools: bool = True  # Tool/function calling
     # Whether provider-native function calling works on this model's ROUTE
     # (distinct from supports_tools: the model may support tools while the
@@ -61,7 +66,9 @@ class ModelProfile:
 
     # Reasoning configuration
     reasoning_effort_param: str | None = None  # Parameter name if supported
-    thinking_tags: tuple[str, str] | None = None  # e.g., ("<think>", "</think>")
+    thinking_tags: tuple[str, str] | None = (
+        None  # e.g., ("<think>", "</think>")
+    )
     # Controls visibility of adaptive-thinking summaries.
     reasoning_display_default: Literal["summarized", "omitted"] | None = None
     # How a reasoning-effort request is expressed for this model:
@@ -70,7 +77,10 @@ class ModelProfile:
     # - "thinking_budget": thinking={"type": "enabled", "budget_tokens": N}
     # - "reasoning_effort": pass the reasoning_effort parameter through as-is
     # None: the provider falls back to model-name heuristics.
-    reasoning_request_style: Literal["adaptive_effort", "thinking_budget", "reasoning_effort"] | None = None
+    reasoning_request_style: (
+        Literal["adaptive_effort", "thinking_budget", "reasoning_effort"]
+        | None
+    ) = None
 
     # Transport pinning. None = follow the adapter-level `transport` selection;
     # set to pin this model to a transport regardless of the default (an
@@ -83,9 +93,13 @@ class ModelProfile:
     strict_mode_default: bool = True  # Default for strict JSON schema
     supports_system_role: bool = True  # Some models need user role for system
     drop_unsupported_params: bool = True  # Silently drop unknown params
-    unsupported_request_params: frozenset[str] = frozenset()  # Parameters rejected by this model route
+    unsupported_request_params: frozenset[str] = (
+        frozenset()
+    )  # Parameters rejected by this model route
     max_tools: int | None = None  # Maximum number of tools allowed
-    max_schema_keys: int | None = None  # Maximum schema keys (e.g., Databricks: 64)
+    max_schema_keys: int | None = (
+        None  # Maximum schema keys (e.g., Databricks: 64)
+    )
 
     # Token limits
     max_context_tokens: int | None = None
@@ -101,7 +115,7 @@ _PROFILES: dict[str, ModelProfile] | None = None
 
 
 def _profile_candidates(model: str) -> list[str]:
-    """Generate exact and normalized candidates for nested model identifiers."""
+    """Generate exact and normalized candidates for a nested model id."""
     seen: set[str] = set()
     candidates: list[str] = []
 
@@ -122,7 +136,15 @@ def _profile_candidates(model: str) -> list[str]:
 
 def _load_profiles() -> dict[str, ModelProfile]:
     """Load all profiles from submodules."""
-    from . import anthropic, bedrock, databricks, google, nim, openai, openrouter
+    from . import (
+        anthropic,
+        bedrock,
+        databricks,
+        google,
+        nim,
+        openai,
+        openrouter,
+    )
 
     profiles: dict[str, ModelProfile] = {}
     profiles.update(openai.PROFILES)
@@ -160,7 +182,8 @@ def get_profile(model: str) -> ModelProfile:
         if candidate in profiles:
             return profiles[candidate]
 
-    # Prefix matching for versioned models (e.g., "gpt-4o-2024-08-06" -> "gpt-4o")
+    # Prefix matching for versioned models (e.g., "gpt-4o-2024-08-06" ->
+    # "gpt-4o")
     for key, profile in profiles.items():
         for candidate in candidates:
             if candidate.startswith(key):
@@ -200,28 +223,30 @@ def get_schema_transformer(
         strict: Whether to use strict mode.
 
     Returns:
-        The appropriate schema transformer, or None if no transformation needed.
+        The appropriate schema transformer, or None if no transformation
+        needed.
     """
     if not profile.schema_transformer_name:
         return None
 
     # Import transformer classes dynamically
-    from ..schema import anthropic as anthropic_schema
-    from ..schema import bedrock as bedrock_schema
-    from ..schema import databricks as databricks_schema
-    from ..schema import google as google_schema
-    from ..schema import openai as openai_schema
+    from ..schema.anthropic import AnthropicJsonSchemaTransformer
+    from ..schema.bedrock import BedrockJsonSchemaTransformer
+    from ..schema.databricks import DatabricksJsonSchemaTransformer
+    from ..schema.google import GoogleJsonSchemaTransformer
+    from ..schema.openai import OpenAIJsonSchemaTransformer
 
-    transformer_map = {
-        "OpenAIJsonSchemaTransformer": openai_schema.OpenAIJsonSchemaTransformer,
-        "AnthropicJsonSchemaTransformer": anthropic_schema.AnthropicJsonSchemaTransformer,
-        "GoogleJsonSchemaTransformer": google_schema.GoogleJsonSchemaTransformer,
-        "BedrockJsonSchemaTransformer": bedrock_schema.BedrockJsonSchemaTransformer,
-        "DatabricksJsonSchemaTransformer": databricks_schema.DatabricksJsonSchemaTransformer,
-    }
+    transformers: tuple[type[JsonSchemaTransformer], ...] = (
+        OpenAIJsonSchemaTransformer,
+        AnthropicJsonSchemaTransformer,
+        GoogleJsonSchemaTransformer,
+        BedrockJsonSchemaTransformer,
+        DatabricksJsonSchemaTransformer,
+    )
+    transformer_map = {cls.__name__: cls for cls in transformers}
 
     transformer_cls = transformer_map.get(profile.schema_transformer_name)
     if transformer_cls:
-        return transformer_cls(schema, strict=strict)  # type: ignore[abstract]
+        return transformer_cls(schema, strict=strict)
 
     return None

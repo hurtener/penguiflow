@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
+if TYPE_CHECKING:
+    from pydantic import ValidationError
 
 
-def _safe_json_dumps(value: Any) -> str:
+def _safe_json_dumps(value: object) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):

@@ -1,7 +1,7 @@
 """Google/Gemini model profiles.
 
-Defines capabilities and configuration for Gemini models.
-Updated January 2026 with Gemini 3.0, 2.5, and 2.0 model families.
+Defines capabilities and configuration for Gemini models. Updated January 2026
+with Gemini 3.0, 2.5, and 2.0 model families.
 
 Reference: https://ai.google.dev/gemini-api/docs/models
 """

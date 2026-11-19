@@ -1,3 +1,5 @@
+"""Minimal async client for the Brave Search API."""
+
 from __future__ import annotations
 
 import os
@@ -10,11 +12,17 @@ from .cache import TTLCache, make_cache_key
 
 @dataclass(frozen=True, slots=True)
 class BraveAuth:
-    header: Literal["X-Subscription-Token", "Authorization"] = "X-Subscription-Token"
+    """Which header carries the Brave API key."""
+
+    header: Literal["X-Subscription-Token", "Authorization"] = (
+        "X-Subscription-Token"
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class BraveClientConfig:
+    """Endpoint, timeout and auth settings for :class:`BraveClient`."""
+
     base_url: str = "https://api.search.brave.com"
     timeout_s: float = 20.0
     auth: BraveAuth = BraveAuth()
@@ -22,6 +30,8 @@ class BraveClientConfig:
 
 @dataclass(frozen=True, slots=True)
 class LocationHeaders:
+    """Location hints Brave uses to localize results."""
+
     lat: float | None = None
     long: float | None = None
     timezone: str | None = None
@@ -32,6 +42,7 @@ class LocationHeaders:
     postal_code: str | None = None
 
     def to_headers(self) -> dict[str, str]:
+        """Return the location as Brave ``X-Loc-*`` request headers."""
         headers: dict[str, str] = {}
         if self.lat is not None:
             headers["X-Loc-Lat"] = str(self.lat)
@@ -66,56 +77,76 @@ def resolve_brave_api_key(
     if explicit:
         return explicit
 
-    # tool_context keys
-    if tool_context:
-        direct_keys = ("brave_answers_api_key", "brave_answer_api_key") if service == "answers" else ("brave_api_key",)
-        direct = None
-        for direct_key in direct_keys:
-            candidate = tool_context.get(direct_key)
-            if isinstance(candidate, str) and candidate.strip():
-                direct = candidate.strip()
-                break
-        if direct:
-            return direct
-        nested = tool_context.get("web")
-        if isinstance(nested, Mapping):
-            for direct_key in direct_keys:
-                nested_key = nested.get(direct_key)
-                if isinstance(nested_key, str) and nested_key.strip():
-                    return nested_key.strip()
+    keys = (
+        ("brave_answers_api_key", "brave_answer_api_key")
+        if service == "answers"
+        else ("brave_api_key",)
+    )
+    from_context = _context_api_key(tool_context, keys)
+    if from_context:
+        return from_context
 
-    # env var keys
-    if service == "answers":
-        env = (
-            os.environ.get("BRAVE_ANSWERS_API_KEY")
-            or os.environ.get("BRAVE_ANSWER_API_KEY")
-            or os.environ.get("BRAVE_SEARCH_API_KEY")
-            or os.environ.get("BRAVE_API_KEY")
+    env_names = (
+        (
+            "BRAVE_ANSWERS_API_KEY",
+            "BRAVE_ANSWER_API_KEY",
+            "BRAVE_SEARCH_API_KEY",
+            "BRAVE_API_KEY",
         )
-        if env and env.strip():
-            return env.strip()
-        raise ValueError(
-            "Brave Answers API key required. Provide BraveWebConfig(answers_api_key=...), "
-            "set tool_context['brave_answers_api_key'] (or tool_context['web']['brave_answers_api_key']), "
-            "or set BRAVE_ANSWERS_API_KEY."
-        )
-
-    env = os.environ.get("BRAVE_SEARCH_API_KEY") or os.environ.get("BRAVE_API_KEY")
+        if service == "answers"
+        else ("BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY")
+    )
+    env = next(
+        (os.environ[name] for name in env_names if os.environ.get(name)), None
+    )
     if env and env.strip():
         return env.strip()
-    raise ValueError(
-        "Brave API key required. Provide BraveWebConfig(api_key=...), set tool_context['brave_api_key'], "
-        "set tool_context['web']['brave_api_key'], or set BRAVE_SEARCH_API_KEY / BRAVE_API_KEY."
-    )
+
+    if service == "answers":
+        msg = (
+            "Brave Answers API key required. Provide "
+            "BraveWebConfig(answers_api_key=...), "
+            "set tool_context['brave_answers_api_key'] (or "
+            "tool_context['web']['brave_answers_api_key']), "
+            "or set BRAVE_ANSWERS_API_KEY."
+        )
+    else:
+        msg = (
+            "Brave API key required. Provide BraveWebConfig(api_key=...), "
+            "set tool_context['brave_api_key'], "
+            "set tool_context['web']['brave_api_key'], or set "
+            "BRAVE_SEARCH_API_KEY / BRAVE_API_KEY."
+        )
+    raise ValueError(msg)
+
+
+def _context_api_key(
+    tool_context: Mapping[str, Any] | None, keys: tuple[str, ...]
+) -> str | None:
+    """Find a key in ``tool_context`` or its nested ``web`` mapping."""
+    if not tool_context:
+        return None
+    nested = tool_context.get("web")
+    for source in (tool_context, nested):
+        if not isinstance(source, Mapping):
+            continue
+        for key in keys:
+            candidate = source.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
 
 
 class BraveClient:
+    """Async JSON client for the Brave Search API with an optional cache."""
+
     def __init__(
         self,
         *,
         config: BraveClientConfig,
         cache: TTLCache[str, Any] | None = None,
     ) -> None:
+        """Configure the client and an optional response cache."""
         self._config = config
         self._cache = cache
 
@@ -129,15 +160,22 @@ class BraveClient:
         json_body: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         cache_key: str | None = None,
-    ) -> Any:
-        cached = self._cache.get(cache_key) if (cache_key and self._cache) else None
+    ) -> object:
+        """Send a request and return its JSON body, cached when keyed."""
+        cached = (
+            self._cache.get(cache_key) if (cache_key and self._cache) else None
+        )
         if cached is not None:
             return cached
 
         try:
             import aiohttp
         except ModuleNotFoundError as exc:  # pragma: no cover
-            raise ModuleNotFoundError("aiohttp is required for Brave web tools. Install penguiflow-lite[web].") from exc
+            msg = (
+                "aiohttp is required for Brave web tools. Install "
+                "penguiflow-lite[web]."
+            )
+            raise ModuleNotFoundError(msg) from exc
 
         url = self._config.base_url.rstrip("/") + path
         req_headers: dict[str, str] = {"Accept": "application/json"}
@@ -149,18 +187,26 @@ class BraveClient:
             req_headers.update({str(k): str(v) for k, v in headers.items()})
 
         timeout = aiohttp.ClientTimeout(total=float(self._config.timeout_s))
-        query_params = _normalize_query_params(params or {}) if method == "GET" else None
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(
+        query_params = (
+            _normalize_query_params(params or {}) if method == "GET" else None
+        )
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.request(
                 method,
                 url,
                 params=query_params,
                 json=dict(json_body or {}) if method == "POST" else None,
                 headers=req_headers,
-            ) as resp:
-                data = await resp.json()
-                if resp.status >= 400:
-                    raise RuntimeError(format_brave_error("Brave API error", status=resp.status, payload=data))
+            ) as resp,
+        ):
+            data: object = await resp.json()
+            if resp.status >= 400:
+                raise RuntimeError(
+                    format_brave_error(
+                        "Brave API error", status=resp.status, payload=data
+                    )
+                )
 
         if cache_key and self._cache:
             self._cache.set(cache_key, data)
@@ -175,7 +221,9 @@ class BraveClient:
         body: Mapping[str, Any] | None,
         headers: Mapping[str, str] | None,
     ) -> str:
-        # Avoid secrets in keys: exclude auth headers; keep location + request-shape.
+        """Build a cache key, dropping auth headers."""
+        # Avoid secrets in keys: exclude auth headers; keep location +
+        # request-shape.
         safe_headers = {}
         for k, v in (headers or {}).items():
             if k.lower() in {"authorization", "x-subscription-token"}:
@@ -222,7 +270,8 @@ def _normalize_query_params(params: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def format_brave_error(prefix: str, *, status: int, payload: Any) -> str:
+def format_brave_error(prefix: str, *, status: int, payload: object) -> str:
+    """Format a Brave API error body, using its code and detail if any."""
     if isinstance(payload, Mapping):
         err = payload.get("error")
         if isinstance(err, Mapping):

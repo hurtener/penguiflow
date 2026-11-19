@@ -4,14 +4,31 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    cast,
+    runtime_checkable,
+)
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from ..catalog import NodeSpec, ToolLoadingMode
-from ..skills.models import SkillPackConfig, SkillsConfig, SkillsDirectoryConfig  # noqa: F401
+from ..skills.models import (
+    SkillPackConfig,
+    SkillsConfig,
+    SkillsDirectoryConfig,
+)
 from .context import PlannerPauseReason
+
+if TYPE_CHECKING:
+    from ..llm.protocol import NativeToolCallResult
+    from ..llm.types import ToolSpec
 
 # ---------------------------------------------------------------------------
 # TypedDict schemas for unified action args (RFC_UNIFIED_ACTION_SCHEMA)
@@ -81,7 +98,8 @@ class ActionFormat:
 
     Values:
         UNIFIED: Use the unified 2-field format (next_node + args only)
-        LEGACY: Use the legacy 5-field format with separate tool_name, plan, etc.
+        LEGACY: Use the legacy 5-field format with separate tool_name, plan,
+            etc.
         AUTO: Automatically detect format from LLM response structure
     """
 
@@ -91,13 +109,13 @@ class ActionFormat:
 
 
 class JSONLLMClient(Protocol):
-    """Protocol for LLM clients used by the planner to obtain JSON-structured actions.
+    """Protocol for the LLM clients the planner gets JSON actions from.
 
-    This is the extension seam for plugging in a custom LLM client (any provider or
-    in-house gateway) instead of the built-in LiteLLM-backed client. Implementations
-    must accept a chat-style message list and return either the raw completion text
-    or a ``(text, latency_seconds)`` tuple, optionally streaming partial chunks as
-    they arrive.
+    This is the extension seam for plugging in a custom LLM client (any
+    provider or in-house gateway) instead of the built-in LiteLLM-backed
+    client. Implementations must accept a chat-style message list and return
+    either the raw completion text or a ``(text, latency_seconds)`` tuple,
+    optionally streaming partial chunks as they arrive.
     """
 
     async def complete(
@@ -113,16 +131,74 @@ class JSONLLMClient(Protocol):
         Args:
             messages: Chat-style message history (each item mapping keys like
                 ``role`` and ``content``) to send to the model.
-            response_format: Optional provider-specific response format spec (e.g. a
-                JSON schema) used to request structured output.
-            stream: If ``True``, the client should invoke ``on_stream_chunk`` with
-                incremental output as it becomes available.
-            on_stream_chunk: Optional callback invoked with ``(text_delta, done)``
-                for each streamed chunk when ``stream=True``.
+            response_format: Optional provider-specific response format spec
+                (e.g. a JSON schema) used to request structured output.
+            stream: If ``True``, the client should invoke ``on_stream_chunk``
+                with incremental output as it becomes available.
+            on_stream_chunk: Optional callback invoked with ``(text_delta,
+                done)`` for each streamed chunk when ``stream=True``.
 
         Returns:
             Either the completion text as a ``str``, or a ``(text, latency_s)``
-            tuple where ``latency_s`` is the elapsed wall-clock time in seconds.
+            tuple where ``latency_s`` is the elapsed wall-clock time in
+            seconds.
+        """
+        ...
+
+
+class ReasoningJSONLLMClient(JSONLLMClient, Protocol):
+    """A :class:`JSONLLMClient` that can also stream reasoning chunks."""
+
+    async def complete(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
+        on_reasoning_chunk: Callable[[str, bool], None] | None = None,
+    ) -> str | tuple[str, float]:
+        """Request a completion, streaming reasoning to ``on_reasoning_chunk``.
+
+        Args:
+            messages: Chat-style message history to send to the model.
+            response_format: Optional provider-specific response format spec.
+            stream: If ``True``, stream output through ``on_stream_chunk``.
+            on_stream_chunk: Optional ``(text_delta, done)`` output callback.
+            on_reasoning_chunk: Optional ``(text_delta, done)`` callback for
+                the model's reasoning stream.
+
+        Returns:
+            The completion text, or a ``(text, cost)`` tuple.
+        """
+        ...
+
+
+@runtime_checkable
+class NativeToolsLLMClient(JSONLLMClient, Protocol):
+    """A :class:`JSONLLMClient` that also accepts provider-native tools."""
+
+    async def complete_with_tools(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[ToolSpec],
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
+        on_reasoning_chunk: Callable[[str, bool], None] | None = None,
+    ) -> NativeToolCallResult:
+        """Run a completion with provider-native tool declarations.
+
+        Args:
+            messages: Chat-style message history to send to the model.
+            tools: Tool declarations the model may call.
+            stream: If ``True``, stream output through ``on_stream_chunk``.
+            on_stream_chunk: Optional ``(text_delta, done)`` output callback.
+            on_reasoning_chunk: Optional ``(text_delta, done)`` callback for
+                the model's reasoning stream.
+
+        Returns:
+            The text content, the tool calls and the cost of the completion.
         """
         ...
 
@@ -200,7 +276,9 @@ class ParallelCall(BaseModel):
     """Single tool invocation within a parallel execution plan."""
 
     node: str = Field(description="Name of the tool/node to invoke.")
-    args: dict[str, Any] = Field(default_factory=dict, description="Arguments passed to the tool call.")
+    args: dict[str, Any] = Field(
+        default_factory=dict, description="Arguments passed to the tool call."
+    )
 
 
 class JoinInjection(BaseModel):
@@ -208,14 +286,16 @@ class JoinInjection(BaseModel):
 
     mapping: dict[str, str] = Field(
         default_factory=dict,
-        description="Mapping of join argument names to result references (e.g. '$results').",
+        description=(
+            "Mapping of join argument names to result references (e.g. "
+            "'$results')."
+        ),
     )
 
     @model_validator(mode="before")
     @classmethod
-    def _coerce_mapping(cls, value: Any) -> Any:
+    def _coerce_mapping(cls, value: object) -> object:
         """Allow shorthand {'field': '$results'} without 'mapping' wrapper."""
-
         if isinstance(value, Mapping) and "mapping" not in value:
             return {"mapping": value}
         return value
@@ -224,11 +304,17 @@ class JoinInjection(BaseModel):
 class ParallelJoin(BaseModel):
     """Aggregation step run after all parallel calls in a plan complete."""
 
-    node: str = Field(description="Name of the tool/node to invoke for aggregation.")
-    args: dict[str, Any] = Field(default_factory=dict, description="Arguments passed to the join call.")
+    node: str = Field(
+        description="Name of the tool/node to invoke for aggregation."
+    )
+    args: dict[str, Any] = Field(
+        default_factory=dict, description="Arguments passed to the join call."
+    )
     inject: JoinInjection | None = Field(
         default=None,
-        description="Optional mapping of parallel results into the join call's args.",
+        description=(
+            "Optional mapping of parallel results into the join call's args."
+        ),
     )
 
 
@@ -256,9 +342,12 @@ class FinalPayload(BaseModel):
     structured: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Schema-validated structured answer. Present only when the planner "
-            "was configured with final_response_model AND the payload validated "
-            "against it (after bounded repair). Never carries unvalidated data."
+            "Schema-validated structured answer. Present only when "
+            "the planner "
+            "was configured with final_response_model AND the payload "
+            "validated "
+            "against it (after bounded repair). Never carries "
+            "unvalidated data."
         ),
     )
     artifacts: dict[str, Any] = Field(
@@ -297,7 +386,9 @@ class FinalPayload(BaseModel):
     )
     extra: dict[str, Any] = Field(
         default_factory=dict,
-        description="Domain-specific fields not covered by the standard schema.",
+        description=(
+            "Domain-specific fields not covered by the standard schema."
+        ),
     )
 
 
@@ -308,41 +399,57 @@ class PlannerAction(BaseModel):
     - ``next_node``: non-null string opcode or tool name
     - ``args``: object payload (defaults to {})
 
-    Internally, we keep a best-effort ``thought`` field for trajectory logging and
-    repair prompts, but it is excluded from the JSON schema so it is not required
-    (or encouraged) in structured outputs.
+    Internally, we keep a best-effort ``thought`` field for trajectory logging
+    and repair prompts, but it is excluded from the JSON schema so it is not
+    required (or encouraged) in structured outputs.
 
     Special next_node values:
     - "final_response": Terminal action, args.answer streams to user
     - "parallel": Parallel execution, args contains steps and join config
-    - "task.subagent": Background subagent task, args contains query and group config
-    - "task.tool": Background single-tool job, args contains tool/tool_args and group config
+    - "task.subagent": Background subagent task, args contains query and group
+      config
+    - "task.tool": Background single-tool job, args contains tool/tool_args and
+      group config
     - Any other value: Tool call, args passed to the tool
     """
 
     next_node: str = Field(
         description=(
-            "Non-null opcode or tool name: 'final_response', 'parallel', 'task.subagent', "
+            "Non-null opcode or tool name: 'final_response', "
+            "'parallel', 'task.subagent', "
             "'task.tool', or any other tool name for a regular tool call."
         )
     )
-    args: dict[str, Any] = Field(default_factory=dict, description="Argument payload for next_node.")
+    args: dict[str, Any] = Field(
+        default_factory=dict, description="Argument payload for next_node."
+    )
     thought: SkipJsonSchema[str] = Field(
         default="",
-        description="Best-effort reasoning trace for trajectory logging and repair prompts.",
+        description=(
+            "Best-effort reasoning trace for trajectory logging and "
+            "repair prompts."
+        ),
     )
-    # Internal field to carry raw LLM response for debugging (excluded from serialization)
+    # Internal field to carry raw LLM response for debugging (excluded from
+    # serialization)
     raw_llm_response: SkipJsonSchema[str | None] = Field(
         default=None,
         exclude=True,
-        description="Raw LLM response text, kept for debugging only (excluded from serialization).",
+        description=(
+            "Raw LLM response text, kept for debugging only (excluded "
+            "from serialization)."
+        ),
     )
     # Optional additional action candidates extracted from mixed model output
-    # (e.g. multiple JSON objects in a single response). Excluded from schema/serialization.
+    # (e.g. multiple JSON objects in a single response). Excluded from
+    # schema/serialization.
     alternate_actions: SkipJsonSchema[list[dict[str, Any]] | None] = Field(
         default=None,
         exclude=True,
-        description="Additional action candidates parsed from mixed model output, if any.",
+        description=(
+            "Additional action candidates parsed from mixed model output, "
+            "if any."
+        ),
     )
 
     def is_terminal(self) -> bool:
@@ -368,7 +475,7 @@ class PlannerAction(BaseModel):
         return self.args.get("answer")
 
     def answer_text(self) -> str | None:
-        """Extract answer from args.answer or args.raw_answer (backward compatible)."""
+        """Return args.answer, or the legacy args.raw_answer."""
         value = self.args.get("answer")
         if isinstance(value, str):
             return value
@@ -389,11 +496,13 @@ class PlannerAction(BaseModel):
         if not self.is_parallel():
             return None
         join = self.args.get("join")
-        return cast(PlanJoin, join) if isinstance(join, dict) else None
+        return cast("PlanJoin", join) if isinstance(join, dict) else None
 
 
 # Special node types that aren't tool names (RFC_UNIFIED_ACTION_SCHEMA)
-SPECIAL_NODE_TYPES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
+SPECIAL_NODE_TYPES = frozenset(
+    {"parallel", "task.subagent", "task.tool", "final_response"}
+)
 
 # Backward compatible alias
 RESERVED_NEXT_NODES = SPECIAL_NODE_TYPES
@@ -403,8 +512,8 @@ RESERVED_NEXT_NODES = SPECIAL_NODE_TYPES
 class ActionWithReasoning:
     """Container for planner action with associated reasoning.
 
-    Reasoning comes from LiteLLM's native reasoning_content,
-    not from a JSON field.
+    Reasoning comes from LiteLLM's native reasoning_content, not from a JSON
+    field.
     """
 
     action: PlannerAction
@@ -414,7 +523,7 @@ class ActionWithReasoning:
     @classmethod
     def from_llm_response(
         cls,
-        response: Any,
+        response: object,
         action: PlannerAction,
     ) -> ActionWithReasoning:
         """Create from LiteLLM response with reasoning extraction."""
@@ -423,20 +532,23 @@ class ActionWithReasoning:
 
         if isinstance(response, Mapping):
             choice = response.get("choices", [{}])[0]
-            message = choice.get("message", {}) if isinstance(choice, Mapping) else {}
+            message = (
+                choice.get("message", {})
+                if isinstance(choice, Mapping)
+                else {}
+            )
             reasoning = message.get("reasoning_content")
             usage = response.get("usage", {})
             if isinstance(usage, Mapping):
                 reasoning_tokens = usage.get("reasoning_tokens")
         else:
-            try:
-                message = response.choices[0].message
+            choices = getattr(response, "choices", None)
+            if isinstance(choices, Sequence) and choices:
+                message = getattr(choices[0], "message", None)
                 reasoning = getattr(message, "reasoning_content", None)
                 usage = getattr(response, "usage", None)
                 if usage is not None:
                     reasoning_tokens = getattr(usage, "reasoning_tokens", None)
-            except (AttributeError, IndexError):
-                pass
 
         return cls(
             action=action,
@@ -446,11 +558,18 @@ class ActionWithReasoning:
 
 
 class PlannerPause(BaseModel):
-    """Signals that planner execution has paused and awaits external resumption."""
+    """Signals that the planner paused and awaits external resumption."""
 
-    reason: PlannerPauseReason = Field(description="Why the planner paused (e.g. HITL confirmation).")
-    payload: dict[str, Any] = Field(default_factory=dict, description="Data associated with the pause reason.")
-    resume_token: str = Field(description="Opaque token required to resume this paused run.")
+    reason: PlannerPauseReason = Field(
+        description="Why the planner paused (e.g. HITL confirmation)."
+    )
+    payload: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Data associated with the pause reason.",
+    )
+    resume_token: str = Field(
+        description="Opaque token required to resume this paused run."
+    )
 
 
 class PlannerFinish(BaseModel):
@@ -459,8 +578,12 @@ class PlannerFinish(BaseModel):
     reason: Literal["answer_complete", "no_path", "budget_exhausted"] = Field(
         description="Why the planner finished."
     )
-    payload: Any = Field(default=None, description="Final answer payload, if any.")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata about the run.")
+    payload: Any = Field(
+        default=None, description="Final answer payload, if any."
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, description="Additional metadata about the run."
+    )
 
 
 class ToolPolicy(BaseModel):
@@ -468,9 +591,14 @@ class ToolPolicy(BaseModel):
 
     allowed_tools: set[str] | None = Field(
         default=None,
-        description="If set, only tool names in this set may be used; all others are denied.",
+        description=(
+            "If set, only tool names in this set may be used; all others "
+            "are denied."
+        ),
     )
-    denied_tools: set[str] = Field(default_factory=set, description="Tool names that are always denied.")
+    denied_tools: set[str] = Field(
+        default_factory=set, description="Tool names that are always denied."
+    )
     require_tags: set[str] = Field(
         default_factory=set,
         description="Tags a tool's node must all carry to be allowed.",
@@ -485,39 +613,52 @@ class ToolPolicy(BaseModel):
 
         Args:
             node_name: Name of the tool/node being checked.
-            node_tags: Tags associated with the node, either as a mapping (keys used
-                as tags) or a sequence of tag strings.
+            node_tags: Tags associated with the node, either as a mapping (keys
+                used as tags) or a sequence of tag strings.
 
         Returns:
-            True if the tool is allowed, False if it is denied, not in the allow
-            list, or missing one or more required tags.
+            True if the tool is allowed, False if it is denied, not in the
+            allow list, or missing one or more required tags.
         """
         tags = set(node_tags)
 
         if node_name in self.denied_tools:
             return False
 
-        if self.allowed_tools is not None and node_name not in self.allowed_tools:
+        if (
+            self.allowed_tools is not None
+            and node_name not in self.allowed_tools
+        ):
             return False
 
-        if self.require_tags and not self.require_tags.issubset(tags):
-            return False
-
-        return True
+        return not (self.require_tags and not self.require_tags.issubset(tags))
 
 
 class ToolHintsConfig(BaseModel):
     """Configuration for surfacing tool-search hints in the planner prompt."""
 
-    enabled: bool = Field(default=False, description="Whether to include tool-search hints in the prompt.")
-    top_k: int = Field(default=5, ge=1, le=20, description="Maximum number of hinted tools to include.")
+    enabled: bool = Field(
+        default=False,
+        description="Whether to include tool-search hints in the prompt.",
+    )
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum number of hinted tools to include.",
+    )
     include_always_loaded: bool = Field(
         default=False,
-        description="Whether always-loaded tools are also included among the hints.",
+        description=(
+            "Whether always-loaded tools are also included among the hints."
+        ),
     )
     search_type: Literal["fts", "regex", "exact"] = Field(
         default="fts",
-        description="Search strategy used to generate hints: full-text, regex, or exact match.",
+        description=(
+            "Search strategy used to generate hints: full-text, regex, or "
+            "exact match."
+        ),
     )
 
 
@@ -525,9 +666,17 @@ class ToolGroupConfig(BaseModel):
     """Definition of a named tool group used to organize the tool directory."""
 
     name: str = Field(description="Unique identifier for the group.")
-    title: str | None = Field(default=None, description="Human-readable title shown in the directory.")
-    trigger: str | None = Field(default=None, description="Description of when to use tools in this group.")
-    task_type: Literal["browser", "api", "code", "domain", "unknown"] | None = Field(
+    title: str | None = Field(
+        default=None,
+        description="Human-readable title shown in the directory.",
+    )
+    trigger: str | None = Field(
+        default=None,
+        description="Description of when to use tools in this group.",
+    )
+    task_type: (
+        Literal["browser", "api", "code", "domain", "unknown"] | None
+    ) = Field(
         default=None,
         description="Category of task this group's tools address.",
     )
@@ -542,7 +691,10 @@ class ToolGroupConfig(BaseModel):
     )
     match_name_patterns: list[str] = Field(
         default_factory=list,
-        description="Glob/regex-like name patterns used to match tools into this group.",
+        description=(
+            "Glob/regex-like name patterns used to match tools into this "
+            "group."
+        ),
     )
     tool_names: list[str] = Field(
         default_factory=list,
@@ -551,12 +703,23 @@ class ToolGroupConfig(BaseModel):
 
 
 class ToolDirectoryConfig(BaseModel):
-    """Configuration for the tool directory summary shown to the planner LLM."""
+    """Configuration of the tool directory summary shown to the LLM."""
 
-    enabled: bool = Field(default=False, description="Whether to include the tool directory in the prompt.")
-    max_groups: int = Field(default=20, ge=1, le=100, description="Maximum number of groups to list.")
+    enabled: bool = Field(
+        default=False,
+        description="Whether to include the tool directory in the prompt.",
+    )
+    max_groups: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Maximum number of groups to list.",
+    )
     max_tools_per_group: int = Field(
-        default=6, ge=0, le=50, description="Maximum number of tools listed per group."
+        default=6,
+        ge=0,
+        le=50,
+        description="Maximum number of tools listed per group.",
     )
     include_tool_counts: bool = Field(
         default=True,
@@ -564,7 +727,10 @@ class ToolDirectoryConfig(BaseModel):
     )
     include_default_groups: bool = Field(
         default=True,
-        description="Whether to auto-generate default groups in addition to configured ones.",
+        description=(
+            "Whether to auto-generate default groups in addition to "
+            "configured ones."
+        ),
     )
     groups: list[ToolGroupConfig] = Field(
         default_factory=list,
@@ -575,19 +741,33 @@ class ToolDirectoryConfig(BaseModel):
 class ToolSearchConfig(BaseModel):
     """Configuration for on-demand tool search and lazy tool loading."""
 
-    enabled: bool = Field(default=False, description="Whether tool search/lazy loading is enabled.")
-    cache_dir: str = Field(default=".penguiflow", description="Directory used to persist the tool search index.")
+    enabled: bool = Field(
+        default=False,
+        description="Whether tool search/lazy loading is enabled.",
+    )
+    cache_dir: str = Field(
+        default=".penguiflow",
+        description="Directory used to persist the tool search index.",
+    )
     default_loading_mode: ToolLoadingMode = Field(
         default=ToolLoadingMode.ALWAYS,
-        description="Default loading mode applied to tools without an explicit mode.",
+        description=(
+            "Default loading mode applied to tools without an explicit mode."
+        ),
     )
     always_loaded_patterns: list[str] = Field(
         default=["tasks.*", "tool_search", "tool_get", "finish"],
-        description="Name patterns for tools that are always loaded regardless of loading mode.",
+        description=(
+            "Name patterns for tools that are always loaded regardless of "
+            "loading mode."
+        ),
     )
     activation_scope: Literal["run", "session"] = Field(
         default="run",
-        description="Scope at which a discovered tool remains activated: per-run or per-session.",
+        description=(
+            "Scope at which a discovered tool remains activated: per-run "
+            "or per-session."
+        ),
     )
     preferred_namespaces: list[str] = Field(
         default=[],
@@ -595,39 +775,64 @@ class ToolSearchConfig(BaseModel):
     )
     fts_fallback_to_regex: bool = Field(
         default=True,
-        description="Whether to fall back to regex search when full-text search finds no matches.",
+        description=(
+            "Whether to fall back to regex search when full-text search "
+            "finds no matches."
+        ),
     )
     enable_incremental_index: bool = Field(
         default=True,
-        description="Whether to update the search index incrementally instead of rebuilding fully.",
+        description=(
+            "Whether to update the search index incrementally instead of "
+            "rebuilding fully."
+        ),
     )
     rebuild_cache_on_init: bool = Field(
         default=False,
-        description="Whether to force a full rebuild of the cached index on planner initialization.",
+        description=(
+            "Whether to force a full rebuild of the cached index on "
+            "planner initialization."
+        ),
     )
-    max_search_results: int = Field(default=10, description="Maximum number of results returned per search.")
+    max_search_results: int = Field(
+        default=10,
+        description="Maximum number of results returned per search.",
+    )
 
     # Optional prompt aids (opt-in)
     hints: ToolHintsConfig = Field(
         default_factory=ToolHintsConfig,
-        description="Configuration for optional tool-search hints in the prompt.",
+        description=(
+            "Configuration for optional tool-search hints in the prompt."
+        ),
     )
     directory: ToolDirectoryConfig = Field(
         default_factory=ToolDirectoryConfig,
-        description="Configuration for the optional tool directory summary in the prompt.",
+        description=(
+            "Configuration for the optional tool directory summary in the "
+            "prompt."
+        ),
     )
 
 
 class ToolExamplesConfig(BaseModel):
-    """Configuration for including tool usage examples in the planner prompt."""
+    """Configuration for tool usage examples in the planner prompt."""
 
-    enabled: bool = Field(default=True, description="Whether to include tool usage examples in the prompt.")
+    enabled: bool = Field(
+        default=True,
+        description="Whether to include tool usage examples in the prompt.",
+    )
     max_examples_per_tool: int = Field(
-        default=3, ge=1, le=10, description="Maximum number of examples shown per tool."
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum number of examples shown per tool.",
     )
     include_descriptions: bool = Field(
         default=True,
-        description="Whether to include a short description alongside each example.",
+        description=(
+            "Whether to include a short description alongside each example."
+        ),
     )
 
 
@@ -649,7 +854,8 @@ class ToolVisibilityPolicy(Protocol):
 class BackgroundTasksConfig(BaseModel):
     """Configuration for background tasks/subagent orchestration.
 
-    This is the single source of truth for background task settings, consumed by:
+    This is the single source of truth for background task settings, consumed
+    by:
     - ReactPlanner (prompt guidance, tool validation)
     - SessionManager/TaskService (runtime enforcement)
 
@@ -669,16 +875,16 @@ class BackgroundTasksConfig(BaseModel):
 
     # Task execution mode
     default_mode: str = "subagent"
-    """Default execution mode: 'subagent' (full reasoning) or 'job' (single tool)."""
+    """Default mode: 'subagent' (full reasoning) or 'job' (single tool)."""
 
     default_merge_strategy: str = "HUMAN_GATED"
     """How task results merge into context: HUMAN_GATED, APPEND, or REPLACE."""
 
     context_depth: str = "full"
-    """Context snapshot depth for spawned tasks: 'full', 'summary', or 'minimal'."""
+    """Spawned tasks' context depth: 'full', 'summary', or 'minimal'."""
 
     propagate_on_cancel: str = "cascade"
-    """Cancel propagation: 'cascade' (cancel children), 'orphan' (leave running)."""
+    """Cancel propagation: 'cascade' (cancel children) or 'orphan'."""
 
     spawn_requires_confirmation: bool = False
     """Whether spawning a task requires explicit user confirmation."""
@@ -710,7 +916,7 @@ class BackgroundTasksConfig(BaseModel):
     """Timeout for proactive message generation."""
 
     proactive_report_max_hops: int = 2
-    """Maximum proactive recursion hops before disabling background spawning."""
+    """Proactive recursion hops allowed before background spawning stops."""
 
     proactive_report_fallback_notification: bool = True
     """Fall back to notification panel if generation fails."""
@@ -735,7 +941,7 @@ class BackgroundTasksConfig(BaseModel):
     """Auto-seal OPEN groups when foreground yields to user."""
 
     retain_turn_timeout_s: float = 60.0
-    """Max time foreground waits for retained tasks/groups before force-yield."""
+    """Max foreground wait for retained tasks/groups before force-yield."""
 
     background_continuation_max_hops: int = 2
     """Maximum background continuation cycles after retain-timeout."""
@@ -747,9 +953,16 @@ class BackgroundTasksConfig(BaseModel):
 class BackgroundTaskHandle(BaseModel):
     """Return type for tools that run asynchronously in the background."""
 
-    task_id: str = Field(description="Unique identifier of the spawned background task.")
-    status: str = Field(default="PENDING", description="Current status of the task (e.g. PENDING, RUNNING).")
-    message: str | None = Field(default=None, description="Optional human-readable status message.")
+    task_id: str = Field(
+        description="Unique identifier of the spawned background task."
+    )
+    status: str = Field(
+        default="PENDING",
+        description="Current status of the task (e.g. PENDING, RUNNING).",
+    )
+    message: str | None = Field(
+        default=None, description="Optional human-readable status message."
+    )
 
 
 class ReflectionCriteria(BaseModel):
@@ -782,28 +995,48 @@ class ReflectionCritique(BaseModel):
 class ReflectionConfig(BaseModel):
     """Configuration controlling the reflection loop behaviour."""
 
-    enabled: bool = Field(default=False, description="Whether the reflection/critique loop is enabled.")
+    enabled: bool = Field(
+        default=False,
+        description="Whether the reflection/critique loop is enabled.",
+    )
     criteria: ReflectionCriteria = Field(
         default_factory=ReflectionCriteria,
-        description="Quality criteria used by the reflection LLM to critique answers.",
+        description=(
+            "Quality criteria used by the reflection LLM to critique answers."
+        ),
     )
     quality_threshold: float = Field(
-        default=0.80, ge=0.0, le=1.0, description="Minimum critique score required to accept an answer."
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Minimum critique score required to accept an answer.",
     )
     max_revisions: int = Field(
-        default=2, ge=1, le=10, description="Maximum number of revision attempts before giving up."
+        default=2,
+        ge=1,
+        le=10,
+        description="Maximum number of revision attempts before giving up.",
     )
     use_separate_llm: bool = Field(
         default=False,
-        description="Whether to use a separate LLM client for reflection instead of the planner's main client.",
+        description=(
+            "Whether to use a separate LLM client for reflection instead "
+            "of the planner's main client."
+        ),
     )
 
 
 class ClarificationResponse(BaseModel):
     """Response when planner cannot satisfy query after reflection failures."""
 
-    text: str = Field(description="Honest explanation of what was tried and why it didn't work")
-    confidence: Literal["satisfied", "unsatisfied"] = Field(description="Whether the query was satisfactorily answered")
+    text: str = Field(
+        description=(
+            "Honest explanation of what was tried and why it didn't work"
+        )
+    )
+    confidence: Literal["satisfied", "unsatisfied"] = Field(
+        description="Whether the query was satisfactorily answered"
+    )
     attempted_approaches: list[str] = Field(
         default_factory=list,
         description="List of approaches/tools tried to answer the query",
@@ -814,11 +1047,15 @@ class ClarificationResponse(BaseModel):
     )
     suggestions: list[str] = Field(
         default_factory=list,
-        description="What would help answer this query (data sources, tools, context)",
+        description=(
+            "What would help answer this query (data sources, tools, context)"
+        ),
     )
     reflection_score: float | None = Field(
         default=None,
-        description="Final reflection quality score that triggered clarification",
+        description=(
+            "Final reflection quality score that triggered clarification"
+        ),
     )
     revision_attempts: int | None = Field(
         default=None,
@@ -829,8 +1066,8 @@ class ClarificationResponse(BaseModel):
 class ObservationGuardrailConfig(BaseModel):
     """Configuration for planner-level observation size limits.
 
-    This is the final safety net to prevent any tool output from
-    overflowing the LLM context window, regardless of source.
+    This is the final safety net to prevent any tool output from overflowing
+    the LLM context window, regardless of source.
     """
 
     # Character limits
@@ -852,7 +1089,9 @@ class ObservationGuardrailConfig(BaseModel):
     )
     preserve_structure: bool = Field(
         default=True,
-        description="Keep JSON structure when truncating, only truncate values",
+        description=(
+            "Keep JSON structure when truncating, only truncate values"
+        ),
     )
 
     # Artifact fallback
@@ -872,8 +1111,9 @@ class ObservationGuardrailConfig(BaseModel):
 
 __all__ = [
     "ClarificationResponse",
-    "JoinInjection",
+    "FinalPayload",
     "JSONLLMClient",
+    "JoinInjection",
     "ObservationGuardrailConfig",
     "ParallelCall",
     "ParallelJoin",
@@ -883,15 +1123,14 @@ __all__ = [
     "PlannerFinish",
     "PlannerPause",
     "ReflectionConfig",
-    "ReflectionCritique",
     "ReflectionCriteria",
-    "FinalPayload",
+    "ReflectionCritique",
     "SkillPackConfig",
     "SkillsConfig",
     "SkillsDirectoryConfig",
     "Source",
     "SuggestedAction",
-    "ToolPolicy",
     "ToolExamplesConfig",
+    "ToolPolicy",
     "ToolSearchConfig",
 ]

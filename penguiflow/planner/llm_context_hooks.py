@@ -6,19 +6,21 @@ may add ephemeral context such as externally retrieved user information.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from .memory import MemoryKey
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from .memory import MemoryKey
 
 
 @dataclass(frozen=True, slots=True)
 class LLMContextHookInput:
     """Inputs to LLM context hooks.
 
-    `llm_context` and `tool_context` are the *normalized* values that will be used
-    for the run. Hooks should treat them as read-only.
+    `llm_context` and `tool_context` are the *normalized* values that will be
+    used for the run. Hooks should treat them as read-only.
     """
 
     query: str
@@ -38,5 +40,8 @@ class LLMContextHook(Protocol):
       Default: False.
     """
 
-    async def before_run(self, inp: LLMContextHookInput) -> Mapping[str, Any] | None: ...
-
+    async def before_run(
+        self, inp: LLMContextHookInput
+    ) -> Mapping[str, Any] | None:
+        """Return keys to merge into the llm_context, or ``None``."""
+        ...

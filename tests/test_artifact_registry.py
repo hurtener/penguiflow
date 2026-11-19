@@ -1,3 +1,5 @@
+"""Tests for artifact registry."""
+
 from __future__ import annotations
 
 from penguiflow.artifacts import ArtifactRef
@@ -5,10 +7,14 @@ from penguiflow.planner.artifact_registry import ArtifactRegistry
 
 
 def test_registry_registers_tool_artifact_and_resolves() -> None:
+    """Registry registers tool artifact and resolves."""
     registry = ArtifactRegistry()
     payload = {
         "type": "echarts",
-        "config": {"title": {"text": "Revenue"}, "series": [{"data": [1, 2, 3]}]},
+        "config": {
+            "title": {"text": "Revenue"},
+            "series": [{"data": [1, 2, 3]}],
+        },
         "title": "Revenue Trend",
         "chart_type": "line",
     }
@@ -25,13 +31,16 @@ def test_registry_registers_tool_artifact_and_resolves() -> None:
     summaries = registry.list_records()
     assert summaries[0]["component"] == "echarts"
 
-    resolved = registry.resolve_ref(record.ref, trajectory=None, session_id=None)
+    resolved = registry.resolve_ref(
+        record.ref, trajectory=None, session_id=None
+    )
     assert resolved is not None
     assert resolved["component"] == "echarts"
     assert resolved["props"]["option"]["title"]["text"] == "Revenue"
 
 
 def test_registry_registers_binary_artifact_and_resolves() -> None:
+    """Registry registers binary artifact and resolves."""
     registry = ArtifactRegistry()
     ref = ArtifactRef(
         id="tableau_abc123",
@@ -40,11 +49,18 @@ def test_registry_registers_binary_artifact_and_resolves() -> None:
         filename="sales.png",
     )
 
-    record = registry.register_binary_artifact(ref, source_tool="tableau", step_index=2)
+    record = registry.register_binary_artifact(
+        ref, source_tool="tableau", step_index=2
+    )
     summaries = registry.list_records(kind="binary")
     assert summaries[0]["artifact_id"] == "tableau_abc123"
 
-    resolved = registry.resolve_ref(record.ref, trajectory=None, session_id="sess-1")
+    resolved = registry.resolve_ref(
+        record.ref, trajectory=None, session_id="sess-1"
+    )
     assert resolved is not None
     assert resolved["component"] == "image"
-    assert resolved["props"]["src"] == "/artifacts/tableau_abc123?session_id=sess-1"
+    assert (
+        resolved["props"]["src"]
+        == "/artifacts/tableau_abc123?session_id=sess-1"
+    )

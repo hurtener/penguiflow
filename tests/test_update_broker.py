@@ -1,3 +1,5 @@
+"""Tests for update broker."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +12,7 @@ from penguiflow.sessions.models import StateUpdate, UpdateType
 
 @pytest.mark.asyncio
 async def test_update_broker_drops_noncritical_when_full() -> None:
+    """Update broker drops noncritical when full."""
     broker = UpdateBroker(max_queue_size=1)
     queue, _unsubscribe = await broker.subscribe()
     update_a = StateUpdate(
@@ -32,6 +35,7 @@ async def test_update_broker_drops_noncritical_when_full() -> None:
 
 @pytest.mark.asyncio
 async def test_update_broker_keeps_critical_when_full() -> None:
+    """Update broker keeps critical when full."""
     broker = UpdateBroker(max_queue_size=1)
     queue, _unsubscribe = await broker.subscribe()
     update_a = StateUpdate(

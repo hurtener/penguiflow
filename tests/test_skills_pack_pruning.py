@@ -1,14 +1,24 @@
+"""Tests for skills pack pruning."""
+
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from penguiflow.skills.local_store import LocalSkillStore
-from penguiflow.skills.models import SkillDefinition, SkillPackConfig, SkillsConfig
+from penguiflow.skills.models import (
+    SkillDefinition,
+    SkillPackConfig,
+    SkillsConfig,
+)
 from penguiflow.skills.provider import LocalSkillProvider
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_prune_pack_skills_removes_missing_entries(tmp_path: Path) -> None:
+    """Prune pack skills removes missing entries."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(name="pack.core.one", trigger="One", steps=["s"]),
@@ -23,14 +33,19 @@ def test_prune_pack_skills_removes_missing_entries(tmp_path: Path) -> None:
         update_existing=True,
     )
 
-    removed = store.prune_pack_skills(pack_name="core", scope_mode="project", keep_names=["pack.core.one"])
+    removed = store.prune_pack_skills(
+        pack_name="core", scope_mode="project", keep_names=["pack.core.one"]
+    )
     assert removed == 1
-    remaining = store.get_by_name(["pack.core.one", "pack.core.two"], scope_clause="", scope_params=())
+    remaining = store.get_by_name(
+        ["pack.core.one", "pack.core.two"], scope_clause="", scope_params=()
+    )
     assert [r.name for r in remaining] == ["pack.core.one"]
 
 
 def test_prune_packs_not_in_config_removes_orphan_pack(tmp_path: Path) -> None:
     # Seed an "old" pack skill in the DB
+    """Prune packs not in config removes orphan pack."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(name="pack.old.skill", trigger="Old", steps=["s"]),
@@ -66,6 +81,7 @@ def test_prune_packs_not_in_config_removes_orphan_pack(tmp_path: Path) -> None:
 
 
 def test_prune_does_not_delete_learned_skills(tmp_path: Path) -> None:
+    """Prune does not delete learned skills."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(name="pack.core.keep", trigger="Keep", steps=["s"]),
@@ -76,11 +92,16 @@ def test_prune_does_not_delete_learned_skills(tmp_path: Path) -> None:
     # Flip to learned in-place (simulates future learned skills)
     with sqlite3.connect(tmp_path / "skills.db") as conn:
         conn.execute(
-            "UPDATE skills SET origin='learned', origin_ref='learned' WHERE name = ?",
+            "UPDATE skills SET origin='learned', origin_ref='learned' "
+            "WHERE name = ?",
             ("pack.core.keep",),
         )
 
-    removed = store.prune_pack_skills(pack_name="core", scope_mode="project", keep_names=[])
+    removed = store.prune_pack_skills(
+        pack_name="core", scope_mode="project", keep_names=[]
+    )
     assert removed == 0
-    remaining = store.get_by_name(["pack.core.keep"], scope_clause="", scope_params=())
+    remaining = store.get_by_name(
+        ["pack.core.keep"], scope_clause="", scope_params=()
+    )
     assert [r.origin for r in remaining] == ["learned"]

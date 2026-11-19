@@ -1,6 +1,11 @@
+"""Tests for A2A errors."""
+
+from __future__ import annotations
+
 import pytest
 
 from penguiflow_a2a.errors import (
+    A2AError,
     A2ARequestValidationError,
     ContentTypeNotSupportedError,
     ExtendedAgentCardNotConfiguredError,
@@ -67,7 +72,10 @@ from penguiflow_a2a.errors import (
         ),
     ],
 )
-def test_problem_details_base_fields(error, status, type_uri, title) -> None:
+def test_problem_details_base_fields(
+    error: A2AError, status: int, type_uri: str, title: str
+) -> None:
+    """Problem details base fields."""
     details = error.to_problem_details().model_dump(exclude_none=True)
     assert details["status"] == status
     assert details["type"] == type_uri
@@ -75,12 +83,14 @@ def test_problem_details_base_fields(error, status, type_uri, title) -> None:
 
 
 def test_problem_details_extension_support_required() -> None:
+    """Problem details extension support required."""
     error = ExtensionSupportRequiredError(["ext://a", "ext://b"])
     details = error.to_problem_details().model_dump(exclude_none=True)
     assert details["requiredExtensions"] == ["ext://a", "ext://b"]
 
 
 def test_problem_details_version_not_supported() -> None:
+    """Problem details version not supported."""
     error = VersionNotSupportedError("9.9", ("0.3",))
     details = error.to_problem_details().model_dump(exclude_none=True)
     assert details["supportedVersions"] == ["0.3"]

@@ -1,3 +1,5 @@
+"""Tests for planner action normalization."""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +16,7 @@ from penguiflow.planner.models import PlannerAction
 
 
 def test_normalize_action_legacy_tool_call_roundtrip() -> None:
+    """Normalize action legacy tool call roundtrip."""
     raw = json.dumps(
         {
             "thought": "search",
@@ -31,6 +34,7 @@ def test_normalize_action_legacy_tool_call_roundtrip() -> None:
 
 
 def test_normalize_action_unified_final_response_is_terminal() -> None:
+    """Normalize action unified final response is terminal."""
     raw = json.dumps({"next_node": "final_response", "args": {"answer": "hi"}})
     action = normalize_action(raw)
     assert action.next_node == "final_response"
@@ -39,8 +43,13 @@ def test_normalize_action_unified_final_response_is_terminal() -> None:
 
 
 def test_normalize_action_final_response_args_as_string() -> None:
-    """Test weak model pattern where args is a string instead of {"answer": ...}."""
-    raw = json.dumps({"next_node": "final_response", "args": "Here is my answer to your question"})
+    """Weak-model output with string args instead of an answer dict."""
+    raw = json.dumps(
+        {
+            "next_node": "final_response",
+            "args": "Here is my answer to your question",
+        }
+    )
     action = normalize_action(raw)
     assert action.next_node == "final_response"
     assert action.args["answer"] == "Here is my answer to your question"
@@ -48,8 +57,13 @@ def test_normalize_action_final_response_args_as_string() -> None:
 
 
 def test_normalize_action_final_response_args_as_list_of_strings() -> None:
-    """Test weak model pattern where args is a list of strings instead of {"answer": ...}."""
-    raw = json.dumps({"next_node": "final_response", "args": ["Here is my answer.", "Second line."]})
+    """Weak-model output with list args instead of an answer dict."""
+    raw = json.dumps(
+        {
+            "next_node": "final_response",
+            "args": ["Here is my answer.", "Second line."],
+        }
+    )
     action = normalize_action(raw)
     assert action.next_node == "final_response"
     assert action.args["answer"] == "Here is my answer.\nSecond line."
@@ -57,30 +71,48 @@ def test_normalize_action_final_response_args_as_list_of_strings() -> None:
 
 
 def test_normalize_action_unified_parallel_preserves_steps_and_join() -> None:
+    """Normalize action unified parallel preserves steps and join."""
     raw = json.dumps(
         {
             "next_node": "parallel",
             "args": {
-                "steps": [{"node": "tool_a", "args": {"x": 1}}, {"node": "tool_b", "args": {}}],
-                "join": {"node": "combine", "args": {}, "inject": {"results": "$all"}},
+                "steps": [
+                    {"node": "tool_a", "args": {"x": 1}},
+                    {"node": "tool_b", "args": {}},
+                ],
+                "join": {
+                    "node": "combine",
+                    "args": {},
+                    "inject": {"results": "$all"},
+                },
             },
         }
     )
     action = normalize_action(raw)
     assert action.next_node == "parallel"
-    assert [step["node"] for step in action.args["steps"]] == ["tool_a", "tool_b"]
+    assert [step["node"] for step in action.args["steps"]] == [
+        "tool_a",
+        "tool_b",
+    ]
     assert action.args["join"]["node"] == "combine"
     assert action.args["join"]["inject"]["results"] == "$all"
 
 
 def test_normalize_action_unified_plan_alias_is_accepted() -> None:
-    raw = json.dumps({"next_node": "plan", "args": {"steps": [{"node": "tool_a", "args": {}}]}})
+    """Normalize action unified plan alias is accepted."""
+    raw = json.dumps(
+        {
+            "next_node": "plan",
+            "args": {"steps": [{"node": "tool_a", "args": {}}]},
+        }
+    )
     action = normalize_action(raw)
     assert action.next_node == "parallel"
     assert action.args["steps"][0]["node"] == "tool_a"
 
 
 def test_normalize_action_task_subagent_maps_to_tasks_spawn() -> None:
+    """Normalize action task subagent maps to tasks spawn."""
     raw = json.dumps(
         {
             "next_node": "task.subagent",
@@ -102,6 +134,7 @@ def test_normalize_action_task_subagent_maps_to_tasks_spawn() -> None:
 
 
 def test_normalize_action_task_tool_maps_to_tasks_spawn_job() -> None:
+    """Normalize action task tool maps to tasks spawn job."""
     raw = json.dumps(
         {
             "next_node": "task.tool",
@@ -123,15 +156,20 @@ def test_normalize_action_task_tool_maps_to_tasks_spawn_job() -> None:
 
 
 def test_try_normalize_action_returns_none_on_garbage() -> None:
+    """Try normalize action returns none on garbage."""
     assert try_normalize_action("not json") is None
 
 
 def test_normalize_action_raises_on_garbage() -> None:
+    """Normalize action raises on garbage."""
     with pytest.raises(ValueError):
         normalize_action("not json")
 
 
-def test_normalize_action_parses_first_json_object_with_trailing_text() -> None:
+def test_normalize_action_parses_first_json_object_with_trailing_text() -> (
+    None
+):
+    """Normalize action parses first JSON object with trailing text."""
     raw = (
         '{"next_node":"data_source_info","args":{"query":"x"}}'
         "\n\nHere is my thinking (ignore this). {not json}\n"
@@ -142,6 +180,7 @@ def test_normalize_action_parses_first_json_object_with_trailing_text() -> None:
 
 
 def test_normalize_action_parses_from_json_code_fence() -> None:
+    """Normalize action parses from JSON code fence."""
     raw = (
         "Some preface.\n"
         "```json\n"
@@ -154,7 +193,10 @@ def test_normalize_action_parses_from_json_code_fence() -> None:
     assert action.args["query"] == "x"
 
 
-def test_normalize_action_prefers_action_dict_when_multiple_json_objects() -> None:
+def test_normalize_action_prefers_action_dict_when_multiple_json_objects() -> (
+    None
+):
+    """Normalize action prefers action dict when multiple JSON objects."""
     raw = (
         '{"next_node":"data_source_info","args":{"query":"x"}}\n'
         '{"answer":"this is not an action"}\n'
@@ -165,6 +207,7 @@ def test_normalize_action_prefers_action_dict_when_multiple_json_objects() -> No
 
 
 def test_normalize_action_handles_multiple_json_objects_in_fence() -> None:
+    """Normalize action handles multiple JSON objects in fence."""
     raw = (
         "```json\n"
         '{"next_node":"data_source_info","args":{"query":"x"}}\n'
@@ -177,6 +220,7 @@ def test_normalize_action_handles_multiple_json_objects_in_fence() -> None:
 
 
 def test_normalize_action_with_debug_reports_ignored_text() -> None:
+    """Normalize action with debug reports ignored text."""
     raw = (
         "thinking: blah blah\n"
         '{"next_node":"data_source_info","args":{"query":"x"}}\n'
@@ -187,15 +231,20 @@ def test_normalize_action_with_debug_reports_ignored_text() -> None:
     assert debug is not None
     assert debug["ignored_text_len"] is not None
     assert isinstance(debug["ignored_text_preview"], str)
-    assert "thinking" in debug["ignored_text_preview"] or "extra" in debug["ignored_text_preview"]
+    assert (
+        "thinking" in debug["ignored_text_preview"]
+        or "extra" in debug["ignored_text_preview"]
+    )
 
 
-# ─── RFC_UNIFIED_ACTION_SCHEMA: dump_action_legacy tests ──────────────────────
+# ─── RFC_UNIFIED_ACTION_SCHEMA: dump_action_legacy tests ─────────────────────
 
 
 def test_dump_action_legacy_tool_call() -> None:
     """dump_action_legacy should render a tool call with legacy fields."""
-    action = PlannerAction(next_node="search_web", args={"query": "penguins"}, thought="searching")
+    action = PlannerAction(
+        next_node="search_web", args={"query": "penguins"}, thought="searching"
+    )
     legacy = dump_action_legacy(action)
 
     assert legacy["thought"] == "searching"
@@ -207,13 +256,17 @@ def test_dump_action_legacy_tool_call() -> None:
 
 def test_dump_action_legacy_final_response() -> None:
     """dump_action_legacy should render final_response with next_node=None."""
-    action = PlannerAction(next_node="final_response", args={"answer": "42"}, thought="done")
+    action = PlannerAction(
+        next_node="final_response", args={"answer": "42"}, thought="done"
+    )
     legacy = dump_action_legacy(action)
 
     assert legacy["thought"] == "done"
     assert legacy["next_node"] is None  # Legacy uses null for terminal
     assert legacy["args"]["answer"] == "42"
-    assert legacy["args"]["raw_answer"] == "42"  # Legacy format adds raw_answer
+    assert (
+        legacy["args"]["raw_answer"] == "42"
+    )  # Legacy format adds raw_answer
     assert legacy["plan"] is None
     assert legacy["join"] is None
 
@@ -223,7 +276,10 @@ def test_dump_action_legacy_parallel() -> None:
     action = PlannerAction(
         next_node="parallel",
         args={
-            "steps": [{"node": "tool_a", "args": {"x": 1}}, {"node": "tool_b", "args": {}}],
+            "steps": [
+                {"node": "tool_a", "args": {"x": 1}},
+                {"node": "tool_b", "args": {}},
+            ],
             "join": {"node": "combine", "args": {}},
         },
         thought="running parallel",
@@ -232,14 +288,19 @@ def test_dump_action_legacy_parallel() -> None:
 
     assert legacy["thought"] == "running parallel"
     assert legacy["next_node"] is None  # Legacy uses null for parallel
-    assert legacy["plan"] == [{"node": "tool_a", "args": {"x": 1}}, {"node": "tool_b", "args": {}}]
+    assert legacy["plan"] == [
+        {"node": "tool_a", "args": {"x": 1}},
+        {"node": "tool_b", "args": {}},
+    ]
     assert legacy["join"] == {"node": "combine", "args": {}}
     assert legacy["args"] is None
 
 
 def test_dump_action_legacy_roundtrip_tool_call() -> None:
     """Tool call should survive dump -> normalize roundtrip."""
-    original = PlannerAction(next_node="search_web", args={"query": "test"}, thought="searching")
+    original = PlannerAction(
+        next_node="search_web", args={"query": "test"}, thought="searching"
+    )
     legacy = dump_action_legacy(original)
     restored = normalize_action(json.dumps(legacy))
 
@@ -249,7 +310,11 @@ def test_dump_action_legacy_roundtrip_tool_call() -> None:
 
 def test_dump_action_legacy_roundtrip_final_response() -> None:
     """Final response should survive dump -> normalize roundtrip."""
-    original = PlannerAction(next_node="final_response", args={"answer": "The answer"}, thought="done")
+    original = PlannerAction(
+        next_node="final_response",
+        args={"answer": "The answer"},
+        thought="done",
+    )
     legacy = dump_action_legacy(original)
     restored = normalize_action(json.dumps(legacy))
 
@@ -263,7 +328,11 @@ def test_dump_action_legacy_roundtrip_parallel() -> None:
         next_node="parallel",
         args={
             "steps": [{"node": "tool_a", "args": {"x": 1}}],
-            "join": {"node": "combine", "args": {}, "inject": {"results": "$results"}},
+            "join": {
+                "node": "combine",
+                "args": {},
+                "inject": {"results": "$results"},
+            },
         },
     )
     legacy = dump_action_legacy(original)
@@ -280,4 +349,6 @@ def test_dump_action_legacy_default_thought() -> None:
     action = PlannerAction(next_node="some_tool", args={})
     legacy = dump_action_legacy(action)
 
-    assert legacy["thought"] == "planning next step"  # Default from migration.py
+    assert (
+        legacy["thought"] == "planning next step"
+    )  # Default from migration.py

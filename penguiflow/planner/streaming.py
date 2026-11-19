@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from re import Pattern
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(slots=True)
@@ -34,6 +36,15 @@ class _ArtifactChunk:
     ts: float
 
 
+_SIMPLE_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    '"': '"',
+    "\\": "\\",
+}
+
+
 class _JsonStringBufferExtractor:
     """Shared JSON string extraction with escape handling."""
 
@@ -42,6 +53,24 @@ class _JsonStringBufferExtractor:
     def __init__(self) -> None:
         self._buffer = ""
         self._escape_next = False
+
+    def _unescape(self, i: int) -> tuple[str, int]:
+        """Decode the escape at ``self._buffer[i]``.
+
+        Returns:
+            The decoded text and how many extra characters it consumed.
+        """
+        char = self._buffer[i]
+        simple = _SIMPLE_ESCAPES.get(char)
+        if simple is not None:
+            return simple, 0
+        if char == "u" and i + 4 < len(self._buffer):
+            try:
+                decoded = chr(int(self._buffer[i + 1 : i + 5], 16))
+            except (ValueError, IndexError):
+                return char, 0
+            return decoded, 4
+        return char, 0
 
     def _extract_string_content(self, in_string_attr: str) -> list[str]:
         result: list[str] = []
@@ -52,26 +81,9 @@ class _JsonStringBufferExtractor:
 
             if self._escape_next:
                 self._escape_next = False
-                if char == "n":
-                    result.append("\n")
-                elif char == "t":
-                    result.append("\t")
-                elif char == "r":
-                    result.append("\r")
-                elif char == '"':
-                    result.append('"')
-                elif char == "\\":
-                    result.append("\\")
-                elif char == "u" and i + 4 < len(self._buffer):
-                    try:
-                        hex_val = self._buffer[i + 1 : i + 5]
-                        result.append(chr(int(hex_val, 16)))
-                        i += 4
-                    except (ValueError, IndexError):
-                        result.append(char)
-                else:
-                    result.append(char)
-                i += 1
+                decoded, consumed = self._unescape(i)
+                result.append(decoded)
+                i += consumed + 1
                 continue
 
             if char == "\\":
@@ -94,14 +106,15 @@ class _JsonStringBufferExtractor:
 
 
 class _StreamingArgsExtractor(_JsonStringBufferExtractor):
-    """Extracts 'args' field content from streaming JSON chunks for real-time display.
+    """Extracts 'args' field content from streaming JSON for live display.
 
-    This class buffers incoming JSON chunks and detects when the LLM is generating
-    a "finish" action (next_node is null). Once detected, it extracts the args field
-    content character-by-character for streaming to the UI.
+    This class buffers incoming JSON chunks and detects when the LLM is
+    generating a "finish" action (next_node is null). Once detected, it
+    extracts the args field content character-by-character for streaming to the
+    UI.
 
-    The args field is typically a dict like {"answer": "..."} or {"raw_answer": "..."},
-    so we need to look for the string value inside the object.
+    The args field is typically a dict like {"answer": "..."} or {"raw_answer":
+    "..."}, so we need to look for the string value inside the object.
 
     Uses incremental pattern matching to start streaming as early as possible:
     1. Detect "next_node": null
@@ -113,20 +126,24 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
     """
 
     # Pre-compiled regex patterns for streaming performance (RFC alignment)
-    _RE_NEXT_NODE: ClassVar[Pattern[str]] = re.compile(r'"next_node"\s*:\s*(null|"[^"]*")')
+    _RE_NEXT_NODE: ClassVar[Pattern[str]] = re.compile(
+        r'"next_node"\s*:\s*(null|"[^"]*")'
+    )
     _RE_ARGS_KEY: ClassVar[Pattern[str]] = re.compile(r'"args"\s*:')
-    _RE_ANSWER_KEY: ClassVar[Pattern[str]] = re.compile(r'"(?:answer|raw_answer)"\s*:')
+    _RE_ANSWER_KEY: ClassVar[Pattern[str]] = re.compile(
+        r'"(?:answer|raw_answer)"\s*:'
+    )
 
     __slots__ = (
-        "_is_finish_action",
-        "_next_node_seen",
-        "_next_node_is_non_null",
-        "_in_args_string",
         "_emitted_count",
-        "_found_args_key",
-        "_found_args_brace",
         "_found_answer_key",
         "_found_args_array",
+        "_found_args_brace",
+        "_found_args_key",
+        "_in_args_string",
+        "_is_finish_action",
+        "_next_node_is_non_null",
+        "_next_node_seen",
     )
 
     def __init__(self) -> None:
@@ -134,7 +151,9 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
         self._is_finish_action = False
         self._next_node_seen = False
         self._next_node_is_non_null = False
-        self._in_args_string = False  # Inside the actual string value we want to stream
+        self._in_args_string = (
+            False  # Inside the actual string value we want to stream
+        )
         self._emitted_count = 0
         # Incremental pattern matching state
         self._found_args_key = False  # Found "args":
@@ -161,65 +180,13 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
 
         # Detect next_node value (null or string) as early as possible.
         if not self._next_node_seen:
-            next_node_match = self._RE_NEXT_NODE.search(self._buffer)
-            if next_node_match:
-                self._next_node_seen = True
-                token = next_node_match.group(1)
-                if token == "null":
-                    self._is_finish_action = True
-                else:
-                    # Unified schema: next_node="final_response" streams args.answer
-                    if token.strip('"') == "final_response":
-                        self._is_finish_action = True
-                    else:
-                        self._next_node_is_non_null = True
+            self._detect_next_node()
 
-        # Incremental pattern matching for args content.
-        # This allows streaming to start as soon as we find the opening quote
-        # instead of waiting for the entire pattern.
+        # Incremental pattern matching for args content. This allows streaming
+        # to start as soon as we find the opening quote instead of waiting for
+        # the entire pattern.
         if not self._next_node_is_non_null and not self._in_args_string:
-            # Stage 1: Look for "args":
-            if not self._found_args_key:
-                args_key_match = self._RE_ARGS_KEY.search(self._buffer)
-                if args_key_match:
-                    self._found_args_key = True
-                    self._buffer = self._buffer[args_key_match.end() :]
-
-            # Stage 2: Look for { or [ after "args":
-            if self._found_args_key and not self._found_args_brace and not self._found_args_array:
-                stripped = self._buffer.lstrip()
-                if stripped.startswith("{"):
-                    self._found_args_brace = True
-                    self._buffer = stripped[1:]  # Remove the {
-                elif stripped.startswith("["):
-                    self._found_args_array = True
-                    self._buffer = stripped[1:]  # Remove the [
-
-            # Stage 3: Look for "answer": or "raw_answer": in object args.
-            if self._found_args_brace and not self._found_answer_key:
-                answer_key_match = self._RE_ANSWER_KEY.search(self._buffer)
-                if answer_key_match:
-                    self._found_answer_key = True
-                    self._buffer = self._buffer[answer_key_match.end() :]
-
-            # Stage 4: Look for opening quote of the value.
-            if self._found_answer_key:
-                stripped = self._buffer.lstrip()
-                if stripped.startswith('"'):
-                    self._in_args_string = True
-                    self._buffer = stripped[1:]  # Remove the opening quote
-            elif self._found_args_key and not self._found_args_brace and not self._found_args_array:
-                # Args can be a direct string: "args": "..."
-                stripped = self._buffer.lstrip()
-                if stripped.startswith('"'):
-                    self._in_args_string = True
-                    self._buffer = stripped[1:]
-            elif self._found_args_array and not self._in_args_string:
-                # Args can be an array of strings: "args": ["..."]
-                stripped = self._buffer.lstrip()
-                if stripped.startswith('"'):
-                    self._in_args_string = True
-                    self._buffer = stripped[1:]
+            self._find_args_string()
 
         # Extract string content character by character
         if self._in_args_string:
@@ -230,18 +197,75 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
 
         return emits
 
+    def _detect_next_node(self) -> None:
+        """Classify the action once its next_node value is in the buffer."""
+        next_node_match = self._RE_NEXT_NODE.search(self._buffer)
+        if not next_node_match:
+            return
+        self._next_node_seen = True
+        token = next_node_match.group(1)
+        # Unified schema: next_node="final_response" streams args.answer
+        if token == "null" or token.strip('"') == "final_response":
+            self._is_finish_action = True
+        else:
+            self._next_node_is_non_null = True
+
+    def _find_args_string(self) -> None:
+        """Advance the buffer to the start of the args string value."""
+        # Stage 1: Look for "args":
+        if not self._found_args_key:
+            args_key_match = self._RE_ARGS_KEY.search(self._buffer)
+            if args_key_match:
+                self._found_args_key = True
+                self._buffer = self._buffer[args_key_match.end() :]
+
+        # Stage 2: Look for { or [ after "args":
+        if (
+            self._found_args_key
+            and not self._found_args_brace
+            and not self._found_args_array
+        ):
+            stripped = self._buffer.lstrip()
+            if stripped.startswith("{"):
+                self._found_args_brace = True
+                self._buffer = stripped[1:]  # Remove the {
+            elif stripped.startswith("["):
+                self._found_args_array = True
+                self._buffer = stripped[1:]  # Remove the [
+
+        # Stage 3: Look for "answer": or "raw_answer": in object args.
+        if self._found_args_brace and not self._found_answer_key:
+            answer_key_match = self._RE_ANSWER_KEY.search(self._buffer)
+            if answer_key_match:
+                self._found_answer_key = True
+                self._buffer = self._buffer[answer_key_match.end() :]
+
+        # Stage 4: Look for the opening quote of the value: the answer of
+        # object args, a direct string ("args": "...") or the first string of
+        # an array ("args": ["..."]).
+        if (
+            self._found_answer_key
+            or self._found_args_array
+            or (self._found_args_key and not self._found_args_brace)
+        ):
+            stripped = self._buffer.lstrip()
+            if stripped.startswith('"'):
+                self._in_args_string = True
+                self._buffer = stripped[1:]  # Remove the opening quote
+
 
 class _StreamingThoughtExtractor(_JsonStringBufferExtractor):
     """Extracts the 'thought' field content from streaming JSON chunks.
 
-    The thought field is intended to be short, factual execution status. UI clients should
-    render it as progress (for example a collapsible "Thinking…" panel), not as a user-facing answer.
+    The thought field is intended to be short, factual execution status. UI
+    clients should render it as progress (for example a collapsible "Thinking…"
+    panel), not as a user-facing answer.
     """
 
     # Pre-compiled regex pattern for thought extraction (RFC alignment)
     _RE_THOUGHT_KEY: ClassVar[Pattern[str]] = re.compile(r'"thought"\s*:\s*"')
 
-    __slots__ = ("_in_thought_string", "_emitted_count", "_started")
+    __slots__ = ("_emitted_count", "_in_thought_string", "_started")
 
     def __init__(self) -> None:
         super().__init__()

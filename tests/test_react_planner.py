@@ -1,3 +1,5 @@
+"""Tests for ReAct planner."""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,18 +7,42 @@ import json
 import logging
 import time
 import warnings
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.llm.types import ImagePart, TextPart
 from penguiflow.node import Node
-from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner
-from penguiflow.planner.guardrails import GuardrailAction, GuardrailDecision, RetrySpec
-from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
+from penguiflow.planner import (
+    PlannerEvent,
+    PlannerFinish,
+    PlannerPause,
+    ReactPlanner,
+)
+from penguiflow.planner.guardrails import (
+    GuardrailAction,
+    GuardrailContext,
+    GuardrailDecision,
+    GuardrailEvent,
+    RetrySpec,
+)
+from penguiflow.planner.guardrails.async_eval import AsyncRuleEvaluator
+from penguiflow.planner.guardrails.gateway import (
+    GatewayConfig,
+    GuardrailGateway,
+)
+from penguiflow.planner.guardrails.registry import RuleRegistry
+from penguiflow.planner.llm_context_hooks import LLMContextHook
+from penguiflow.planner.memory import (
+    MemoryBudget,
+    MemoryKey,
+    ShortTermMemoryConfig,
+)
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.planner.react import (
     PlannerAction,
     ReflectionConfig,
@@ -30,9 +56,22 @@ from penguiflow.rich_output.runtime import (
     configure_rich_output,
     reset_runtime,
 )
+from penguiflow.state.protocol import SupportsPlannerState
+from penguiflow.steering.guard_inbox import InMemoryGuardInbox
+
+from .state_store_doubles import RecordingStateStore
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from penguiflow.planner.context import ToolContext
+
+    from .planner_options import PlannerOptions
 
 
-def _extract_read_only_conversation_memory(messages: list[Mapping[str, str]]) -> dict[str, Any] | None:
+def _extract_read_only_conversation_memory(
+    messages: list[Mapping[str, str]],
+) -> dict[str, Any] | None:
     for msg in messages:
         if msg.get("role") != "system":
             continue
@@ -41,13 +80,19 @@ def _extract_read_only_conversation_memory(messages: list[Mapping[str, str]]) ->
             continue
         if "</read_only_conversation_memory_json>" not in content:
             continue
-        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        start = content.index("<read_only_conversation_memory_json>") + len(
+            "<read_only_conversation_memory_json>"
+        )
         end = content.index("</read_only_conversation_memory_json>", start)
-        return json.loads(content[start:end])
+        parsed = json.loads(content[start:end])
+        assert isinstance(parsed, dict)
+        return parsed
     return None
 
 
-def _extract_read_only_external_memory(messages: list[Mapping[str, str]]) -> dict[str, Any] | None:
+def _extract_read_only_external_memory(
+    messages: list[Mapping[str, str]],
+) -> dict[str, Any] | None:
     for msg in messages:
         if msg.get("role") != "system":
             continue
@@ -56,48 +101,70 @@ def _extract_read_only_external_memory(messages: list[Mapping[str, str]]) -> dic
             continue
         if "</read_only_external_memory_json>" not in content:
             continue
-        start = content.index("<read_only_external_memory_json>") + len("<read_only_external_memory_json>")
+        start = content.index("<read_only_external_memory_json>") + len(
+            "<read_only_external_memory_json>"
+        )
         end = content.index("</read_only_external_memory_json>", start)
-        return json.loads(content[start:end])
+        parsed = json.loads(content[start:end])
+        assert isinstance(parsed, dict)
+        return parsed
     return None
 
 
 class Query(BaseModel):
+    """Query payload."""
+
     question: str
 
 
 class Intent(BaseModel):
+    """Intent payload."""
+
     intent: str
 
 
 class Documents(BaseModel):
+    """Documents payload."""
+
     documents: list[str]
 
 
 class SearchResult(BaseModel):
+    """Output of the search tool."""
+
     documents: list[str]
 
 
 class Answer(BaseModel):
+    """Answer payload."""
+
     answer: str
 
 
 class ShardRequest(BaseModel):
+    """Shard request payload."""
+
     topic: str
     shard: int
 
 
 class ShardPayload(BaseModel):
+    """Documents of one shard."""
+
     shard: int
     text: str
 
 
 class MergeArgs(BaseModel):
+    """Arguments of the merge tool."""
+
     expect: int
     results: list[ShardPayload]
 
 
 class FlexibleMergeArgs(BaseModel):
+    """Arguments of the flexible merge tool."""
+
     expected: int
     payloads: list[ShardPayload]
     branches: list[dict[str, Any]]
@@ -105,15 +172,21 @@ class FlexibleMergeArgs(BaseModel):
 
 
 class AuditArgs(BaseModel):
+    """Arguments of the audit tool."""
+
     branches: list[dict[str, Any]]
     failures: list[dict[str, Any]]
 
 
 class StrictArgs(BaseModel):
+    """Arguments of the strict tool."""
+
     query: str
 
 
 class StrictResult(BaseModel):
+    """Output of the strict tool."""
+
     result: str
 
 
@@ -126,27 +199,32 @@ class StrictResult(BaseModel):
         "placeholders": ["<auto>"],
     },
 )
-async def strict_tool(args: StrictArgs, ctx: object) -> StrictResult:
+async def strict_tool(args: StrictArgs, _ctx: object) -> StrictResult:
+    """Accept only valid arguments."""
     return StrictResult(result=args.query)
 
 
 @tool(desc="Detect intent", tags=["nlp"])
-async def triage(args: Query, ctx: object) -> Intent:
+async def triage(_args: Query, _ctx: object) -> Intent:
+    """Classify the question into an intent."""
     return Intent(intent="docs")
 
 
 @tool(desc="Search knowledge base", side_effects="read")
-async def retrieve(args: Intent, ctx: object) -> Documents:
+async def retrieve(args: Intent, _ctx: object) -> Documents:
+    """Return canned documents for the intent."""
     return Documents(documents=[f"Answering about {args.intent}"])
 
 
 @tool(desc="Search knowledge base (cost tracking)")
-async def search(args: Query, ctx: object) -> SearchResult:
+async def search(args: Query, _ctx: object) -> SearchResult:
+    """Return canned search results."""
     return SearchResult(documents=[f"Results for {args.question}"])
 
 
 @tool(desc="Compose final answer")
-async def respond(args: Answer, ctx: object) -> Answer:
+async def respond(args: Answer, _ctx: object) -> Answer:
+    """Compose the final answer."""
     return args
 
 
@@ -155,7 +233,8 @@ RESUME_CAPTURE: dict[str, Any] = {}
 
 
 @tool(desc="Echo answer while recording contexts")
-async def capture_answer(args: Answer, ctx: Any) -> Answer:
+async def capture_answer(args: Answer, ctx: ToolContext) -> Answer:
+    """Return the answer the planner passed in."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", DeprecationWarning)
         meta_view = dict(ctx.meta)
@@ -163,37 +242,49 @@ async def capture_answer(args: Answer, ctx: Any) -> Answer:
     CONTEXT_CAPTURE["tool_context"] = dict(ctx.tool_context)
     CONTEXT_CAPTURE["meta"] = meta_view
     CONTEXT_CAPTURE["meta_warnings"] = [
-        warning for warning in caught if issubclass(warning.category, DeprecationWarning)
+        warning
+        for warning in caught
+        if issubclass(warning.category, DeprecationWarning)
     ]
     return Answer(answer=args.answer)
 
 
 @tool(desc="Return invalid documents")
-async def broken(args: Intent, ctx: object) -> Documents:  # type: ignore[return-type]
-    return "boom"  # type: ignore[return-value]
+async def broken(_args: Intent, _ctx: object) -> object:
+    # Deliberately not a Documents instance: the planner must reject it.
+    """Return an invalid result."""
+    return "boom"
 
 
 @tool(desc="Fetch documents from primary shard", tags=["parallel"])
-async def fetch_primary(args: ShardRequest, ctx: Any) -> ShardPayload:
+async def fetch_primary(args: ShardRequest, _ctx: ToolContext) -> ShardPayload:
+    """Fetch documents from the primary shard."""
     await asyncio.sleep(0.05)
     return ShardPayload(shard=args.shard, text=f"{args.topic}-primary")
 
 
 @tool(desc="Fetch documents from secondary shard", tags=["parallel"])
-async def fetch_secondary(args: ShardRequest, ctx: Any) -> ShardPayload:
+async def fetch_secondary(
+    args: ShardRequest, _ctx: ToolContext
+) -> ShardPayload:
+    """Fetch documents from the secondary shard."""
     await asyncio.sleep(0.05)
     return ShardPayload(shard=args.shard, text=f"{args.topic}-secondary")
 
 
 @tool(desc="Merge shard payloads")
-async def merge_results(args: MergeArgs, ctx: Any) -> Documents:
+async def merge_results(args: MergeArgs, ctx: ToolContext) -> Documents:
+    """Merge the documents of all shards."""
     assert ctx.meta.get("parallel_success_count") == args.expect
     assert len(ctx.meta.get("parallel_results", [])) == args.expect
     return Documents(documents=[item.text for item in args.results])
 
 
 @tool(desc="Merge shard payloads with explicit inject mapping")
-async def merge_results_explicit(args: FlexibleMergeArgs, ctx: Any) -> Documents:
+async def merge_results_explicit(
+    args: FlexibleMergeArgs, _ctx: ToolContext
+) -> Documents:
+    """Merge shard results from explicit arguments."""
     assert args.success_total == args.expected == len(args.payloads)
     assert len(args.branches) == args.expected
     return Documents(documents=[item.text for item in args.payloads])
@@ -203,19 +294,22 @@ AUDIT_CALLS: list[dict[str, Any]] = []
 
 
 @tool(desc="Audit failed branches")
-async def audit_parallel(args: AuditArgs, ctx: Any) -> Documents:
+async def audit_parallel(args: AuditArgs, _ctx: ToolContext) -> Documents:
+    """Fail, so a parallel branch errors."""
     AUDIT_CALLS.append(args.model_dump())
     return Documents(documents=[f"{len(args.failures)} failures"])
 
 
 @tool(desc="Approval required before proceeding")
-async def approval_gate(args: Intent, ctx: Any) -> Intent:
+async def approval_gate(args: Intent, ctx: ToolContext) -> Intent:
+    """Pause until the user approves."""
     await ctx.pause("approval_required", {"intent": args.intent})
     return args
 
 
 @tool(desc="Pause and record tool context")
-async def pause_and_record(args: Intent, ctx: Any) -> Intent:
+async def pause_and_record(args: Intent, ctx: ToolContext) -> Intent:
+    """Pause and record that the pause happened."""
     RESUME_CAPTURE.setdefault("calls", []).append(
         {
             "llm_context": dict(ctx.llm_context),
@@ -227,61 +321,75 @@ async def pause_and_record(args: Intent, ctx: Any) -> Intent:
 
 
 @tool(desc="Respond while recording tool context")
-async def respond_with_context(args: Answer, ctx: Any) -> Answer:
+async def respond_with_context(args: Answer, ctx: ToolContext) -> Answer:
+    """Answer using the tool context."""
     RESUME_CAPTURE["resumed_tool_context"] = dict(ctx.tool_context)
     RESUME_CAPTURE["resumed_llm_context"] = dict(ctx.llm_context)
     return args
 
 
-class PlannerTimeout(RuntimeError):
+class PlannerTimeoutError(RuntimeError):
+    """Planner timeout error raised by a test double."""
+
     def __init__(self, message: str, suggestion: str) -> None:
+        """Store ``message`` and ``suggestion``."""
         super().__init__(message)
         self.suggestion = suggestion
 
 
 @tool(desc="Remote fetch that may timeout", side_effects="external")
-async def unstable(args: Intent, ctx: object) -> Documents:
-    raise PlannerTimeout("upstream timeout", "use_cache")
+async def unstable(_args: Intent, _ctx: object) -> Documents:
+    """Fail the first call, then answer."""
+    msg = "upstream timeout"
+    raise PlannerTimeoutError(msg, "use_cache")
 
 
 @tool(desc="Use cached retrieval", side_effects="read")
-async def cached(args: Intent, ctx: object) -> Documents:
+async def cached(args: Intent, _ctx: object) -> Documents:
+    """Return a cached answer."""
     return Documents(documents=[f"Cached docs for {args.intent}"])
 
 
-class StubClient:
-    def __init__(self, responses: list[Mapping[str, object]]) -> None:
+class StubClient(JSONLLMClient):
+    """LLM client that replays scripted responses."""
+
+    def __init__(self, responses: Sequence[object]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
         self.calls: list[list[Mapping[str, Any]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, Any]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
-            raise AssertionError("No stub responses left")
+            msg = "No stub responses left"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.0
 
 
-class SummarizerStub:
+class SummarizerStub(JSONLLMClient):
+    """LLM client that replays scripted responses."""
+
     def __init__(self) -> None:
+        """Start with no recorded state."""
         self.calls: list[list[Mapping[str, Any]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, Any]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del stream, on_stream_chunk
         self.calls.append(list(messages))
         return (
             json.dumps(
@@ -297,29 +405,39 @@ class SummarizerStub:
         )
 
 
-class CostStubClient:
+class CostStubClient(JSONLLMClient):
     """Stub client that also tracks synthetic cost values."""
 
-    def __init__(self, responses: list[tuple[Mapping[str, object], float]]) -> None:
-        self._responses = [(json.dumps(payload, ensure_ascii=False), float(cost)) for payload, cost in responses]
+    def __init__(
+        self, responses: list[tuple[Mapping[str, object], float]]
+    ) -> None:
+        """Replay ``responses`` in order."""
+        self._responses = [
+            (json.dumps(payload, ensure_ascii=False), float(cost))
+            for payload, cost in responses
+        ]
         self.calls: list[list[Mapping[str, Any]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, Any]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
-            raise AssertionError("No stub responses left")
+            msg = "No stub responses left"
+            raise AssertionError(msg)
         return self._responses.pop(0)
 
 
-def make_planner(client: StubClient, **kwargs: object) -> ReactPlanner:
+def make_planner(
+    client: JSONLLMClient, **kwargs: Unpack[PlannerOptions]
+) -> ReactPlanner:
+    """Build the default test planner over ``client``."""
     registry = ModelRegistry()
     registry.register("triage", Query, Intent)
     registry.register("retrieve", Intent, Documents)
@@ -338,11 +456,12 @@ def make_planner(client: StubClient, **kwargs: object) -> ReactPlanner:
 
 @pytest.mark.asyncio
 async def test_arg_validation_emits_events_for_placeholders() -> None:
+    """Arg validation emits events for placeholders."""
     registry = ModelRegistry()
     registry.register("strict_tool", StrictArgs, StrictResult)
     catalog = build_catalog([Node(strict_tool, name="strict_tool")], registry)
 
-    responses = [
+    responses: list[dict[str, object]] = [
         {
             "thought": "Call strict tool without required args",
             "next_node": "strict_tool",
@@ -361,13 +480,16 @@ async def test_arg_validation_emits_events_for_placeholders() -> None:
     )
     result = await planner.run("test strict validation")
 
+    assert isinstance(result, PlannerFinish)
     assert result.metadata["args_invalid_count"] == 1
+    assert isinstance(result, PlannerFinish)
     assert result.metadata["args_suspect_count"] == 1
 
     event_types = {evt.event_type for evt in events}
     assert "planner_args_invalid" in event_types
     assert "planner_args_suspect" in event_types
 
+    assert isinstance(result, PlannerFinish)
     trajectory_meta = result.metadata.get("trajectory_metadata", {})
     invalid_args = trajectory_meta.get("invalid_args")
     assert isinstance(invalid_args, list)
@@ -376,7 +498,7 @@ async def test_arg_validation_emits_events_for_placeholders() -> None:
 
 @pytest.mark.asyncio
 async def test_finish_metadata_includes_answer_action_seq() -> None:
-    """Ensure streaming UIs can correlate final 'done' with step_start action_seq."""
+    """The final 'done' chunk carries the step_start action_seq."""
     events: list[PlannerEvent] = []
     planner = make_planner(
         StubClient(
@@ -397,30 +519,36 @@ async def test_finish_metadata_includes_answer_action_seq() -> None:
     assert isinstance(result.metadata.get("answer_action_seq"), int)
     assert result.metadata["answer_action_seq"] == 1
 
-    step_start = next((evt for evt in events if evt.event_type == "step_start"), None)
+    step_start = next(
+        (evt for evt in events if evt.event_type == "step_start"), None
+    )
     assert step_start is not None
-    assert step_start.extra.get("action_seq") == result.metadata["answer_action_seq"]
+    assert (
+        step_start.extra.get("action_seq")
+        == result.metadata["answer_action_seq"]
+    )
 
 
 @pytest.mark.asyncio
 async def test_malformed_json_finish_still_sets_answer_action_seq() -> None:
-    """Regression: malformed JSON fallback answers must still reach streaming UIs."""
+    """Fallback answers for malformed JSON still reach the stream."""
 
-    class MalformedClient:
+    class MalformedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     events: list[PlannerEvent] = []
@@ -428,8 +556,10 @@ async def test_malformed_json_finish_still_sets_answer_action_seq() -> None:
         MalformedClient(
             [
                 '{"next_node":"triage","args":{"question":"hi"}',  # missing }
-                '{"next_node":"retrieve","args":{"intent":"docs"}',  # missing }
-                '{"next_node":"final_response","args":{"raw_answer":"Done"}',  # missing }}
+                # missing }
+                '{"next_node":"retrieve","args":{"intent":"docs"}',
+                # missing }}
+                '{"next_node":"final_response","args":{"raw_answer":"Done"}',
             ]
         ),
         repair_attempts=3,
@@ -442,30 +572,36 @@ async def test_malformed_json_finish_still_sets_answer_action_seq() -> None:
     assert result.payload["raw_answer"] == "Done"
     assert result.metadata["answer_action_seq"] == 1
 
-    step_start = next((evt for evt in events if evt.event_type == "step_start"), None)
+    step_start = next(
+        (evt for evt in events if evt.event_type == "step_start"), None
+    )
     assert step_start is not None
-    assert step_start.extra.get("action_seq") == result.metadata["answer_action_seq"]
+    assert (
+        step_start.extra.get("action_seq")
+        == result.metadata["answer_action_seq"]
+    )
 
 
 @pytest.mark.asyncio
 async def test_finish_repair_fills_missing_answer() -> None:
     """When model finishes without an answer, finish_repair should fill it."""
 
-    class FinishRepairClient:
+    class FinishRepairClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     events: list[PlannerEvent] = []
@@ -487,37 +623,44 @@ async def test_finish_repair_fills_missing_answer() -> None:
     assert result.payload["raw_answer"] == "Fixed"
     assert any(evt.event_type == "finish_repair_attempt" for evt in events)
     assert any(evt.event_type == "finish_repair_success" for evt in events)
-    assert any(evt.event_type == "llm_stream_chunk" and evt.extra.get("channel") == "answer" for evt in events)
+    assert any(
+        evt.event_type == "llm_stream_chunk"
+        and evt.extra.get("channel") == "answer"
+        for evt in events
+    )
 
 
 @pytest.mark.asyncio
-async def test_mixed_output_with_multiple_json_objects_executes_tool_call() -> None:
-    """Regression: if the model emits multiple JSON objects, execute the action one."""
+async def test_mixed_json_objects_output_executes_tool_call() -> None:
+    """With several JSON objects in the output, run the action one."""
 
-    class MixedClient:
+    class MixedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     events: list[PlannerEvent] = []
     planner = make_planner(
         MixedClient(
             [
-                # Tool call JSON, plus a second JSON object that previously broke naive extraction.
+                # Tool call JSON, plus a second JSON object that previously
+                # broke naive extraction.
                 '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
-                '{"answer":"```json\\n{\\n  \\"next_node\\": \\"retrieve\\"\\n}\\n```"}',
+                '{"answer":"```json\\n{\\n  \\"next_node\\": '
+                '\\"retrieve\\"\\n}\\n```"}',
                 # Normal finish.
                 '{"next_node":"final_response","args":{"answer":"ok"}}',
             ]
@@ -537,21 +680,22 @@ async def test_mixed_output_with_multiple_json_objects_executes_tool_call() -> N
 async def test_step_records_llm_parse_extras_in_trajectory_metadata() -> None:
     """Ensure parse extras are persisted for later inspection."""
 
-    class MixedClient:
+    class MixedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     planner = make_planner(
@@ -574,32 +718,34 @@ async def test_step_records_llm_parse_extras_in_trajectory_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_multi_action_fallback_uses_alternate_when_first_tool_invalid() -> None:
-    """If the model emits multiple actions, use the next valid tool candidate on failure."""
+async def test_multi_action_falls_back_to_alternate_tool() -> None:
+    """On failure, fall back to the next valid emitted tool action."""
 
-    class MixedClient:
+    class MixedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
             self.calls: int = 0
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             self.calls += 1
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     events: list[PlannerEvent] = []
     client = MixedClient(
         [
-            # First candidate is an unknown tool; second candidate is a real tool.
+            # First candidate is an unknown tool; second candidate is a real
+            # tool.
             '{"next_node":"not_a_real_tool","args":{"x":1}}\\n{"next_node":"triage","args":{"question":"hi"}}',
             '{"next_node":"final_response","args":{"answer":"ok"}}',
         ]
@@ -609,38 +755,44 @@ async def test_multi_action_fallback_uses_alternate_when_first_tool_invalid() ->
 
     assert result.reason == "answer_complete"
     assert result.payload["raw_answer"] == "ok"
-    assert any(evt.event_type == "multi_action_fallback_used" for evt in events)
-    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    assert any(
+        evt.event_type == "multi_action_fallback_used" for evt in events
+    )
+    tool_starts = [
+        evt for evt in events if evt.event_type == "tool_call_start"
+    ]
     assert tool_starts and tool_starts[0].extra.get("tool_name") == "triage"
 
 
 @pytest.mark.asyncio
-async def test_multi_action_sequential_executes_extra_readonly_tools_without_llm_call() -> None:
-    """When enabled, run extra tool calls emitted in one LLM response sequentially."""
+async def test_multi_action_runs_extra_read_only_tools() -> None:
+    """Extra tool calls from one response run in sequence if enabled."""
 
-    class MixedClient:
+    class MixedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
             self.calls: int = 0
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             self.calls += 1
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     events: list[PlannerEvent] = []
     client = MixedClient(
         [
-            # Two tool calls in one response (triage + retrieve). final_response is ignored and requested next.
+            # Two tool calls in one response (triage + retrieve).
+            # final_response is ignored and requested next.
             '{"next_node":"triage","args":{"question":"hi"}}\\n'
             '{"next_node":"retrieve","args":{"intent":"docs"}}\\n'
             '{"next_node":"final_response","args":{"answer":"premature"}}',
@@ -659,33 +811,39 @@ async def test_multi_action_sequential_executes_extra_readonly_tools_without_llm
 
     assert result.reason == "answer_complete"
     assert result.payload["raw_answer"] == "ok"
-    # Only two LLM calls: first mixed output, then final answer (retrieve was executed from queue).
+    # Only two LLM calls: first mixed output, then final answer (retrieve was
+    # executed from queue).
     assert client.calls == 2
-    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    tool_names = [
+        evt.extra.get("tool_name")
+        for evt in events
+        if evt.event_type == "tool_call_start"
+    ]
     assert tool_names == ["triage", "retrieve"]
 
 
 @pytest.mark.asyncio
-async def test_multi_action_sequential_does_not_enqueue_render_report_wrapper() -> None:
-    """Render wrappers should stay blocked when emitted as alternate actions."""
+async def test_multi_action_skips_render_report_wrapper() -> None:
+    """Render wrappers stay blocked as alternate actions."""
 
-    class MixedClient:
+    class MixedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
             self.calls: int = 0
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             self.calls += 1
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     reset_runtime()
@@ -694,7 +852,10 @@ async def test_multi_action_sequential_does_not_enqueue_render_report_wrapper() 
 
     registry = ModelRegistry()
     registry.register("retrieve", Intent, Documents)
-    nodes = list(attach_rich_output_nodes(registry, config=config)) + [Node(retrieve, name="retrieve")]
+    nodes = [
+        *list(attach_rich_output_nodes(registry, config=config)),
+        Node(retrieve, name="retrieve"),
+    ]
     catalog = build_catalog(nodes, registry)
 
     events: list[PlannerEvent] = []
@@ -717,32 +878,39 @@ async def test_multi_action_sequential_does_not_enqueue_render_report_wrapper() 
     result = await planner.run("show a report")
 
     assert result.reason == "answer_complete"
-    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    tool_names = [
+        evt.extra.get("tool_name")
+        for evt in events
+        if evt.event_type == "tool_call_start"
+    ]
     assert tool_names == ["retrieve"]
     assert not any(evt.event_type == "multi_action_enqueued" for evt in events)
 
 
 @pytest.mark.asyncio
-async def test_multi_action_sequential_can_enqueue_build_table_wrapper() -> None:
-    """Silent builder tools should be eligible for alternate-action sequencing."""
+async def test_multi_action_sequential_can_enqueue_build_table_wrapper() -> (
+    None
+):
+    """Silent builder tools can run as alternate actions."""
 
-    class MixedClient:
+    class MixedClient(JSONLLMClient):
         def __init__(self, raw_responses: list[str]) -> None:
             self._responses = list(raw_responses)
             self.calls: int = 0
 
-        async def complete(  # type: ignore[override]
+        @override
+        async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del messages, response_format, stream, on_stream_chunk
             self.calls += 1
             if not self._responses:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return self._responses.pop(0), 0.0
 
     reset_runtime()
@@ -751,7 +919,10 @@ async def test_multi_action_sequential_can_enqueue_build_table_wrapper() -> None
 
     registry = ModelRegistry()
     registry.register("retrieve", Intent, Documents)
-    nodes = list(attach_rich_output_nodes(registry, config=config)) + [Node(retrieve, name="retrieve")]
+    nodes = [
+        *list(attach_rich_output_nodes(registry, config=config)),
+        Node(retrieve, name="retrieve"),
+    ]
     catalog = build_catalog(nodes, registry)
 
     events: list[PlannerEvent] = []
@@ -774,7 +945,11 @@ async def test_multi_action_sequential_can_enqueue_build_table_wrapper() -> None
     result = await planner.run("prepare a reusable table")
 
     assert result.reason == "answer_complete"
-    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    tool_names = [
+        evt.extra.get("tool_name")
+        for evt in events
+        if evt.event_type == "tool_call_start"
+    ]
     assert tool_names == ["retrieve", "build_table"]
     assert any(evt.event_type == "multi_action_enqueued" for evt in events)
 
@@ -828,11 +1003,13 @@ async def test_consecutive_arg_failures_force_finish() -> None:
 
 @pytest.mark.asyncio
 async def test_consecutive_arg_failures_reset_on_success() -> None:
-    """Test that global consecutive failure counter resets after successful tool call.
+    """The consecutive failure counter resets after a success.
 
-    Note: Per-tool counters are tracked separately and only reset when THAT tool succeeds.
-    This test validates the global counter reset behavior using a threshold high enough
-    to not trigger the per-tool force_finish (strict_tool fails twice = 2, threshold = 3).
+    Note: Per-tool counters are tracked separately and only reset when THAT
+        tool succeeds.
+    This test validates the global counter reset behavior using a threshold
+    high enough to not trigger the per-tool force_finish (strict_tool fails
+    twice = 2, threshold = 3).
     """
     registry = ModelRegistry()
     registry.register("strict_tool", StrictArgs, StrictResult)
@@ -852,7 +1029,8 @@ async def test_consecutive_arg_failures_reset_on_success() -> None:
             "next_node": "strict_tool",
             "args": {"query": "<auto>"},
         },
-        # Successful call resets global counter (but per-tool counter for strict_tool stays)
+        # Successful call resets global counter (but per-tool counter for
+        # strict_tool stays)
         {
             "thought": "Call triage instead",
             "next_node": "triage",
@@ -876,27 +1054,29 @@ async def test_consecutive_arg_failures_reset_on_success() -> None:
         llm_client=StubClient(responses),
         catalog=catalog,
         max_iters=10,
-        # Threshold 3 so per-tool counter (2 for strict_tool) doesn't trigger force_finish
+        # Threshold 3 so per-tool counter (2 for strict_tool) doesn't trigger
+        # force_finish
         max_consecutive_arg_failures=3,
     )
     result = await planner.run("test reset behavior")
 
-    # Should complete normally - global counter was reset by successful triage call
+    # Should complete normally - global counter was reset by successful triage
+    # call
     assert result.reason == "answer_complete"
     # Final global consecutive count should be 1 (reset by triage success)
     assert result.metadata["consecutive_arg_failures"] == 1
-    # Note: per-tool counter (consecutive_arg_failures_strict_tool = 2) is tracked
-    # internally but not exposed in result metadata
+    # Note: per-tool counter (consecutive_arg_failures_strict_tool = 2) is
+    # tracked internally but not exposed in result metadata
 
 
 @pytest.mark.asyncio
 async def test_per_tool_arg_failures_force_finish() -> None:
-    """Test that per-tool failure counter triggers graceful failure even when other tools succeed.
+    """A per-tool failure limit ends the run even if others succeed.
 
     This prevents infinite loops where the model repeatedly fails on one tool
-    but the global counter keeps getting reset by successful calls to other tools.
-    When the threshold is reached, the model is asked to generate a user-friendly
-    response instead of returning a technical error.
+    but the global counter keeps getting reset by successful calls to other
+    tools. When the threshold is reached, the model is asked to generate a
+    user-friendly response instead of returning a technical error.
     """
     registry = ModelRegistry()
     registry.register("strict_tool", StrictArgs, StrictResult)
@@ -929,7 +1109,11 @@ async def test_per_tool_arg_failures_force_finish() -> None:
             "args": {"query": "<auto>"},
         },
         # Graceful failure response - model provides user-friendly message
-        {"raw_answer": "I apologize, but I'm having trouble completing that action. Let me help you in another way."},
+        {
+            "raw_answer": "I apologize, but I'm having "
+            "trouble completing that "
+            "action. Let me help you in another way."
+        },
     ]
 
     planner = ReactPlanner(
@@ -952,12 +1136,13 @@ async def test_per_tool_arg_failures_force_finish() -> None:
 
 @pytest.mark.asyncio
 async def test_autofill_rejection_force_finish_after_retry() -> None:
-    """Test that autofill + reject gives one retry chance, then forces finish."""
+    """Autofill then reject allows one retry, then forces a finish."""
     registry = ModelRegistry()
     registry.register("strict_tool", StrictArgs, StrictResult)
     catalog = build_catalog([Node(strict_tool, name="strict_tool")], registry)
 
-    # Model keeps forgetting 'query' arg - autofill injects default, validation rejects
+    # Model keeps forgetting 'query' arg - autofill injects default, validation
+    # rejects
     responses = [
         {
             "thought": "First call without query",
@@ -967,7 +1152,8 @@ async def test_autofill_rejection_force_finish_after_retry() -> None:
         {
             "thought": "Second call still without query",
             "next_node": "strict_tool",
-            "args": {},  # Still missing - second autofill rejection = force finish
+            # Still missing - second autofill rejection = force finish
+            "args": {},
         },
     ]
     events: list[PlannerEvent] = []
@@ -976,7 +1162,8 @@ async def test_autofill_rejection_force_finish_after_retry() -> None:
         llm_client=StubClient(responses),
         catalog=catalog,
         max_iters=10,
-        arg_fill_enabled=False,  # Disable arg-fill to test pure autofill rejection
+        # Disable arg-fill to test pure autofill rejection
+        arg_fill_enabled=False,
         event_callback=events.append,
     )
     result = await planner.run("test autofill rejection")
@@ -990,6 +1177,7 @@ async def test_autofill_rejection_force_finish_after_retry() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_runs_end_to_end() -> None:
+    """ReAct planner runs end to end."""
     client = StubClient(
         [
             {
@@ -1022,6 +1210,8 @@ async def test_react_planner_runs_end_to_end() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_collects_sources_into_payload() -> None:
+    """ReAct planner collects sources into payload."""
+
     class SourceArgs(BaseModel):
         query: str
 
@@ -1040,8 +1230,9 @@ async def test_react_planner_collects_sources_into_payload() -> None:
         results: list[SourceDoc]
 
     @tool(desc="Return documents with source markers")
-    async def retrieve_sources(args: SourceArgs, ctx: Any) -> SourceResult:
-        del ctx
+    async def retrieve_sources(
+        _args: SourceArgs, _ctx: ToolContext
+    ) -> SourceResult:
         return SourceResult(
             results=[
                 SourceDoc(
@@ -1097,6 +1288,7 @@ async def test_react_planner_collects_sources_into_payload() -> None:
 
 @pytest.mark.asyncio()
 async def test_tool_context_separation_and_meta_warning() -> None:
+    """Tool context separation and meta warning."""
     CONTEXT_CAPTURE.clear()
     client = StubClient(
         [
@@ -1105,7 +1297,11 @@ async def test_tool_context_separation_and_meta_warning() -> None:
                 "next_node": "capture",
                 "args": {"answer": "ok"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "ok"},
+            },
         ]
     )
     registry = ModelRegistry()
@@ -1118,7 +1314,9 @@ async def test_tool_context_separation_and_meta_warning() -> None:
     llm_ctx = {"visible": "memories"}
     tool_ctx = {"hidden": "secret", "sentinel": sentinel}
 
-    result = await planner.run("Check context separation", llm_context=llm_ctx, tool_context=tool_ctx)
+    result = await planner.run(
+        "Check context separation", llm_context=llm_ctx, tool_context=tool_ctx
+    )
 
     assert result.reason == "answer_complete"
     assert CONTEXT_CAPTURE["llm_context"] == llm_ctx
@@ -1126,18 +1324,32 @@ async def test_tool_context_separation_and_meta_warning() -> None:
     assert CONTEXT_CAPTURE["tool_context"]["sentinel"] is sentinel
     assert CONTEXT_CAPTURE["meta"]["visible"] == "memories"
     assert CONTEXT_CAPTURE["meta"]["hidden"] == "secret"
-    assert any(issubclass(warning.category, DeprecationWarning) for warning in CONTEXT_CAPTURE["meta_warnings"])
-    first_user_messages = [msg["content"] for msg in client.calls[0] if msg.get("role") == "user"]
+    assert any(
+        issubclass(warning.category, DeprecationWarning)
+        for warning in CONTEXT_CAPTURE["meta_warnings"]
+    )
+    first_user_messages = [
+        msg["content"] for msg in client.calls[0] if msg.get("role") == "user"
+    ]
     assert any("memories" in content for content in first_user_messages)
     assert all("secret" not in content for content in first_user_messages)
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_injects_short_term_memory_across_runs() -> None:
+    """ReAct planner injects short term memory across runs."""
     client = StubClient(
         [
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a1"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a2"},
+            },
         ]
     )
     planner = make_planner(
@@ -1166,18 +1378,29 @@ async def test_react_planner_injects_short_term_memory_across_runs() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_injects_external_memory_hook_as_system_message() -> None:
-    class Hook:
+async def test_planner_injects_external_memory_hook() -> None:
+    """React planner injects external memory hook as system message."""
+
+    class Hook(LLMContextHook):
         def __init__(self) -> None:
             self.calls = 0
 
+        @override
         async def before_run(self, inp: Any) -> Mapping[str, Any]:
             self.calls += 1
             assert inp.query == "q1"
             return {"external_memory": {"foo": "bar"}}
 
     hook = Hook()
-    client = StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}}])
+    client = StubClient(
+        [
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "ok"},
+            }
+        ]
+    )
     planner = make_planner(client, llm_context_hooks=[hook])
 
     await planner.run("q1")
@@ -1195,17 +1418,22 @@ async def test_react_planner_injects_external_memory_hook_as_system_message() ->
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_external_memory_hook_not_called_on_resume() -> None:
-    class Hook:
+async def test_react_planner_external_memory_hook_not_called_on_resume() -> (
+    None
+):
+    """ReAct planner external memory hook not called on resume."""
+
+    class Hook(LLMContextHook):
         def __init__(self) -> None:
             self.calls = 0
 
+        @override
         async def before_run(self, inp: Any) -> Mapping[str, Any]:
             self.calls += 1
             return {"external_memory": {"foo": "bar"}}
 
     @tool(desc="Pause tool")
-    async def pause_tool(args: Query, ctx: Any) -> Intent:
+    async def pause_tool(_args: Query, ctx: ToolContext) -> Intent:
         await ctx.pause("await_input", {"need": "user"})
         return Intent(intent="paused")
 
@@ -1213,14 +1441,27 @@ async def test_react_planner_external_memory_hook_not_called_on_resume() -> None
     registry = ModelRegistry()
     registry.register("pause_tool", Query, Intent)
     registry.register("respond", Answer, Answer)
-    catalog = build_catalog([Node(pause_tool, name="pause_tool"), Node(respond, name="respond")], registry)
+    catalog = build_catalog(
+        [Node(pause_tool, name="pause_tool"), Node(respond, name="respond")],
+        registry,
+    )
     client = StubClient(
         [
-            {"thought": "pause", "next_node": "pause_tool", "args": {"question": "x"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "pause",
+                "next_node": "pause_tool",
+                "args": {"question": "x"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
-    planner = ReactPlanner(llm_client=client, catalog=catalog, llm_context_hooks=[hook])
+    planner = ReactPlanner(
+        llm_client=client, catalog=catalog, llm_context_hooks=[hook]
+    )
 
     paused = await planner.run("q1")
     assert isinstance(paused, PlannerPause)
@@ -1228,7 +1469,8 @@ async def test_react_planner_external_memory_hook_not_called_on_resume() -> None
     assert resumed.reason == "answer_complete"
     assert hook.calls == 1
 
-    # The resume LLM call should still include the original external memory system message.
+    # The resume LLM call should still include the original external memory
+    # system message.
     resumed_messages = client.calls[1]
     external = _extract_read_only_external_memory(resumed_messages)
     assert external == {"foo": "bar"}
@@ -1236,37 +1478,55 @@ async def test_react_planner_external_memory_hook_not_called_on_resume() -> None
 
 @pytest.mark.asyncio()
 async def test_react_planner_rolling_summary_uses_llm_summarizer() -> None:
-    class Client:
+    """ReAct planner rolling summary uses LLM summarizer."""
+
+    class Client(JSONLLMClient):
         def __init__(self) -> None:
             self._actions = [
-                {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
-                {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+                {
+                    "thought": "finish",
+                    "next_node": None,
+                    "args": {"raw_answer": "a1"},
+                },
+                {
+                    "thought": "finish",
+                    "next_node": None,
+                    "args": {"raw_answer": "a2"},
+                },
             ]
             self.summary_calls = 0
             self.calls: list[tuple[str | None, list[Mapping[str, str]]]] = []
 
+        @override
         async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> tuple[str, float]:
-            del stream, on_stream_chunk
             schema_name = None
             if isinstance(response_format, Mapping):
                 json_schema = response_format.get("json_schema")
                 if isinstance(json_schema, Mapping):
                     schema_name = json_schema.get("name")
-            self.calls.append((schema_name if isinstance(schema_name, str) else None, list(messages)))
+            self.calls.append(
+                (
+                    schema_name if isinstance(schema_name, str) else None,
+                    list(messages),
+                )
+            )
 
             if schema_name == "short_term_memory_summary":
                 self.summary_calls += 1
-                return json.dumps({"summary": "<session_summary>ok</session_summary>"}), 0.0
+                return json.dumps(
+                    {"summary": "<session_summary>ok</session_summary>"}
+                ), 0.0
 
             if not self._actions:
-                raise AssertionError("No stub responses left")
+                msg = "No stub responses left"
+                raise AssertionError(msg)
             return json.dumps(self._actions.pop(0), ensure_ascii=False), 0.0
 
     client = Client()
@@ -1282,7 +1542,7 @@ async def test_react_planner_rolling_summary_uses_llm_summarizer() -> None:
     key = MemoryKey(tenant_id="t", user_id="u", session_id="s")
 
     await planner.run("q1", memory_key=key)
-    memory = planner._memory_by_key[key.composite()]
+    memory = planner.memory_by_key[key.composite()]
     await memory.flush()
     await planner.run("q2", memory_key=key)
 
@@ -1297,10 +1557,19 @@ async def test_react_planner_rolling_summary_uses_llm_summarizer() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_extracts_memory_key_from_tool_context() -> None:
+    """ReAct planner extracts memory key from tool context."""
     client = StubClient(
         [
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a1"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a2"},
+            },
         ]
     )
     planner = make_planner(
@@ -1325,11 +1594,18 @@ async def test_react_planner_extracts_memory_key_from_tool_context() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_persists_and_hydrates_short_term_memory() -> None:
-    class Store:
+    """ReAct planner persists and hydrates short term memory."""
+
+    class Store(RecordingStateStore):
+        """State store that also keeps memory state, in a dict."""
+
         def __init__(self) -> None:
+            super().__init__()
             self.data: dict[str, dict[str, Any]] = {}
 
-        async def save_memory_state(self, key: str, state: dict[str, Any]) -> None:
+        async def save_memory_state(
+            self, key: str, state: dict[str, Any]
+        ) -> None:
             self.data[key] = state
 
         async def load_memory_state(self, key: str) -> dict[str, Any] | None:
@@ -1338,7 +1614,15 @@ async def test_react_planner_persists_and_hydrates_short_term_memory() -> None:
     store = Store()
     key = MemoryKey(tenant_id="t", user_id="u", session_id="s")
 
-    client1 = StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}}])
+    client1 = StubClient(
+        [
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a1"},
+            }
+        ]
+    )
     planner1 = make_planner(
         client1,
         state_store=store,
@@ -1349,7 +1633,15 @@ async def test_react_planner_persists_and_hydrates_short_term_memory() -> None:
     )
     await planner1.run("q1", memory_key=key)
 
-    client2 = StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}}])
+    client2 = StubClient(
+        [
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a2"},
+            }
+        ]
+    )
     planner2 = make_planner(
         client2,
         state_store=store,
@@ -1370,10 +1662,19 @@ async def test_react_planner_persists_and_hydrates_short_term_memory() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_memory_fail_closed_without_key() -> None:
+    """ReAct planner memory fail closed without key."""
     client = StubClient(
         [
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a1"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a2"},
+            },
         ]
     )
     planner = make_planner(
@@ -1393,10 +1694,19 @@ async def test_react_planner_memory_fail_closed_without_key() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_session_isolation_by_memory_key() -> None:
+    """ReAct planner session isolation by memory key."""
     client = StubClient(
         [
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a1"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a2"},
+            },
         ]
     )
     planner = make_planner(
@@ -1420,6 +1730,7 @@ async def test_react_planner_session_isolation_by_memory_key() -> None:
 
 @pytest.mark.asyncio()
 async def test_llm_context_must_be_json_serialisable() -> None:
+    """LLM context must be JSON serialisable."""
     planner = make_planner(StubClient([]))
     with pytest.raises(TypeError):
         await planner.run("invalid", llm_context={"bad": object()})
@@ -1427,11 +1738,20 @@ async def test_llm_context_must_be_json_serialisable() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_recovers_from_invalid_node() -> None:
+    """ReAct planner recovers from invalid node."""
     client = StubClient(
         [
             {"thought": "invalid", "next_node": "missing", "args": {}},
-            {"thought": "triage", "next_node": "triage", "args": {"question": "What?"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "triage",
+                "next_node": "triage",
+                "args": {"question": "What?"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
     planner = make_planner(client)
@@ -1454,12 +1774,17 @@ async def test_react_planner_autofills_missing_args() -> None:
     """
     client = StubClient(
         [
-            # Model provides empty args - triggers autofill with <auto> placeholder
+            # Model provides empty args - triggers autofill with <auto>
+            # placeholder
             {"thought": "retrieve", "next_node": "retrieve", "args": {}},
             # Arg-fill response - model provides the missing "intent" value
             {"intent": "docs"},
             # Model finishes
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "ok"},
+            },
         ]
     )
     planner = make_planner(client)
@@ -1478,6 +1803,7 @@ async def test_react_planner_autofills_missing_args() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_reports_output_validation_error() -> None:
+    """ReAct planner reports output validation error."""
     client = StubClient(
         [
             {
@@ -1485,7 +1811,11 @@ async def test_react_planner_reports_output_validation_error() -> None:
                 "next_node": "broken",
                 "args": {"intent": "docs"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "fallback"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "fallback"},
+            },
         ]
     )
     registry = ModelRegistry()
@@ -1495,12 +1825,16 @@ async def test_react_planner_reports_output_validation_error() -> None:
 
     result = await planner.run("Test output validation path")
 
-    errors = [step["error"] for step in result.metadata["steps"] if step["error"]]
+    assert isinstance(result, PlannerFinish)
+    errors = [
+        step["error"] for step in result.metadata["steps"] if step["error"]
+    ]
     assert any("returned data" in err for err in errors)
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_replans_after_tool_failure() -> None:
+    """ReAct planner replans after tool failure."""
     client = StubClient(
         [
             {
@@ -1562,16 +1896,18 @@ async def test_react_planner_replans_after_tool_failure() -> None:
 
     failure_prompt = json.loads(client.calls[2][-1]["content"])
     assert failure_prompt["failure"]["suggestion"] == "use_cache"
-    assert failure_prompt["failure"]["error_code"] == "PlannerTimeout"
+    assert failure_prompt["failure"]["error_code"] == "PlannerTimeoutError"
 
 
 def test_react_planner_requires_catalog_or_nodes() -> None:
+    """ReAct planner requires catalog or nodes."""
     client = StubClient([])
     with pytest.raises(ValueError):
         ReactPlanner(llm_client=client)
 
 
 def test_react_planner_requires_llm_or_client() -> None:
+    """ReAct planner requires LLM or client."""
     registry = ModelRegistry()
     registry.register("triage", Query, Intent)
     nodes = [Node(triage, name="triage")]
@@ -1581,6 +1917,7 @@ def test_react_planner_requires_llm_or_client() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_iteration_limit_returns_no_path() -> None:
+    """ReAct planner iteration limit returns no path."""
     client = StubClient(
         [
             {
@@ -1604,6 +1941,7 @@ async def test_react_planner_iteration_limit_returns_no_path() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_enforces_hop_budget_limits() -> None:
+    """ReAct planner enforces hop budget limits."""
     client = StubClient(
         [
             {
@@ -1651,6 +1989,7 @@ async def test_react_planner_enforces_hop_budget_limits() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
+    """ReAct planner LiteLLM guard raises runtime error."""
     litellm = pytest.importorskip("litellm")
 
     registry = ModelRegistry()
@@ -1658,16 +1997,22 @@ async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
     nodes = [Node(triage, name="triage")]
     planner = ReactPlanner(llm="dummy", nodes=nodes, registry=registry)
     trajectory = Trajectory(query="hi")
-    # When litellm is installed, it raises BadRequestError for invalid model names
-    with pytest.raises((RuntimeError, litellm.exceptions.BadRequestError)) as exc:
+    # When litellm is installed, it raises BadRequestError for invalid model
+    # names
+    with pytest.raises(
+        (RuntimeError, litellm.exceptions.BadRequestError)
+    ) as exc:
         await planner.step(trajectory)
     # Accept either error message
-    assert "LiteLLM is not installed" in str(exc.value) or "LLM Provider NOT provided" in str(exc.value)
+    assert "LiteLLM is not installed" in str(
+        exc.value
+    ) or "LLM Provider NOT provided" in str(exc.value)
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_step_repairs_invalid_action() -> None:
     # Use input that cannot be salvaged - not valid JSON at all
+    """ReAct planner step repairs invalid action."""
     client = StubClient(
         [
             "not valid json {{{",
@@ -1684,28 +2029,40 @@ async def test_react_planner_step_repairs_invalid_action() -> None:
     action = await planner.step(trajectory)
     assert action.next_node == "triage"
     assert len(client.calls) == 2
-    repair_idx = next(i for i, msg in enumerate(client.calls[1]) if "invalid JSON" in (msg.get("content") or ""))
-    first_non_system_idx = next(i for i, msg in enumerate(client.calls[1]) if msg.get("role") != "system")
+    repair_idx = next(
+        i
+        for i, msg in enumerate(client.calls[1])
+        if "invalid JSON" in (msg.get("content") or "")
+    )
+    first_non_system_idx = next(
+        i
+        for i, msg in enumerate(client.calls[1])
+        if msg.get("role") != "system"
+    )
     repair_message = client.calls[1][repair_idx]["content"]
     assert repair_idx < first_non_system_idx
     assert "invalid JSON" in repair_message
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_guardrail_retry_corrective_message_is_system_prefixed() -> None:
-    class _RetryGateway:
-        class _Config:
-            mode = "enforce"
+async def test_guardrail_retry_message_is_system_prefixed() -> None:
+    """React planner guardrail retry corrective message is system prefixed."""
 
-        config = _Config()
+    class _RetryGateway(GuardrailGateway):
+        """Gateway whose every evaluation asks for one corrective retry."""
 
-        async def evaluate(self, context: object, event: object) -> GuardrailDecision | None:
-            del context, event
+        @override
+        async def evaluate(
+            self, ctx: GuardrailContext, event: GuardrailEvent
+        ) -> GuardrailDecision:
             return GuardrailDecision(
                 action=GuardrailAction.RETRY,
                 rule_id="retry-rule",
                 reason="retry",
-                retry=RetrySpec(max_attempts=2, corrective_message="Use strict JSON output."),
+                retry=RetrySpec(
+                    max_attempts=2,
+                    corrective_message="Use strict JSON output.",
+                ),
             )
 
     client = StubClient(
@@ -1718,8 +2075,13 @@ async def test_react_planner_guardrail_retry_corrective_message_is_system_prefix
         ]
     )
     planner = make_planner(client)
-    planner._guardrail_gateway = _RetryGateway()
-    planner._guardrail_context = object()
+    rules = RuleRegistry()
+    planner.guardrail_gateway = _RetryGateway(
+        registry=rules,
+        guard_inbox=InMemoryGuardInbox(AsyncRuleEvaluator(rules)),
+        config=GatewayConfig(mode="enforce"),
+    )
+    planner.guardrail_context = GuardrailContext(run_id="run-1")
     trajectory = Trajectory(query="recover")
 
     action = await planner.step(trajectory)
@@ -1727,14 +2089,19 @@ async def test_react_planner_guardrail_retry_corrective_message_is_system_prefix
 
     first_call = client.calls[0]
     corrective_idx = next(
-        i for i, msg in enumerate(first_call) if "Use strict JSON output." in (msg.get("content") or "")
+        i
+        for i, msg in enumerate(first_call)
+        if "Use strict JSON output." in (msg.get("content") or "")
     )
-    first_non_system_idx = next(i for i, msg in enumerate(first_call) if msg.get("role") != "system")
+    first_non_system_idx = next(
+        i for i, msg in enumerate(first_call) if msg.get("role") != "system"
+    )
     assert corrective_idx < first_non_system_idx
 
 
 @pytest.mark.asyncio()
-async def test_finish_invalid_numeric_answer_falls_back_to_default_message() -> None:
+async def test_finish_invalid_numeric_answer_falls_back() -> None:
+    """Finish invalid numeric answer falls back to default message."""
     client = StubClient(
         [
             {"thought": "finish", "next_node": None, "args": {"answer": -0.0}},
@@ -1749,7 +2116,10 @@ async def test_finish_invalid_numeric_answer_falls_back_to_default_message() -> 
     assert result.reason == "answer_complete"
     assert result.payload["raw_answer"] == "No answer produced."
     assert result.payload["raw_answer"] != "-0.0"
-    assert any(evt.event_type == "finish_invalid_answer_type_discarded" for evt in events)
+    assert any(
+        evt.event_type == "finish_invalid_answer_type_discarded"
+        for evt in events
+    )
 
 
 @pytest.mark.asyncio()
@@ -1772,6 +2142,7 @@ async def test_react_planner_step_salvages_empty_json() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_compacts_history_when_budget_exceeded() -> None:
+    """ReAct planner compacts history when budget exceeded."""
     long_answer = "PenguiFlow " * 30
     client = StubClient(
         [
@@ -1785,7 +2156,11 @@ async def test_react_planner_compacts_history_when_budget_exceeded() -> None:
                 "next_node": "respond",
                 "args": {"answer": long_answer},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
     planner = make_planner(client, token_budget=180)
@@ -1793,11 +2168,17 @@ async def test_react_planner_compacts_history_when_budget_exceeded() -> None:
     result = await planner.run("Explain budget handling")
 
     assert result.reason == "answer_complete"
-    assert any(msg["role"] == "system" and "Trajectory summary" in msg["content"] for msg in client.calls[1])
+    assert any(
+        msg["role"] == "system" and "Trajectory summary" in msg["content"]
+        for msg in client.calls[1]
+    )
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_input_parts_survive_messages_and_summary() -> None:
+async def test_react_planner_input_parts_survive_messages_and_summary() -> (
+    None
+):
+    """ReAct planner input parts survive messages and summary."""
     client = StubClient(
         [
             {
@@ -1805,7 +2186,11 @@ async def test_react_planner_input_parts_survive_messages_and_summary() -> None:
                 "next_node": "triage",
                 "args": {"question": "What is in the image?"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
     planner = make_planner(client, token_budget=120)
@@ -1813,7 +2198,9 @@ async def test_react_planner_input_parts_survive_messages_and_summary() -> None:
 
     result = await planner.run(
         "Describe the image",
-        input_parts=[ImagePart(data=image_bytes, media_type="image/png", detail="low")],
+        input_parts=[
+            ImagePart(data=image_bytes, media_type="image/png", detail="low")
+        ],
     )
 
     assert result.reason == "answer_complete"
@@ -1821,7 +2208,11 @@ async def test_react_planner_input_parts_survive_messages_and_summary() -> None:
     assert isinstance(first_user["content"], list)
     assert isinstance(first_user["content"][0], TextPart)
     assert isinstance(first_user["content"][1], ImagePart)
-    summary_message = next(msg for msg in client.calls[1] if "Trajectory summary" in str(msg["content"]))
+    summary_message = next(
+        msg
+        for msg in client.calls[1]
+        if "Trajectory summary" in str(msg["content"])
+    )
     summary_text = str(summary_message["content"])
     assert "image/png" in summary_text
     assert "bytes" in summary_text
@@ -1830,6 +2221,7 @@ async def test_react_planner_input_parts_survive_messages_and_summary() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_invokes_summarizer_client() -> None:
+    """ReAct planner invokes summarizer client."""
     client = StubClient(
         [
             {
@@ -1842,12 +2234,16 @@ async def test_react_planner_invokes_summarizer_client() -> None:
                 "next_node": "respond",
                 "args": {"answer": "value"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "ok"},
+            },
         ]
     )
     planner = make_planner(client, token_budget=60)
     summarizer = SummarizerStub()
-    planner._summarizer_client = summarizer  # type: ignore[attr-defined]
+    planner.summarizer_client = summarizer
 
     await planner.run("Trigger summariser")
 
@@ -1856,6 +2252,7 @@ async def test_react_planner_invokes_summarizer_client() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_pause_and_resume_flow() -> None:
+    """ReAct planner pause and resume flow."""
     registry = ModelRegistry()
     registry.register("triage", Query, Intent)
     registry.register("approval", Intent, Intent)
@@ -1894,7 +2291,9 @@ async def test_react_planner_pause_and_resume_flow() -> None:
             },
         ]
     )
-    planner = ReactPlanner(llm_client=client, catalog=catalog, pause_enabled=True)
+    planner = ReactPlanner(
+        llm_client=client, catalog=catalog, pause_enabled=True
+    )
 
     pause_result = await planner.run("Share metrics with approval")
     assert isinstance(pause_result, PlannerPause)
@@ -1907,11 +2306,16 @@ async def test_react_planner_pause_and_resume_flow() -> None:
     assert resume_result.reason == "answer_complete"
 
     post_pause_calls = client.calls[2:]
-    assert any("Resume input" in msg["content"] for call in post_pause_calls for msg in call)
+    assert any(
+        "Resume input" in msg["content"]
+        for call in post_pause_calls
+        for msg in call
+    )
 
 
 @pytest.mark.asyncio()
 async def test_resume_accepts_tool_context_override() -> None:
+    """Resume accepts tool context override."""
     RESUME_CAPTURE.clear()
     registry = ModelRegistry()
     registry.register("pause_and_record", Intent, Intent)
@@ -1935,12 +2339,22 @@ async def test_resume_accepts_tool_context_override() -> None:
                 "next_node": "contextual_respond",
                 "args": {"answer": "done"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
-    planner = ReactPlanner(llm_client=client, catalog=catalog, pause_enabled=True)
+    planner = ReactPlanner(
+        llm_client=client, catalog=catalog, pause_enabled=True
+    )
 
-    pause_result = await planner.run("Need approval", llm_context={"user": "demo"}, tool_context={"initial": "one"})
+    pause_result = await planner.run(
+        "Need approval",
+        llm_context={"user": "demo"},
+        tool_context={"initial": "one"},
+    )
     assert isinstance(pause_result, PlannerPause)
     assert RESUME_CAPTURE["calls"][0]["tool_context"]["initial"] == "one"
 
@@ -1956,6 +2370,7 @@ async def test_resume_accepts_tool_context_override() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_resume_preserves_hop_budget() -> None:
+    """ReAct planner resume preserves hop budget."""
     registry = ModelRegistry()
     registry.register("approval", Intent, Intent)
     registry.register("respond", Answer, Answer)
@@ -2004,9 +2419,9 @@ async def test_react_planner_resume_preserves_hop_budget() -> None:
     assert resume_result.reason == "answer_complete"
 
     steps = resume_result.metadata["steps"]
-    assert any(step.get("error") and "Hop budget" in step["error"] for step in steps), (
-        "expected hop budget violation after resume"
-    )
+    assert any(
+        step.get("error") and "Hop budget" in step["error"] for step in steps
+    ), "expected hop budget violation after resume"
 
     constraints = resume_result.metadata["constraints"]
     assert constraints["hops_used"] == 1
@@ -2015,6 +2430,7 @@ async def test_react_planner_resume_preserves_hop_budget() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_disallows_nodes_from_hints() -> None:
+    """ReAct planner disallows nodes from hints."""
     client = StubClient(
         [
             {
@@ -2034,16 +2450,22 @@ async def test_react_planner_disallows_nodes_from_hints() -> None:
             },
         ]
     )
-    planner = make_planner(client, planning_hints={"disallow_nodes": ["broken"]})
+    planner = make_planner(
+        client, planning_hints={"disallow_nodes": ["broken"]}
+    )
 
     result = await planner.run("test hints")
 
     assert result.reason == "answer_complete"
-    assert any(msg["role"] == "user" and "not permitted" in msg["content"] for msg in client.calls[1])
+    assert any(
+        msg["role"] == "user" and "not permitted" in msg["content"]
+        for msg in client.calls[1]
+    )
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_emits_ordering_hint_once() -> None:
+    """ReAct planner emits ordering hint once."""
     client = StubClient(
         [
             {
@@ -2076,11 +2498,15 @@ async def test_react_planner_emits_ordering_hint_once() -> None:
     result = await planner.run("ordering")
 
     assert result.reason == "answer_complete"
-    assert any(msg["role"] == "user" and "Ordering hint" in msg["content"] for msg in client.calls[1])
+    assert any(
+        msg["role"] == "user" and "Ordering hint" in msg["content"]
+        for msg in client.calls[1]
+    )
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_parallel_plan_executes_concurrently() -> None:
+    """ReAct planner parallel plan executes concurrently."""
     client = StubClient(
         [
             {
@@ -2136,16 +2562,21 @@ async def test_react_planner_parallel_plan_executes_concurrently() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_parallel_plan_emits_tool_call_events_for_branches_and_join() -> None:
-    """Parallel branches should emit tool_call_* events for live UI feedback."""
-
+async def test_parallel_plan_tool_call_events_with_join() -> None:
+    """Parallel branches emit tool_call_* events for live UIs."""
     client = StubClient(
         [
             {
                 "thought": "fan out",
                 "plan": [
-                    {"node": "fetch_primary", "args": {"topic": "topic", "shard": 0}},
-                    {"node": "fetch_secondary", "args": {"topic": "topic", "shard": 1}},
+                    {
+                        "node": "fetch_primary",
+                        "args": {"topic": "topic", "shard": 0},
+                    },
+                    {
+                        "node": "fetch_secondary",
+                        "args": {"topic": "topic", "shard": 1},
+                    },
                 ],
                 "join": {"node": "merge_results"},
             },
@@ -2178,22 +2609,37 @@ async def test_parallel_plan_emits_tool_call_events_for_branches_and_join() -> N
     result = await planner.run("parallel fan out")
     assert result.reason == "answer_complete"
 
-    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
-    tool_results = [evt for evt in events if evt.event_type == "tool_call_result"]
+    tool_starts = [
+        evt for evt in events if evt.event_type == "tool_call_start"
+    ]
+    tool_results = [
+        evt for evt in events if evt.event_type == "tool_call_result"
+    ]
     assert len(tool_starts) == 3
     assert len(tool_results) == 3
-    assert {evt.extra.get("tool_name") for evt in tool_starts} == {"fetch_primary", "fetch_secondary", "merge_results"}
+    assert {evt.extra.get("tool_name") for evt in tool_starts} == {
+        "fetch_primary",
+        "fetch_secondary",
+        "merge_results",
+    }
 
 
 @pytest.mark.asyncio()
-async def test_parallel_plan_without_join_emits_tool_call_events_for_branches() -> None:
+async def test_parallel_plan_tool_call_events_without_join() -> None:
+    """Parallel plan without join emits tool call events for branches."""
     client = StubClient(
         [
             {
                 "thought": "fan out",
                 "plan": [
-                    {"node": "fetch_primary", "args": {"topic": "topic", "shard": 0}},
-                    {"node": "fetch_secondary", "args": {"topic": "topic", "shard": 1}},
+                    {
+                        "node": "fetch_primary",
+                        "args": {"topic": "topic", "shard": 0},
+                    },
+                    {
+                        "node": "fetch_secondary",
+                        "args": {"topic": "topic", "shard": 1},
+                    },
                 ],
             },
             {
@@ -2223,18 +2669,24 @@ async def test_parallel_plan_without_join_emits_tool_call_events_for_branches() 
     result = await planner.run("parallel fan out")
     assert result.reason == "answer_complete"
 
-    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
-    tool_results = [evt for evt in events if evt.event_type == "tool_call_result"]
+    tool_starts = [
+        evt for evt in events if evt.event_type == "tool_call_start"
+    ]
+    tool_results = [
+        evt for evt in events if evt.event_type == "tool_call_result"
+    ]
     assert len(tool_starts) == 2
     assert len(tool_results) == 2
-    assert {evt.extra.get("tool_name") for evt in tool_starts} == {"fetch_primary", "fetch_secondary"}
+    assert {evt.extra.get("tool_name") for evt in tool_starts} == {
+        "fetch_primary",
+        "fetch_secondary",
+    }
     assert "join" not in result.metadata["steps"][0]["observation"]
 
 
 @pytest.mark.asyncio()
 async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
-    """Steering USER_MESSAGE should not be re-injected on every subsequent step."""
-
+    """A steering USER_MESSAGE is injected once, not every step."""
     from penguiflow.planner.react_runtime import run_loop
     from penguiflow.state.models import SteeringEvent, SteeringEventType
     from penguiflow.steering import SteeringInbox
@@ -2246,13 +2698,16 @@ async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
         echoed: str
 
     @tool(desc="Echo tool", side_effects="read")
-    async def echo(args: EchoArgs, ctx: object) -> EchoOut:
+    async def echo(args: EchoArgs, _ctx: object) -> EchoOut:
         return EchoOut(echoed=args.text)
 
     client = StubClient(
         [
             {"next_node": "echo", "args": {"text": "hi"}},
-            {"next_node": "final_response", "args": {"answer": "done", "raw_answer": "done"}},
+            {
+                "next_node": "final_response",
+                "args": {"answer": "done", "raw_answer": "done"},
+            },
         ]
     )
 
@@ -2264,7 +2719,7 @@ async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
     )
 
     inbox = SteeringInbox()
-    planner._steering = inbox
+    planner.steering = inbox
     await inbox.push(
         SteeringEvent(
             session_id="s",
@@ -2276,18 +2731,25 @@ async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
     )
 
     trajectory = Trajectory(query="test", llm_context={}, tool_context={})
-    result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=None)
+    result = await run_loop(
+        planner, trajectory, tracker=None, error_recovery_config=None
+    )
     assert result.reason == "answer_complete"
 
     assert len(client.calls) >= 2
     first_call = client.calls[0]
     second_call = client.calls[1]
-    assert any("Steering input:" in msg.get("content", "") for msg in first_call)
-    assert not any("Steering input:" in msg.get("content", "") for msg in second_call)
+    assert any(
+        "Steering input:" in msg.get("content", "") for msg in first_call
+    )
+    assert not any(
+        "Steering input:" in msg.get("content", "") for msg in second_call
+    )
 
 
 @pytest.mark.asyncio()
-async def test_rich_output_prompt_is_injected_when_render_component_is_present() -> None:
+async def test_rich_output_prompt_injected_with_renderer() -> None:
+    """Rich output prompt is injected when render component is present."""
     from penguiflow.rich_output.runtime import (
         RichOutputConfig,
         attach_rich_output_nodes,
@@ -2296,25 +2758,38 @@ async def test_rich_output_prompt_is_injected_when_render_component_is_present()
     )
 
     reset_runtime()
-    configure_rich_output(RichOutputConfig(enabled=True, include_prompt_catalog=True, allowlist=["markdown", "report"]))
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            include_prompt_catalog=True,
+            allowlist=["markdown", "report"],
+        )
+    )
 
     registry = ModelRegistry()
     nodes = list(
         attach_rich_output_nodes(
             registry,
-            config=RichOutputConfig(enabled=True, allowlist=["markdown", "report"]),
+            config=RichOutputConfig(
+                enabled=True, allowlist=["markdown", "report"]
+            ),
         )
     )
     catalog = build_catalog(nodes, registry)
 
-    client = StubClient([{"next_node": "final_response", "args": {"raw_answer": "ok"}}])
-    planner = ReactPlanner(llm="gpt-oss-120b", llm_client=client, catalog=catalog)
+    client = StubClient(
+        [{"next_node": "final_response", "args": {"raw_answer": "ok"}}]
+    )
+    planner = ReactPlanner(
+        llm="gpt-oss-120b", llm_client=client, catalog=catalog
+    )
 
-    assert "# Rich Output Components" in planner._system_prompt
+    assert "# Rich Output Components" in planner.system_prompt
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
+    """ReAct planner parallel join explicit inject mapping."""
     client = StubClient(
         [
             {
@@ -2376,6 +2851,7 @@ async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
 async def test_react_planner_parallel_join_magic_injection_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """ReAct planner parallel join magic injection warns."""
     client = StubClient(
         [
             {
@@ -2420,11 +2896,15 @@ async def test_react_planner_parallel_join_magic_injection_warns(
         result = await planner.run("parallel implicit inject")
 
     assert result.reason == "answer_complete"
-    assert any("Implicit join injection is deprecated" in record.message for record in caplog.records)
+    assert any(
+        "Implicit join injection is deprecated" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio()
 async def test_react_planner_parallel_plan_handles_branch_failure() -> None:
+    """ReAct planner parallel plan handles branch failure."""
     AUDIT_CALLS.clear()
     client = StubClient(
         [
@@ -2478,6 +2958,7 @@ async def test_react_planner_parallel_plan_handles_branch_failure() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_parallel_plan_rejects_invalid_node() -> None:
+    """ReAct planner parallel plan rejects invalid node."""
     client = StubClient(
         [
             {
@@ -2503,6 +2984,7 @@ async def test_react_planner_parallel_plan_rejects_invalid_node() -> None:
 
     result = await planner.run("invalid parallel plan")
 
+    assert isinstance(result, PlannerFinish)
     first_step = result.metadata["steps"][0]
     assert "Parallel plan invalid" in first_step["error"]
 
@@ -2536,14 +3018,14 @@ async def test_react_planner_deadline_enforcement() -> None:
     # Use custom time source to control deadline precisely
     start_time = time.monotonic()
 
+    calls = 0
+
     def controlled_time() -> float:
-        # After first call, advance past deadline
-        if hasattr(controlled_time, "calls"):
-            controlled_time.calls += 1
-            if controlled_time.calls > 5:  # After a few calls, trigger deadline
-                return start_time + 10.0  # Way past 0.01s deadline
-        else:
-            controlled_time.calls = 0
+        # After a few calls, jump way past the 0.01s deadline.
+        nonlocal calls
+        calls += 1
+        if calls > 6:
+            return start_time + 10.0
         return start_time
 
     planner = ReactPlanner(
@@ -2593,6 +3075,7 @@ async def test_react_planner_absolute_max_parallel_enforced() -> None:
     result = await planner.run("test absolute limit")
 
     # Should have error about parallel limit in the first step
+    assert isinstance(result, PlannerFinish)
     steps = result.metadata["steps"]
     assert len(steps) > 0
     first_step = steps[0]
@@ -2604,7 +3087,6 @@ async def test_react_planner_absolute_max_parallel_enforced() -> None:
 @pytest.mark.asyncio()
 async def test_react_planner_event_callback_receives_events() -> None:
     """Event callback should receive all planner events."""
-
     events: list[PlannerEvent] = []
 
     def callback(event: PlannerEvent) -> None:
@@ -2617,7 +3099,11 @@ async def test_react_planner_event_callback_receives_events() -> None:
                 "next_node": "triage",
                 "args": {"question": "Test"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
 
@@ -2657,7 +3143,11 @@ async def test_react_planner_emits_tool_call_events() -> None:
                 "next_node": "triage",
                 "args": {"question": "Test"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
 
@@ -2673,14 +3163,26 @@ async def test_react_planner_emits_tool_call_events() -> None:
     await planner.run("Test events")
 
     tool_events = [e for e in events if e.event_type.startswith("tool_call")]
-    assert {e.event_type for e in tool_events} == {"tool_call_start", "tool_call_end", "tool_call_result"}
+    assert {e.event_type for e in tool_events} == {
+        "tool_call_start",
+        "tool_call_end",
+        "tool_call_result",
+    }
 
-    start_event = next(e for e in tool_events if e.event_type == "tool_call_start")
+    start_event = next(
+        e for e in tool_events if e.event_type == "tool_call_start"
+    )
     end_event = next(e for e in tool_events if e.event_type == "tool_call_end")
-    result_event = next(e for e in tool_events if e.event_type == "tool_call_result")
+    result_event = next(
+        e for e in tool_events if e.event_type == "tool_call_result"
+    )
 
     assert start_event.extra["tool_name"] == "triage"
-    assert start_event.extra["tool_call_id"] == end_event.extra["tool_call_id"] == result_event.extra["tool_call_id"]
+    assert (
+        start_event.extra["tool_call_id"]
+        == end_event.extra["tool_call_id"]
+        == result_event.extra["tool_call_id"]
+    )
     assert "args_json" in start_event.extra
     assert "result_json" in result_event.extra
 
@@ -2694,9 +3196,11 @@ def test_react_planner_registers_resource_callbacks() -> None:
 
     class FakeToolNode:
         def __init__(self) -> None:
-            self.callback = None
+            self.callback: Callable[[str], None] | None = None
 
-        def set_resource_updated_callback(self, cb):  # type: ignore[no-untyped-def]
+        def set_resource_updated_callback(
+            self, cb: Callable[[str], None]
+        ) -> None:
             self.callback = cb
 
     fake_node = FakeToolNode()
@@ -2704,7 +3208,7 @@ def test_react_planner_registers_resource_callbacks() -> None:
     registry = ModelRegistry()
     registry.register("triage", Query, Intent)
     spec = build_catalog([Node(triage, name="triage")], registry)[0]
-    spec = spec.__class__(  # type: ignore[misc]
+    spec = spec.__class__(
         node=spec.node,
         name=spec.name,
         desc=spec.desc,
@@ -2720,7 +3224,15 @@ def test_react_planner_registers_resource_callbacks() -> None:
     )
 
     ReactPlanner(
-        llm_client=StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}}]),
+        llm_client=StubClient(
+            [
+                {
+                    "thought": "finish",
+                    "next_node": None,
+                    "args": {"raw_answer": "done"},
+                }
+            ]
+        ),
         catalog=[spec],
         event_callback=callback,
     )
@@ -2734,7 +3246,6 @@ def test_react_planner_registers_resource_callbacks() -> None:
 @pytest.mark.asyncio()
 async def test_react_planner_captures_stream_chunks() -> None:
     """Streaming chunks should be emitted as events and persisted."""
-
     chunk_events: list[dict[str, Any]] = []
 
     def event_callback(event: PlannerEvent) -> None:
@@ -2742,7 +3253,7 @@ async def test_react_planner_captures_stream_chunks() -> None:
             chunk_events.append(dict(event.extra))
 
     @tool(desc="Stream partial answer")
-    async def stream_tool(args: Query, ctx: Any) -> Answer:
+    async def stream_tool(_args: Query, ctx: ToolContext) -> Answer:
         for i in range(5):
             await ctx.emit_chunk("test_stream", i, f"token_{i} ", done=i == 4)
         return Answer(answer="Complete")
@@ -2767,7 +3278,9 @@ async def test_react_planner_captures_stream_chunks() -> None:
 
     planner = ReactPlanner(
         llm_client=client,
-        catalog=build_catalog([Node(stream_tool, name="stream_tool")], registry),
+        catalog=build_catalog(
+            [Node(stream_tool, name="stream_tool")], registry
+        ),
         event_callback=event_callback,
     )
 
@@ -2780,6 +3293,7 @@ async def test_react_planner_captures_stream_chunks() -> None:
         assert event_payload["text"] == f"token_{index} "
         assert event_payload["done"] == (index == 4)
 
+    assert isinstance(result, PlannerFinish)
     steps = result.metadata["steps"]
     assert len(steps) >= 1
     first_step_streams = steps[0]["streams"]["test_stream"]
@@ -2800,7 +3314,7 @@ async def test_react_planner_streams_artifacts() -> None:
             artifact_events.append(dict(event.extra))
 
     @tool(desc="Stream artifact data")
-    async def artifact_tool(args: Query, ctx: Any) -> Answer:
+    async def artifact_tool(args: Query, ctx: ToolContext) -> Answer:
         await ctx.emit_artifact("chart", {"step": 0})
         await ctx.emit_artifact(
             "chart",
@@ -2820,13 +3334,19 @@ async def test_react_planner_streams_artifacts() -> None:
                 "next_node": "artifact_tool",
                 "args": {"question": "test"},
             },
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
 
     planner = ReactPlanner(
         llm_client=client,
-        catalog=build_catalog([Node(artifact_tool, name="artifact_tool")], registry),
+        catalog=build_catalog(
+            [Node(artifact_tool, name="artifact_tool")], registry
+        ),
         event_callback=event_callback,
     )
 
@@ -2839,6 +3359,7 @@ async def test_react_planner_streams_artifacts() -> None:
     assert artifact_events[1]["done"] is True
     assert artifact_events[1]["artifact_type"] == "chart_config"
 
+    assert isinstance(result, PlannerFinish)
     step_streams = result.metadata["steps"][0]["streams"]["chart"]
     assert step_streams[0]["chunk"]["step"] == 0
     assert step_streams[1]["done"] is True
@@ -2871,7 +3392,9 @@ def test_trajectory_serialisation_preserves_stream_chunks() -> None:
     hydrated_streams = hydrated.steps[0].streams
     assert hydrated_streams is not None
     assert "test_stream" in hydrated_streams
-    hydrated_chunks = [dict(chunk) for chunk in hydrated_streams["test_stream"]]
+    hydrated_chunks = [
+        dict(chunk) for chunk in hydrated_streams["test_stream"]
+    ]
     assert hydrated_chunks == [
         {"seq": 0, "text": "token_0 ", "done": False},
         {"seq": 1, "text": "token_1 ", "done": True},
@@ -2883,7 +3406,11 @@ async def test_react_planner_improved_token_estimation() -> None:
     """Token estimation should account for message structure overhead."""
     client = StubClient(
         [
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
         ]
     )
 
@@ -2896,7 +3423,7 @@ async def test_react_planner_improved_token_estimation() -> None:
         {"role": "assistant", "content": "c" * 100},
     ]
 
-    tokens = planner._estimate_size(messages)
+    tokens = planner.estimate_size(messages)
 
     # Should be approximately (300 chars + overhead) / 3.5
     # Overhead = 3 * (role length + 20) ≈ 3 * 30 = 90
@@ -2905,12 +3432,26 @@ async def test_react_planner_improved_token_estimation() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_state_store_save_error_handled_gracefully() -> None:
+async def test_react_planner_state_store_save_error_handled_gracefully() -> (
+    None
+):
     """State store save errors should not crash pause operation."""
 
-    class FailingSaver:
-        def save_planner_state(self, token: str, payload: dict) -> None:
-            raise RuntimeError("Storage failed")
+    class FailingSaver(RecordingStateStore, SupportsPlannerState):
+        """State store whose planner-state saves always fail."""
+
+        @override
+        async def save_planner_state(
+            self, token: str, payload: dict[str, Any]
+        ) -> None:
+            msg = "Storage failed"
+            raise RuntimeError(msg)
+
+        @override
+        async def load_planner_state(
+            self, token: str
+        ) -> dict[str, Any] | None:
+            return None
 
     client = StubClient(
         [
@@ -2942,7 +3483,6 @@ async def test_react_planner_state_store_save_error_handled_gracefully() -> None
 @pytest.mark.asyncio()
 async def test_planner_tracks_llm_costs() -> None:
     """Planner should accumulate cost across main LLM calls."""
-
     client = CostStubClient(
         [
             (
@@ -2954,7 +3494,11 @@ async def test_planner_tracks_llm_costs() -> None:
                 0.0015,
             ),
             (
-                {"thought": "Done", "next_node": None, "args": {"raw_answer": "Result"}},
+                {
+                    "thought": "Done",
+                    "next_node": None,
+                    "args": {"raw_answer": "Result"},
+                },
                 0.0020,
             ),
         ]
@@ -2980,8 +3524,7 @@ async def test_planner_tracks_llm_costs() -> None:
 
 @pytest.mark.asyncio()
 async def test_cost_tracking_with_reflection_and_summarizer() -> None:
-    """Costs should be tracked per call type, including reflection and summariser."""
-
+    """Costs are tracked per call type, reflection included."""
     main_client = CostStubClient(
         [
             (
@@ -3065,13 +3608,16 @@ async def test_cost_tracking_with_reflection_and_summarizer() -> None:
         token_budget=1,
         reflection_llm="stub-reflection",
     )
-    planner._reflection_client = reflection_client
-    planner._summarizer_client = summarizer_client
+    planner.reflection_client = reflection_client
+    planner.summarizer_client = summarizer_client
 
     result = await planner.run("Test")
 
+    assert isinstance(result, PlannerFinish)
     cost_info = result.metadata["cost"]
-    expected_total = pytest.approx(0.001 + 0.002 + 0.002 + 0.0005 + 0.0005 + 0.0002)
+    expected_total = pytest.approx(
+        0.001 + 0.002 + 0.002 + 0.0005 + 0.0005 + 0.0002
+    )
     assert cost_info["total_cost_usd"] == expected_total
     assert cost_info["main_llm_calls"] == 3
     assert cost_info["reflection_llm_calls"] == 2
@@ -3082,17 +3628,23 @@ async def test_cost_tracking_with_reflection_and_summarizer() -> None:
 async def test_cost_tracking_graceful_when_unavailable() -> None:
     """Planner should gracefully handle clients without cost support."""
 
-    class NoCostClient:
+    class NoCostClient(JSONLLMClient):
+        @override
         async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
         ) -> str:
-            del messages, response_format, stream, on_stream_chunk
-            return json.dumps({"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}})
+            return json.dumps(
+                {
+                    "thought": "Done",
+                    "next_node": None,
+                    "args": {"raw_answer": "OK"},
+                }
+            )
 
     planner = ReactPlanner(
         llm_client=NoCostClient(),
@@ -3101,13 +3653,14 @@ async def test_cost_tracking_graceful_when_unavailable() -> None:
 
     result = await planner.run("Test")
 
+    assert isinstance(result, PlannerFinish)
     cost_info = result.metadata["cost"]
     assert cost_info["total_cost_usd"] == 0.0
     assert cost_info["main_llm_calls"] == 1
 
 
-def test_json_schema_sanitizer_removes_constraints():
-    """Test that the JSON schema sanitizer removes advanced constraints for compatibility."""
+def test_json_schema_sanitizer_removes_constraints() -> None:
+    """The schema sanitizer removes advanced constraints."""
     from penguiflow.planner.react import _sanitize_json_schema
 
     # Schema with unsupported constraints
@@ -3184,7 +3737,7 @@ def test_json_schema_sanitizer_removes_constraints():
     assert "exclusiveMaximum" not in nested_count
 
 
-def test_json_schema_sanitizer_preserves_structure():
+def test_json_schema_sanitizer_preserves_structure() -> None:
     """Test that sanitizer preserves essential schema structure."""
     from penguiflow.planner.react import _sanitize_json_schema
 
@@ -3207,4 +3760,6 @@ def test_json_schema_sanitizer_preserves_structure():
     sanitized = _sanitize_json_schema(schema)
 
     # All essential structure preserved
-    assert sanitized == schema  # Should be identical since no constraints to remove
+    assert (
+        sanitized == schema
+    )  # Should be identical since no constraints to remove

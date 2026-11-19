@@ -1,20 +1,16 @@
+"""Tests for ToolNode arg validation."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import mcp.types as mcp_types
 
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.config import ExternalToolConfig, TransportType
 from penguiflow.tools.node import ToolNode
 
 
-@dataclass
-class _FakeTool:
-    name: str
-    description: str
-    inputSchema: dict
-
-
 def test_toolnode_applies_arg_validation_defaults() -> None:
+    """ToolNode applies arg validation defaults."""
     registry = ModelRegistry()
     config = ExternalToolConfig(
         name="ext",
@@ -23,7 +19,7 @@ def test_toolnode_applies_arg_validation_defaults() -> None:
     )
     node = ToolNode(config=config, registry=registry)
     tools = [
-        _FakeTool(
+        mcp_types.Tool(
             name="search",
             description="search docs",
             inputSchema={
@@ -33,6 +29,6 @@ def test_toolnode_applies_arg_validation_defaults() -> None:
         )
     ]
 
-    specs = node._convert_mcp_tools(tools)
+    specs = node.convert_mcp_tools(tools)
     assert specs
     assert specs[0].extra.get("arg_validation") == config.arg_validation

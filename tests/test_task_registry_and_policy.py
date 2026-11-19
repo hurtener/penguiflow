@@ -1,18 +1,30 @@
+"""Tests for task registry and policy."""
+
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import pytest
 
-from penguiflow.sessions.models import TaskContextSnapshot, TaskStatus, TaskType
+from penguiflow.sessions.models import (
+    TaskContextSnapshot,
+    TaskStatus,
+    TaskType,
+)
 from penguiflow.sessions.policy import ControlPolicy
 from penguiflow.sessions.registry import TaskRegistry
 from penguiflow.steering import SteeringEvent, SteeringEventType
 
+if TYPE_CHECKING:
+    from penguiflow.state.models import TaskState
+
 
 @pytest.mark.asyncio
 async def test_task_registry_create_update_list_remove_seed() -> None:
+    """Task registry create update list remove seed."""
     persisted: list[str] = []
 
-    async def _persist(task):  # type: ignore[no-untyped-def]
+    async def _persist(task: TaskState) -> None:
         persisted.append(task.task_id)
 
     registry = TaskRegistry(persist_task=_persist)
@@ -32,13 +44,13 @@ async def test_task_registry_create_update_list_remove_seed() -> None:
     updated = await registry.update_status("t1", TaskStatus.RUNNING)
     assert updated is not None and updated.status == TaskStatus.RUNNING
     await registry.update_task("t1", result={"ok": True}, progress={"p": 1})
-    task = await registry.get_task("t1")
-    assert task is not None and task.result == {"ok": True}
-    assert task.progress == {"p": 1}
+    fetched = await registry.get_task("t1")
+    assert fetched is not None and fetched.result == {"ok": True}
+    assert fetched.progress == {"p": 1}
 
     await registry.update_priority("t1", 5)
-    task = await registry.get_task("t1")
-    assert task is not None and task.priority == 5
+    fetched = await registry.get_task("t1")
+    assert fetched is not None and fetched.priority == 5
 
     tasks = await registry.list_tasks("s1")
     assert [t.task_id for t in tasks] == ["t1"]
@@ -59,7 +71,9 @@ async def test_task_registry_create_update_list_remove_seed() -> None:
     await new_registry.seed_tasks([seeded])
     assert (await new_registry.get_task("t2")) is not None
 
-    parent_snapshot = TaskContextSnapshot(session_id="s1", task_id="parent", spawned_from_task_id="root")
+    parent_snapshot = TaskContextSnapshot(
+        session_id="s1", task_id="parent", spawned_from_task_id="root"
+    )
     await new_registry.create_task(
         session_id="s1",
         task_type=TaskType.BACKGROUND,
@@ -67,7 +81,9 @@ async def test_task_registry_create_update_list_remove_seed() -> None:
         context_snapshot=parent_snapshot,
         task_id="parent",
     )
-    child_snapshot = TaskContextSnapshot(session_id="s1", task_id="child", spawned_from_task_id="parent")
+    child_snapshot = TaskContextSnapshot(
+        session_id="s1", task_id="child", spawned_from_task_id="parent"
+    )
     await new_registry.create_task(
         session_id="s1",
         task_type=TaskType.BACKGROUND,
@@ -80,6 +96,7 @@ async def test_task_registry_create_update_list_remove_seed() -> None:
 
 
 def test_control_policy_requires_confirmation_for_destructive() -> None:
+    """Control policy requires confirmation for destructive."""
     policy = ControlPolicy()
     event = SteeringEvent(
         session_id="s1",
@@ -96,7 +113,9 @@ def test_control_policy_requires_confirmation_for_destructive() -> None:
     confirmed = event.model_copy(update={"payload": {"confirmed": True}})
     assert policy.requires_confirmation(confirmed) is False
 
-    non_destructive = event.model_copy(update={"event_type": SteeringEventType.PAUSE})
+    non_destructive = event.model_copy(
+        update={"event_type": SteeringEventType.PAUSE}
+    )
     assert policy.requires_confirmation(non_destructive) is False
 
     policy.require_confirmation = False

@@ -1,9 +1,12 @@
+"""Tests for rich output registry."""
+
 from __future__ import annotations
 
 from penguiflow.rich_output.registry import get_registry, load_registry
 
 
 def test_registry_loads_components() -> None:
+    """Registry loads components."""
     registry = get_registry()
     assert registry.version
     assert "echarts" in registry.components
@@ -12,6 +15,7 @@ def test_registry_loads_components() -> None:
 
 
 def test_registry_allowlist_filters() -> None:
+    """Registry allowlist filters."""
     registry = load_registry()
     allowed = registry.allowlist({"markdown"})
     assert list(allowed.keys()) == ["markdown"]

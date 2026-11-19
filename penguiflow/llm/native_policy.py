@@ -1,7 +1,7 @@
 """Native LLM request policy resolution.
 
-Centralizes provider/model-specific behavior for structured output and reasoning
-when using ``NativeLLMAdapter``.
+Centralizes provider/model-specific behavior for structured output and
+reasoning when using ``NativeLLMAdapter``.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ class NativeRequestPolicy:
 
 def next_mode(mode: StructuredMode) -> StructuredMode | None:
     """Downgrade chain for structured output compatibility."""
-
     if mode == "json_schema":
         return "json_object"
     if mode == "json_object":
@@ -39,14 +38,15 @@ def _normalize_openrouter_route(model: str) -> tuple[str, str]:
     return route, provider
 
 
-def _openrouter_preferred_mode(requested: StructuredMode, model: str) -> StructuredMode:
+def _openrouter_preferred_mode(
+    requested: StructuredMode, model: str
+) -> StructuredMode:
     """Conservative OpenRouter policy.
 
     - openai/google routes: keep requested mode (typically json_schema)
     - stepfun routes: force text mode
     - all other routes: force json_object
     """
-
     _, provider = _normalize_openrouter_route(model)
     if provider in {"openai", "google"}:
         return requested
@@ -79,7 +79,6 @@ def resolve_policy(
     ``structured_reasoning_fallback_off`` applies only to NIM structured calls
     and is enabled adaptively after an error.
     """
-
     mode = requested_mode
     if mode_override is not None:
         mode = mode_override
@@ -101,7 +100,11 @@ def resolve_policy(
     inject_reasoning_effort = use_native_reasoning
     emit_reasoning_callbacks = True
     is_structured = requested_mode in {"json_schema", "json_object"}
-    if provider_name == "nim" and is_structured and structured_reasoning_fallback_off:
+    if (
+        provider_name == "nim"
+        and is_structured
+        and structured_reasoning_fallback_off
+    ):
         inject_reasoning_effort = False
         emit_reasoning_callbacks = False
 
@@ -112,4 +115,9 @@ def resolve_policy(
     )
 
 
-__all__ = ["NativeRequestPolicy", "StructuredMode", "next_mode", "resolve_policy"]
+__all__ = [
+    "NativeRequestPolicy",
+    "StructuredMode",
+    "next_mode",
+    "resolve_policy",
+]

@@ -81,7 +81,7 @@ class TestSessionArtifactStore:
 
     @pytest.mark.asyncio
     async def test_exists(self) -> None:
-        """exists should return True for stored artifacts."""
+        """Exists should return True for stored artifacts."""
         store = SessionArtifactStore()
         scope = ArtifactScope(session_id="session1")
 
@@ -92,7 +92,7 @@ class TestSessionArtifactStore:
 
     @pytest.mark.asyncio
     async def test_delete(self) -> None:
-        """delete should remove the artifact."""
+        """Delete should remove the artifact."""
         store = SessionArtifactStore()
         scope = ArtifactScope(session_id="session1")
 
@@ -105,7 +105,7 @@ class TestSessionArtifactStore:
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent(self) -> None:
-        """delete should return False for nonexistent artifact."""
+        """Delete should return False for nonexistent artifact."""
         store = SessionArtifactStore()
 
         result = await store.delete("nonexistent")

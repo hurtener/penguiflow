@@ -15,14 +15,16 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from penguiflow.planner.compress import compress_trajectory
-from penguiflow.planner.llm import LLMErrorType, classify_llm_error
-from penguiflow.planner.models import PlannerAction, PlannerEvent
+from .compress import compress_trajectory
+from .llm import LLMErrorType, classify_llm_error
+from .models import PlannerAction, PlannerEvent
 
 if TYPE_CHECKING:
     from penguiflow.planner.trajectory import Trajectory
+
+    from .react import ReactPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,10 @@ def _extract_user_friendly_error(exc: Exception) -> str:
                 if isinstance(inner_msg, str) and inner_msg.startswith("{"):
                     try:
                         inner_data = json_module.loads(inner_msg)
-                        if isinstance(inner_data, dict) and "message" in inner_data:
+                        if (
+                            isinstance(inner_data, dict)
+                            and "message" in inner_data
+                        ):
                             return str(inner_data["message"])
                     except json_module.JSONDecodeError:
                         pass
@@ -71,33 +76,39 @@ def _extract_user_friendly_error(exc: Exception) -> str:
             pass
 
     # Try to extract nested JSON message from Databricks-style errors
-    # e.g., {"error_code":"BAD_REQUEST","message":"{\"message\":\"Input is too long.\"}"}
+    # e.g., {"error_code":"BAD_REQUEST","message":"{\"message\":\"Input is too
+    # long.\"}"}
     json_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', error_str)
     if json_match:
         inner_msg = json_match.group(1)
         # Unescape the string
         inner_msg = inner_msg.replace('\\"', '"').replace("\\\\", "\\")
         # Check for double-nested JSON message
-        inner_json = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', inner_msg)
+        inner_json = re.search(
+            r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', inner_msg
+        )
         if inner_json:
-            return inner_json.group(1).replace('\\"', '"').replace("\\\\", "\\")
+            return (
+                inner_json.group(1).replace('\\"', '"').replace("\\\\", "\\")
+            )
         return inner_msg
 
-    # Fall back to cleaned exception string
-    # Remove class name prefixes like "litellm.BadRequestError:"
+    # Fall back to the cleaned exception string, without a class name prefix
+    # such as litellm.BadRequestError.
     cleaned = re.sub(r"^\w+\.\w+:\s*", "", error_str)
     return cleaned[:500] if len(cleaned) > 500 else cleaned
 
 
 async def step_with_recovery(
-    planner: Any,
+    planner: ReactPlanner,
     trajectory: Trajectory,
     *,
     config: ErrorRecoveryConfig | None = None,
 ) -> PlannerAction:
     """Execute a planner step with automatic error recovery.
 
-    This wrapper catches LLM errors and applies appropriate recovery strategies:
+    This wrapper catches LLM errors and applies appropriate recovery
+    strategies:
     - For context length errors: compress trajectory and retry
     - For other bad request errors: return a graceful failure action
 
@@ -136,121 +147,156 @@ async def step_with_recovery(
                 compress_attempt=compress_attempts,
             )
 
-            if error_type == LLMErrorType.CONTEXT_LENGTH_EXCEEDED:
-                if compress_attempts >= config.max_compress_retries:
-                    logger.warning(
-                        "error_recovery_exhausted",
-                        extra={
-                            "error_type": error_type.value,
-                            "compress_attempts": compress_attempts,
-                        },
-                    )
-                    _emit_recovery_event(
-                        planner,
-                        trajectory,
-                        "error_recovery_failed",
-                        error_type=error_type.value,
-                        reason="max_compress_retries_exceeded",
-                    )
-                    # Fall through to graceful failure
-                    return _create_graceful_failure_action(exc, error_type)
-
-                # Compress trajectory and retry
-                compress_attempts += 1
-                logger.info(
-                    "error_recovery_compressing",
-                    extra={
-                        "attempt": compress_attempts,
-                        "trajectory_steps": len(trajectory.steps),
-                    },
+            if error_type != LLMErrorType.CONTEXT_LENGTH_EXCEEDED:
+                action = _recover_from_error(
+                    planner, trajectory, exc, error_type
                 )
+                if action is None:
+                    raise
+                return action
 
-                try:
-                    compressed_trajectory, result = await compress_trajectory(
-                        planner,
-                        trajectory,
-                        threshold=config.compression_threshold_chars,
-                    )
-                except Exception as compress_exc:
-                    logger.warning(
-                        "compression_failed",
-                        extra={"error": str(compress_exc)[:200]},
-                    )
-                    _emit_recovery_event(
-                        planner,
-                        trajectory,
-                        "error_recovery_failed",
-                        error_type=error_type.value,
-                        reason="compression_failed",
-                        compression_error=str(compress_exc)[:200],
-                    )
-                    return _create_graceful_failure_action(exc, error_type)
-
-                if result.compressed:
-                    _emit_recovery_event(
-                        planner,
-                        trajectory,
-                        "trajectory_compressed",
-                        attempt=compress_attempts,
-                        reason="context_length",
-                        steps_compressed=result.steps_compressed,
-                        original_size_chars=result.original_size_chars,
-                        compressed_size_chars=result.compressed_size_chars,
-                    )
-
-                    # Update trajectory steps in-place with compressed data
-                    for i, step in enumerate(compressed_trajectory.steps):
-                        if i < len(trajectory.steps):
-                            trajectory.steps[i].llm_observation = step.llm_observation
-
-                    # Retry with compressed trajectory
-                    continue
-
-                # Compression didn't help (nothing to compress)
+            if compress_attempts >= config.max_compress_retries:
                 logger.warning(
-                    "compression_ineffective",
-                    extra={"steps_compressed": 0},
-                )
-                return _create_graceful_failure_action(exc, error_type)
-
-            elif error_type == LLMErrorType.BAD_REQUEST_OTHER:
-                logger.info(
-                    "error_recovery_graceful_failure",
-                    extra={"error_type": error_type.value},
+                    "error_recovery_exhausted",
+                    extra={
+                        "error_type": error_type.value,
+                        "compress_attempts": compress_attempts,
+                    },
                 )
                 _emit_recovery_event(
                     planner,
                     trajectory,
-                    "error_recovery_success",
+                    "error_recovery_failed",
                     error_type=error_type.value,
-                    strategy="graceful_failure",
+                    reason="max_compress_retries_exceeded",
                 )
+                # Fall through to graceful failure
                 return _create_graceful_failure_action(exc, error_type)
 
-            elif error_type in (
-                LLMErrorType.RATE_LIMIT,
-                LLMErrorType.SERVICE_UNAVAILABLE,
-                LLMErrorType.TIMEOUT,
-            ):
-                # These are transient errors that should be handled by retry logic
-                # in the client. Re-raise so the client's backoff mechanisms can work.
-                # Timeout errors are retryable - the LLM client should retry with
-                # exponential backoff before giving up.
-                logger.debug(
-                    "error_recovery_passthrough",
-                    extra={"error_type": error_type.value},
-                )
-                raise
+            # Compress trajectory and retry
+            compress_attempts += 1
+            compressed = await _compress_for_retry(
+                planner,
+                trajectory,
+                config,
+                attempt=compress_attempts,
+                error_type=error_type,
+            )
+            if not compressed:
+                return _create_graceful_failure_action(exc, error_type)
 
-            else:  # UNKNOWN
-                logger.warning(
-                    "error_recovery_unknown_error",
-                    extra={
-                        "error_type": error_type.value,
-                        "exception_class": exc.__class__.__name__,
-                    },
-                )
-                raise
+
+def _recover_from_error(
+    planner: ReactPlanner,
+    trajectory: Trajectory,
+    exc: Exception,
+    error_type: LLMErrorType,
+) -> PlannerAction | None:
+    """Recover from a non-context-length error; ``None`` means re-raise."""
+    if error_type == LLMErrorType.BAD_REQUEST_OTHER:
+        logger.info(
+            "error_recovery_graceful_failure",
+            extra={"error_type": error_type.value},
+        )
+        _emit_recovery_event(
+            planner,
+            trajectory,
+            "error_recovery_success",
+            error_type=error_type.value,
+            strategy="graceful_failure",
+        )
+        return _create_graceful_failure_action(exc, error_type)
+
+    if error_type in (
+        LLMErrorType.RATE_LIMIT,
+        LLMErrorType.SERVICE_UNAVAILABLE,
+        LLMErrorType.TIMEOUT,
+    ):
+        # These are transient errors that should be handled by retry logic
+        # in the client. Re-raise so the client's backoff mechanisms can
+        # work. Timeout errors are retryable - the LLM client should retry
+        # with exponential backoff before giving up.
+        logger.debug(
+            "error_recovery_passthrough",
+            extra={"error_type": error_type.value},
+        )
+        return None
+
+    # UNKNOWN
+    logger.warning(
+        "error_recovery_unknown_error",
+        extra={
+            "error_type": error_type.value,
+            "exception_class": exc.__class__.__name__,
+        },
+    )
+    return None
+
+
+async def _compress_for_retry(
+    planner: ReactPlanner,
+    trajectory: Trajectory,
+    config: ErrorRecoveryConfig,
+    *,
+    attempt: int,
+    error_type: LLMErrorType,
+) -> bool:
+    """Compress the trajectory's observations in place before a retry.
+
+    Returns:
+        Whether anything was compressed, so the step is worth retrying.
+    """
+    logger.info(
+        "error_recovery_compressing",
+        extra={
+            "attempt": attempt,
+            "trajectory_steps": len(trajectory.steps),
+        },
+    )
+    try:
+        compressed_trajectory, result = await compress_trajectory(
+            planner,
+            trajectory,
+            threshold=config.compression_threshold_chars,
+        )
+    except Exception as compress_exc:
+        logger.warning(
+            "compression_failed",
+            extra={"error": str(compress_exc)[:200]},
+        )
+        _emit_recovery_event(
+            planner,
+            trajectory,
+            "error_recovery_failed",
+            error_type=error_type.value,
+            reason="compression_failed",
+            compression_error=str(compress_exc)[:200],
+        )
+        return False
+
+    if not result.compressed:
+        # Compression didn't help (nothing to compress)
+        logger.warning(
+            "compression_ineffective",
+            extra={"steps_compressed": 0},
+        )
+        return False
+
+    _emit_recovery_event(
+        planner,
+        trajectory,
+        "trajectory_compressed",
+        attempt=attempt,
+        reason="context_length",
+        steps_compressed=result.steps_compressed,
+        original_size_chars=result.original_size_chars,
+        compressed_size_chars=result.compressed_size_chars,
+    )
+    # Update trajectory steps in-place with compressed data
+    for i, step in enumerate(compressed_trajectory.steps):
+        if i < len(trajectory.steps):
+            trajectory.steps[i].llm_observation = step.llm_observation
+    return True
 
 
 def _create_graceful_failure_action(
@@ -278,11 +324,13 @@ def _create_graceful_failure_action(
         next_node="final_response",
         args={
             "answer": (
-                f"I'm sorry, but I encountered an issue while processing your request: "
+                "I'm sorry, but I encountered an issue while "
+                "processing your request: "
                 f"{user_msg}. Please try again or rephrase your question."
             ),
             "raw_answer": (
-                f"I'm sorry, but I encountered an issue while processing your request: "
+                "I'm sorry, but I encountered an issue while "
+                "processing your request: "
                 f"{user_msg}. Please try again or rephrase your question."
             ),
             "_recovery": {
@@ -294,10 +342,10 @@ def _create_graceful_failure_action(
 
 
 def _emit_recovery_event(
-    planner: Any,
+    planner: ReactPlanner,
     trajectory: Trajectory,
     event_type: str,
-    **extra: Any,
+    **extra: object,
 ) -> None:
     """Emit a recovery-related event for observability.
 
@@ -307,13 +355,13 @@ def _emit_recovery_event(
         event_type: The type of recovery event.
         **extra: Additional event data.
     """
-    if planner._event_callback is None:
+    if planner.event_callback is None:
         return
 
-    planner._emit_event(
+    planner.emit_event(
         PlannerEvent(
             event_type=event_type,
-            ts=planner._time_source(),
+            ts=planner.time_source(),
             trajectory_step=len(trajectory.steps),
             extra=extra,
         )

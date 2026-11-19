@@ -1,4 +1,8 @@
+"""Tests for rich output runtime."""
+
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
@@ -14,20 +18,35 @@ from penguiflow.rich_output.runtime import (
     reset_runtime,
 )
 
+if TYPE_CHECKING:
+    from penguiflow.planner.context import ToolContext
+
 
 def test_attach_rich_output_nodes_disabled() -> None:
+    """Attach rich output nodes disabled."""
     registry = ModelRegistry()
-    nodes = attach_rich_output_nodes(registry, config=RichOutputConfig(enabled=False))
+    nodes = attach_rich_output_nodes(
+        registry, config=RichOutputConfig(enabled=False)
+    )
     assert nodes == []
 
 
 def test_attach_rich_output_nodes_enabled() -> None:
+    """Attach rich output nodes enabled."""
     registry = ModelRegistry()
     nodes = attach_rich_output_nodes(
         registry,
         config=RichOutputConfig(
             enabled=True,
-            allowlist=["markdown", "echarts", "report", "datagrid", "grid", "tabs", "accordion"],
+            allowlist=[
+                "markdown",
+                "echarts",
+                "report",
+                "datagrid",
+                "grid",
+                "tabs",
+                "accordion",
+            ],
             max_payload_bytes=1000,
             max_total_bytes=2000,
         ),
@@ -49,9 +68,13 @@ def test_attach_rich_output_nodes_enabled() -> None:
 
 
 def test_runtime_prompt_section() -> None:
+    """Runtime prompt section."""
     reset_runtime()
     runtime = configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["markdown", "report", "grid", "tabs", "accordion"])
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["markdown", "report", "grid", "tabs", "accordion"],
+        )
     )
     prompt = runtime.prompt_section()
     assert "`markdown`" in prompt
@@ -63,9 +86,12 @@ def test_runtime_prompt_section() -> None:
 
 
 def test_runtime_prompt_section_include_examples_override() -> None:
+    """Runtime prompt section include examples override."""
     reset_runtime()
     runtime = configure_rich_output(
-        RichOutputConfig(enabled=True, allowlist=["markdown"], include_prompt_examples=False)
+        RichOutputConfig(
+            enabled=True, allowlist=["markdown"], include_prompt_examples=False
+        )
     )
     prompt = runtime.prompt_section(include_examples=True)
     assert "`markdown`" in prompt
@@ -75,11 +101,17 @@ def test_runtime_prompt_section_include_examples_override() -> None:
     assert "Example" in prompt or "```json" in prompt
 
 
-def test_attach_rich_output_nodes_omits_wrappers_for_disallowed_components() -> None:
+def test_attach_nodes_omits_disallowed_wrappers() -> None:
+    """Attach rich output nodes omits wrappers for disallowed components."""
     registry = ModelRegistry()
     attach_rich_output_nodes(
         registry,
-        config=RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=1000, max_total_bytes=2000),
+        config=RichOutputConfig(
+            enabled=True,
+            allowlist=["markdown"],
+            max_payload_bytes=1000,
+            max_total_bytes=2000,
+        ),
     )
     assert registry.has("render_component")
     assert not registry.has("render_chart_echarts")
@@ -96,20 +128,24 @@ def test_attach_rich_output_nodes_omits_wrappers_for_disallowed_components() -> 
 
 
 def test_rich_output_extensions_patch_registry_and_nodes() -> None:
+    """Rich output extensions patch registry and nodes."""
     reset_runtime()
     clear_rich_output_extensions()
 
     try:
+
         class CustomArgs(BaseModel):
             message: str
 
         class CustomResult(BaseModel):
             ok: bool = True
 
-        async def custom_tool(_args: CustomArgs, _ctx) -> CustomResult:
+        async def custom_tool(
+            _args: CustomArgs, _ctx: ToolContext
+        ) -> CustomResult:
             return CustomResult()
 
-        def register_nodes(registry: ModelRegistry):
+        def register_nodes(registry: ModelRegistry) -> list[Node]:
             registry.register("custom_tool", CustomArgs, CustomResult)
             return [Node(custom_tool, name="custom_tool")]
 
@@ -126,7 +162,10 @@ def test_rich_output_extensions_patch_registry_and_nodes() -> None:
                         "type": "object",
                         "required": ["data"],
                         "properties": {
-                            "data": {"type": "array", "items": {"type": "number"}},
+                            "data": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                            },
                         },
                     },
                 }
@@ -139,9 +178,13 @@ def test_rich_output_extensions_patch_registry_and_nodes() -> None:
         registry = ModelRegistry()
         nodes = attach_rich_output_nodes(
             registry,
-            config=RichOutputConfig(enabled=True, allowlist=["markdown", "sparkline"]),
+            config=RichOutputConfig(
+                enabled=True, allowlist=["markdown", "sparkline"]
+            ),
         )
-        runtime = configure_rich_output(RichOutputConfig(enabled=True, allowlist=["markdown", "sparkline"]))
+        runtime = configure_rich_output(
+            RichOutputConfig(enabled=True, allowlist=["markdown", "sparkline"])
+        )
         prompt = runtime.prompt_section()
 
         assert runtime.registry.get("sparkline") is not None

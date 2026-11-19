@@ -1,7 +1,8 @@
 """Durable session key-value facade for tools and nodes.
 
-This is implemented on top of StateStore's optional short-term memory persistence
-surface: `save_memory_state(key, state)` / `load_memory_state(key)`.
+This is implemented on top of StateStore's optional short-term memory
+persistence surface: `save_memory_state(key, state)` /
+`load_memory_state(key)`.
 
 Design notes:
 - Default scope is session-scoped with no TTL.
@@ -54,8 +55,10 @@ def _to_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 def _sha256_text(text: str) -> str:
@@ -75,8 +78,9 @@ def _is_expired(state: Mapping[str, Any]) -> bool:
     return _utc_now() >= dt
 
 
-def _normalise_jsonable(value: Any) -> Any:
-    # Support Pydantic v2 BaseModel-like objects without importing pydantic here.
+def _normalise_jsonable(value: object) -> object:
+    # Support Pydantic v2 BaseModel-like objects without importing pydantic
+    # here.
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
@@ -86,7 +90,15 @@ def _normalise_jsonable(value: Any) -> Any:
     return value
 
 
-def _redact_value(value: Any, *, redact_keys: frozenset[str]) -> Any:
+def _redact_mapping(
+    value: Mapping[str, Any], *, redact_keys: frozenset[str]
+) -> dict[str, Any]:
+    """Redact a mapping's sensitive keys, recursively."""
+    redacted = _redact_value(value, redact_keys=redact_keys)
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _redact_value(value: object, *, redact_keys: frozenset[str]) -> object:
     value = _normalise_jsonable(value)
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
@@ -107,7 +119,8 @@ def _redact_value(value: Any, *, redact_keys: frozenset[str]) -> Any:
 def _require_str(mapping: Mapping[str, Any], key: str) -> str:
     value = mapping.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"session_kv_missing_required_tool_context:{key}")
+        msg = f"session_kv_missing_required_tool_context:{key}"
+        raise RuntimeError(msg)
     return value.strip()
 
 
@@ -122,6 +135,8 @@ async def _lock_for(key: str) -> asyncio.Lock:
 
 @dataclass(frozen=True, slots=True)
 class SessionKVConfig:
+    """Limits and redaction settings for the session KV store."""
+
     max_inline_bytes: int = _DEFAULT_MAX_INLINE_BYTES
     redact_keys: frozenset[str] = _DEFAULT_REDACT_KEYS
 
@@ -135,10 +150,13 @@ class SessionKVFacade:
         state_store: object | None,
         artifacts: ArtifactStore,
         tool_context: MutableMapping[str, Any],
-        emit_planner_event: Callable[[str, Mapping[str, Any]], None] | None = None,
-        emit_checkpoint_update: Callable[[Mapping[str, Any]], None] | None = None,
+        emit_planner_event: Callable[[str, Mapping[str, Any]], None]
+        | None = None,
+        emit_checkpoint_update: Callable[[Mapping[str, Any]], None]
+        | None = None,
         config: SessionKVConfig | None = None,
     ) -> None:
+        """Bind the store to a tool context, its storage and its emitters."""
         self._state_store = state_store
         self._artifacts = artifacts
         self._tool_context = tool_context
@@ -150,7 +168,14 @@ class SessionKVFacade:
     # Public API
     # ------------------------------------------------------------------
 
-    async def get(self, key: str, *, scope: KVScope = "session", namespace: str | None = None) -> Any | None:
+    async def get(
+        self,
+        key: str,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+    ) -> object:
+        """Return the value stored under ``key``, or ``None``."""
         entry = await self._load_entry(key, scope=scope, namespace=namespace)
         if entry is None:
             return None
@@ -159,17 +184,22 @@ class SessionKVFacade:
     async def get_or_init(
         self,
         key: str,
-        default: Any,
+        default: object,
         *,
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> Any:
-        composite_key = self._composite_key(key, scope=scope, namespace=namespace)
+    ) -> object:
+        """Return the value under ``key``, storing ``default`` if unset."""
+        composite_key = self._composite_key(
+            key, scope=scope, namespace=namespace
+        )
         lock = await _lock_for(composite_key)
         async with lock:
             prev_state = await self._load_state(composite_key)
-            if prev_state is not None and not self._is_deleted_or_expired(prev_state, scope=scope):
+            if prev_state is not None and not self._is_deleted_or_expired(
+                prev_state, scope=scope
+            ):
                 return await self._hydrate_value(prev_state)
 
             prev_payload = self._payload_for_update(prev_state)
@@ -187,8 +217,10 @@ class SessionKVFacade:
                         namespace=self._resolve_namespace(namespace),
                         composite_key=composite_key,
                         prev=prev_payload,
-                        next=next_payload,
-                        prev_etag_seen=prev_state.get("etag") if isinstance(prev_state, Mapping) else None,
+                        next_state=next_payload,
+                        prev_etag_seen=prev_state.get("etag")
+                        if isinstance(prev_state, Mapping)
+                        else None,
                         next_etag_written=str(next_state.get("etag") or ""),
                         expires_at=next_state.get("expires_at"),
                     ),
@@ -198,17 +230,22 @@ class SessionKVFacade:
     async def set(
         self,
         key: str,
-        value: Any,
+        value: object,
         *,
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> Any:
-        composite_key = self._composite_key(key, scope=scope, namespace=namespace)
+    ) -> object:
+        """Store ``value`` under ``key`` and return it."""
+        composite_key = self._composite_key(
+            key, scope=scope, namespace=namespace
+        )
         lock = await _lock_for(composite_key)
         async with lock:
             prev_state = await self._load_state(composite_key)
-            if prev_state is not None and self._is_deleted_or_expired(prev_state, scope=scope):
+            if prev_state is not None and self._is_deleted_or_expired(
+                prev_state, scope=scope
+            ):
                 prev_state = None
 
             prev_payload = self._payload_for_update(prev_state)
@@ -226,8 +263,10 @@ class SessionKVFacade:
                         namespace=self._resolve_namespace(namespace),
                         composite_key=composite_key,
                         prev=prev_payload,
-                        next=next_payload,
-                        prev_etag_seen=prev_state.get("etag") if isinstance(prev_state, Mapping) else None,
+                        next_state=next_payload,
+                        prev_etag_seen=prev_state.get("etag")
+                        if isinstance(prev_state, Mapping)
+                        else None,
                         next_etag_written=str(next_state.get("etag") or ""),
                         expires_at=next_state.get("expires_at"),
                     ),
@@ -242,24 +281,33 @@ class SessionKVFacade:
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> Any:
-        composite_key = self._composite_key(key, scope=scope, namespace=namespace)
+    ) -> object:
+        """Merge ``patch`` into the mapping under ``key`` and return it."""
+        composite_key = self._composite_key(
+            key, scope=scope, namespace=namespace
+        )
         lock = await _lock_for(composite_key)
         async with lock:
             prev_state = await self._load_state(composite_key)
             base: Any = None
-            if prev_state is not None and not self._is_deleted_or_expired(prev_state, scope=scope):
+            if prev_state is not None and not self._is_deleted_or_expired(
+                prev_state, scope=scope
+            ):
                 base = await self._hydrate_value(prev_state)
             if base is None:
                 base_obj: dict[str, Any] = {}
             elif isinstance(base, Mapping):
                 base_obj = dict(base)
             else:
-                raise RuntimeError("session_kv_patch_requires_mapping")
+                msg = "session_kv_patch_requires_mapping"
+                raise RuntimeError(msg)
 
-            patch_redacted = _redact_value(dict(patch), redact_keys=self._config.redact_keys)
             merged = dict(base_obj)
-            merged.update(patch_redacted)
+            merged.update(
+                _redact_mapping(
+                    dict(patch), redact_keys=self._config.redact_keys
+                )
+            )
 
             prev_payload = self._payload_for_update(prev_state)
             next_state = await self._build_state(merged, scope=scope)
@@ -276,8 +324,10 @@ class SessionKVFacade:
                         namespace=self._resolve_namespace(namespace),
                         composite_key=composite_key,
                         prev=prev_payload,
-                        next=next_payload,
-                        prev_etag_seen=prev_state.get("etag") if isinstance(prev_state, Mapping) else None,
+                        next_state=next_payload,
+                        prev_etag_seen=prev_state.get("etag")
+                        if isinstance(prev_state, Mapping)
+                        else None,
                         next_etag_written=str(next_state.get("etag") or ""),
                         expires_at=next_state.get("expires_at"),
                     ),
@@ -292,11 +342,16 @@ class SessionKVFacade:
         namespace: str | None = None,
         emit_update: bool = True,
     ) -> bool:
-        composite_key = self._composite_key(key, scope=scope, namespace=namespace)
+        """Delete ``key``; return whether it existed."""
+        composite_key = self._composite_key(
+            key, scope=scope, namespace=namespace
+        )
         lock = await _lock_for(composite_key)
         async with lock:
             prev_state = await self._load_state(composite_key)
-            if prev_state is None or self._is_deleted_or_expired(prev_state, scope=scope):
+            if prev_state is None or self._is_deleted_or_expired(
+                prev_state, scope=scope
+            ):
                 return False
 
             prev_payload = self._payload_for_update(prev_state)
@@ -306,10 +361,15 @@ class SessionKVFacade:
                 "updated_at": _to_iso(_utc_now()),
                 "deleted": True,
                 "value": None,
-                "redaction": {"applied": True, "rules": sorted(self._config.redact_keys)},
+                "redaction": {
+                    "applied": True,
+                    "rules": sorted(self._config.redact_keys),
+                },
             }
             if scope == "task":
-                next_state["expires_at"] = _to_iso(_utc_now() + timedelta(seconds=_TASK_TTL_S))
+                next_state["expires_at"] = _to_iso(
+                    _utc_now() + timedelta(seconds=_TASK_TTL_S)
+                )
             await self._save_state(composite_key, next_state)
             next_payload = self._payload_for_update(next_state)
 
@@ -323,8 +383,10 @@ class SessionKVFacade:
                         namespace=self._resolve_namespace(namespace),
                         composite_key=composite_key,
                         prev=prev_payload,
-                        next=next_payload,
-                        prev_etag_seen=prev_state.get("etag") if isinstance(prev_state, Mapping) else None,
+                        next_state=next_payload,
+                        prev_etag_seen=prev_state.get("etag")
+                        if isinstance(prev_state, Mapping)
+                        else None,
                         next_etag_written=str(next_state.get("etag") or ""),
                         expires_at=next_state.get("expires_at"),
                     ),
@@ -349,23 +411,32 @@ class SessionKVFacade:
             return f"tool:{tool_name.strip()}"
         return "unknown"
 
-    def _composite_key(self, key: str, *, scope: KVScope, namespace: str | None) -> str:
+    def _composite_key(
+        self, key: str, *, scope: KVScope, namespace: str | None
+    ) -> str:
         if not isinstance(key, str) or not key.strip():
-            raise RuntimeError("session_kv_key_must_be_non_empty_string")
+            msg = "session_kv_key_must_be_non_empty_string"
+            raise RuntimeError(msg)
         tenant_id = _require_str(self._tool_context, "tenant_id")
         user_id = _require_str(self._tool_context, "user_id")
         session_id = _require_str(self._tool_context, "session_id")
-        # Required for actor metadata and consistent scoping across tool/node/task execution.
+        # Required for actor metadata and consistent scoping across
+        # tool/node/task execution.
         _require_str(self._tool_context, "task_id")
         _require_str(self._tool_context, "trace_id")
         ns = self._resolve_namespace(namespace)
+        owner = f"{_KV_PREFIX}:{tenant_id}:{user_id}:{session_id}"
         if scope == "session":
-            return f"{_KV_PREFIX}:{tenant_id}:{user_id}:{session_id}:session:{ns}:{key.strip()}"
+            return f"{owner}:session:{ns}:{key.strip()}"
         task_id = _require_str(self._tool_context, "task_id")
-        return f"{_KV_PREFIX}:{tenant_id}:{user_id}:{session_id}:task:{task_id}:{ns}:{key.strip()}"
+        return f"{owner}:task:{task_id}:{ns}:{key.strip()}"
 
-    async def _load_entry(self, key: str, *, scope: KVScope, namespace: str | None) -> Mapping[str, Any] | None:
-        composite_key = self._composite_key(key, scope=scope, namespace=namespace)
+    async def _load_entry(
+        self, key: str, *, scope: KVScope, namespace: str | None
+    ) -> Mapping[str, Any] | None:
+        composite_key = self._composite_key(
+            key, scope=scope, namespace=namespace
+        )
         state = await self._load_state(composite_key)
         if state is None:
             return None
@@ -373,33 +444,40 @@ class SessionKVFacade:
             return None
         return state
 
-    def _is_deleted_or_expired(self, state: Mapping[str, Any], *, scope: KVScope) -> bool:
+    def _is_deleted_or_expired(
+        self, state: Mapping[str, Any], *, scope: KVScope
+    ) -> bool:
         if bool(state.get("deleted")):
             return True
-        if scope == "task" and _is_expired(state):
-            return True
-        return False
+        return bool(scope == "task" and _is_expired(state))
 
     async def _load_state(self, composite_key: str) -> dict[str, Any] | None:
         store = self._state_store
         if store is None or not hasattr(store, "load_memory_state"):
-            raise RuntimeError("session_kv_requires_state_store_memory_methods")
+            msg = "session_kv_requires_state_store_memory_methods"
+            raise RuntimeError(msg)
         state = await store.load_memory_state(composite_key)
         return dict(state) if isinstance(state, Mapping) else None
 
-    async def _save_state(self, composite_key: str, state: Mapping[str, Any]) -> None:
+    async def _save_state(
+        self, composite_key: str, state: Mapping[str, Any]
+    ) -> None:
         store = self._state_store
         if store is None or not hasattr(store, "save_memory_state"):
-            raise RuntimeError("session_kv_requires_state_store_memory_methods")
+            msg = "session_kv_requires_state_store_memory_methods"
+            raise RuntimeError(msg)
         await store.save_memory_state(composite_key, dict(state))
 
-    async def _build_state(self, value: Any, *, scope: KVScope) -> dict[str, Any]:
+    async def _build_state(
+        self, value: object, *, scope: KVScope
+    ) -> dict[str, Any]:
         redacted = _redact_value(value, redact_keys=self._config.redact_keys)
         redacted = _normalise_jsonable(redacted)
         try:
             payload_json = _canonical_json(redacted)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError("session_kv_value_not_json_serialisable") from exc
+            msg = "session_kv_value_not_json_serialisable"
+            raise RuntimeError(msg) from exc
 
         payload_hash = _sha256_text(payload_json)
         payload_bytes = payload_json.encode("utf-8")
@@ -437,13 +515,16 @@ class SessionKVFacade:
                 "artifact_ref": artifact_ref,
                 "mime_type": "application/json",
             },
-            "redaction": {"applied": True, "rules": sorted(self._config.redact_keys)},
+            "redaction": {
+                "applied": True,
+                "rules": sorted(self._config.redact_keys),
+            },
         }
         if scope == "task":
             state["expires_at"] = _to_iso(now + timedelta(seconds=_TASK_TTL_S))
         return state
 
-    async def _hydrate_value(self, state: Mapping[str, Any]) -> Any | None:
+    async def _hydrate_value(self, state: Mapping[str, Any]) -> object:
         if bool(state.get("deleted")):
             return None
         value_obj = state.get("value")
@@ -466,7 +547,9 @@ class SessionKVFacade:
         except Exception:
             return None
 
-    def _payload_for_update(self, state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _payload_for_update(
+        self, state: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
         if state is None:
             return None
         value_obj = state.get("value")
@@ -490,10 +573,10 @@ class SessionKVFacade:
         namespace: str,
         composite_key: str,
         prev: dict[str, Any] | None,
-        next: dict[str, Any] | None,
-        prev_etag_seen: Any | None,
+        next_state: dict[str, Any] | None,
+        prev_etag_seen: object,
         next_etag_written: str,
-        expires_at: Any | None,
+        expires_at: object,
     ) -> dict[str, Any]:
         tenant_id = self._tool_context.get("tenant_id")
         user_id = self._tool_context.get("user_id")
@@ -511,22 +594,32 @@ class SessionKVFacade:
             "key": key,
             "composite_key": composite_key,
             "prev": prev,
-            "next": next,
-            "prev_etag_seen": prev_etag_seen if isinstance(prev_etag_seen, str) else None,
+            "next": next_state,
+            "prev_etag_seen": prev_etag_seen
+            if isinstance(prev_etag_seen, str)
+            else None,
             "next_etag_written": next_etag_written,
             "expires_at": expires_at if isinstance(expires_at, str) else None,
             "actor": {
                 "tenant_id": tenant_id if isinstance(tenant_id, str) else None,
                 "user_id": user_id if isinstance(user_id, str) else None,
-                "session_id": session_id if isinstance(session_id, str) else None,
+                "session_id": session_id
+                if isinstance(session_id, str)
+                else None,
                 "task_id": task_id if isinstance(task_id, str) else None,
                 "trace_id": trace_id if isinstance(trace_id, str) else None,
                 "tool_name": tool_name if isinstance(tool_name, str) else None,
-                "tool_call_id": tool_call_id if isinstance(tool_call_id, str) else None,
+                "tool_call_id": tool_call_id
+                if isinstance(tool_call_id, str)
+                else None,
             },
             "context": {
-                "context_version": context_version if isinstance(context_version, int) else None,
-                "context_hash": context_hash if isinstance(context_hash, str) else None,
+                "context_version": context_version
+                if isinstance(context_version, int)
+                else None,
+                "context_hash": context_hash
+                if isinstance(context_hash, str)
+                else None,
             },
         }
         return content

@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _utc_now() -> datetime:
@@ -51,13 +53,15 @@ class RemoteBinding:
         context_id: Remote context id, if the remote protocol uses one.
         task_id: Remote task id assigned by the remote agent.
         agent_url: URL of the remote agent handling the task.
-        router_session_id: Local session id that initiated the remote call, if any.
+        router_session_id: Local session id that initiated the remote call, if
+            any.
         remote_skill: Name of the remote skill/capability invoked, if any.
         tenant_id: Optional tenant scope for the binding.
         user_id: Optional user scope for the binding.
-        last_remote_task_id: Most recent remote task id seen for follow-up turns, if any.
-        is_terminal: Whether the binding has reached a terminal state and should no
-            longer be reused.
+        last_remote_task_id: Most recent remote task id seen for follow-up
+            turns, if any.
+        is_terminal: Whether the binding has reached a terminal state and
+            should no longer be reused.
         metadata: Additional free-form metadata about the binding.
     """
 
@@ -99,6 +103,8 @@ class UpdateType(str, Enum):
 
 
 class TaskStatus(str, Enum):
+    """Lifecycle state of a task."""
+
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
@@ -108,11 +114,15 @@ class TaskStatus(str, Enum):
 
 
 class TaskType(str, Enum):
+    """Whether a task runs in the foreground or the background."""
+
     FOREGROUND = "FOREGROUND"
     BACKGROUND = "BACKGROUND"
 
 
 class TaskContextSnapshot(BaseModel):
+    """Context captured when a task is spawned."""
+
     session_id: str
     task_id: str
     trace_id: str | None = None
@@ -132,29 +142,49 @@ class TaskContextSnapshot(BaseModel):
 
 
 class StateUpdate(BaseModel):
-    """An incremental update about a task's progress, persisted for later retrieval.
+    """An incremental update about a task's progress, persisted for later.
 
-    Used to stream status, tool-call, and result information for a task independent of
-    the main event log, so clients can poll or subscribe to task-scoped updates.
+    Used to stream status, tool-call, and result information for a task
+    independent of the main event log, so clients can poll or subscribe to
+    task-scoped updates.
     """
 
     session_id: str = Field(description="Session id the update belongs to.")
     task_id: str = Field(description="Task id the update belongs to.")
-    trace_id: str | None = Field(default=None, description="Trace id associated with the update, if any.")
+    trace_id: str | None = Field(
+        default=None,
+        description="Trace id associated with the update, if any.",
+    )
     update_id: str = Field(
-        default_factory=lambda: uuid.uuid4().hex, description="Unique identifier for this update."
+        default_factory=lambda: uuid.uuid4().hex,
+        description="Unique identifier for this update.",
     )
-    update_type: UpdateType = Field(description="Kind of update being recorded.")
-    content: Any = Field(description="Update payload; shape depends on `update_type`.")
+    update_type: UpdateType = Field(
+        description="Kind of update being recorded."
+    )
+    content: Any = Field(
+        description="Update payload; shape depends on `update_type`."
+    )
     step_index: int | None = Field(
-        default=None, description="Zero-based index of this step, if the task reports progress by step."
+        default=None,
+        description=(
+            "Zero-based index of this step, if the task reports progress "
+            "by step."
+        ),
     )
-    total_steps: int | None = Field(default=None, description="Total number of steps expected, if known.")
-    created_at: datetime = Field(default_factory=_utc_now, description="Timestamp the update was created.")
+    total_steps: int | None = Field(
+        default=None, description="Total number of steps expected, if known."
+    )
+    created_at: datetime = Field(
+        default_factory=_utc_now,
+        description="Timestamp the update was created.",
+    )
 
 
 @dataclass(slots=True)
 class TaskState:
+    """Mutable state of a task tracked by the session."""
+
     task_id: str
     session_id: str
     status: TaskStatus
@@ -170,11 +200,14 @@ class TaskState:
     updated_at: datetime = field(default_factory=_utc_now)
 
     def update_status(self, status: TaskStatus) -> None:
+        """Set ``status`` and refresh ``updated_at``."""
         self.status = status
         self.updated_at = _utc_now()
 
 
 class TaskStateModel(BaseModel):
+    """Serializable snapshot of a :class:`TaskState`."""
+
     task_id: str
     session_id: str
     status: TaskStatus
@@ -191,6 +224,7 @@ class TaskStateModel(BaseModel):
 
     @classmethod
     def from_state(cls, state: TaskState) -> TaskStateModel:
+        """Build a model from a :class:`TaskState`."""
         return cls(
             task_id=state.task_id,
             session_id=state.session_id,
@@ -209,6 +243,8 @@ class TaskStateModel(BaseModel):
 
 
 class SteeringEventType(str, Enum):
+    """Kinds of steering events a client can send to a running task."""
+
     INJECT_CONTEXT = "INJECT_CONTEXT"
     REDIRECT = "REDIRECT"
     CANCEL = "CANCEL"
@@ -221,6 +257,8 @@ class SteeringEventType(str, Enum):
 
 
 class SteeringEvent(BaseModel):
+    """A steering instruction sent to a running task."""
+
     session_id: str
     task_id: str
     event_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -231,6 +269,7 @@ class SteeringEvent(BaseModel):
     created_at: datetime = Field(default_factory=_utc_now)
 
     def to_injection(self) -> str:
+        """Render the event as a JSON block to inject into the LLM context."""
         payload = {
             "steering": {
                 "event_id": self.event_id,

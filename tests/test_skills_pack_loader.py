@@ -1,22 +1,30 @@
+"""Tests for skills pack loader."""
+
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from penguiflow.skills import SkillPackConfig
 from penguiflow.skills.pack_loader import SkillPackLoader
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 def test_skill_pack_loader_generates_names(tmp_path: Path) -> None:
+    """Skill pack loader generates names."""
     pack_dir = tmp_path / "pack"
     pack_dir.mkdir()
     yaml_path = pack_dir / "login.skill.yaml"
     yaml_path.write_text(
-        "trigger: Log into a site\nsteps:\n  - Open the login page\n  - Enter credentials\n",
+        "trigger: Log into a site\nsteps:\n  - Open the login page\n  "
+        "- Enter credentials\n",
         encoding="utf-8",
     )
     jsonl_path = pack_dir / "misc.skill.jsonl"
     jsonl_path.write_text(
-        '{"name": "pack.core.explicit", "trigger": "Explicit", "steps": ["Do it"]}\n'
+        '{"name": "pack.core.explicit", "trigger": "Explicit", '
+        '"steps": ["Do it"]}\n'
         '{"trigger": "Fallback", "steps": ["Step A"]}\n',
         encoding="utf-8",
     )
@@ -30,6 +38,7 @@ def test_skill_pack_loader_generates_names(tmp_path: Path) -> None:
 
 
 def test_skill_pack_loader_reads_markdown_frontmatter(tmp_path: Path) -> None:
+    """Skill pack loader reads markdown frontmatter."""
     pack_dir = tmp_path / "pack"
     pack_dir.mkdir()
     md_path = pack_dir / "demo.skill.md"
@@ -45,6 +54,7 @@ def test_skill_pack_loader_reads_markdown_frontmatter(tmp_path: Path) -> None:
 
 
 def test_skill_pack_loader_missing_path_returns_empty(tmp_path: Path) -> None:
+    """Skill pack loader missing path returns empty."""
     pack = SkillPackConfig(name="core", path=str(tmp_path / "missing"))
     skills = SkillPackLoader().load_pack(pack)
     assert skills == []

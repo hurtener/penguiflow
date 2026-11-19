@@ -1,17 +1,14 @@
 """Core types for the LLM layer.
 
-This module defines the typed request/response model that all providers adapt to/from,
-eliminating raw dict plumbing throughout the stack.
+This module defines the typed request/response model that all providers adapt
+to/from, eliminating raw dict plumbing throughout the stack.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
-
-if TYPE_CHECKING:
-    pass
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
 # Role and Content Parts
@@ -29,9 +26,8 @@ def validate_reasoning_display(reasoning_display: object) -> ReasoningDisplay:
         return "omitted"
     if reasoning_display is None:
         return None
-    raise ValueError(
-        "reasoning_display must be one of None, 'summarized', or 'omitted'"
-    )
+    msg = "reasoning_display must be one of None, 'summarized', or 'omitted'"
+    raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +93,7 @@ class LLMMessage:
     parts: tuple[ContentPart, ...] | list[ContentPart]
 
     def __post_init__(self) -> None:
+        """Store ``parts`` as a tuple so the message stays immutable."""
         # Ensure parts is always a tuple for immutability
         if isinstance(self.parts, list):
             object.__setattr__(self, "parts", tuple(self.parts))
@@ -144,8 +141,8 @@ class StructuredOutputSpec:
 class LLMRequest:
     """A typed request to an LLM provider.
 
-    This is the normalized request format that all output strategies
-    produce and all providers consume.
+    This is the normalized request format that all output strategies produce
+    and all providers consume.
     """
 
     model: str
@@ -158,14 +155,19 @@ class LLMRequest:
     # specific sampling temperature.
     temperature: float | None = None
     max_tokens: int | None = None
-    extra: dict[str, Any] | None = None  # Provider-specific passthrough (sanitized)
+    extra: dict[str, Any] | None = (
+        None  # Provider-specific passthrough (sanitized)
+    )
 
     def __post_init__(self) -> None:
+        """Store messages and tools as tuples to keep the request immutable."""
         # Ensure messages is always a tuple for immutability
         if isinstance(self.messages, list):
             object.__setattr__(self, "messages", tuple(self.messages))
         if isinstance(self.tools, list):
-            object.__setattr__(self, "tools", tuple(self.tools) if self.tools else None)
+            object.__setattr__(
+                self, "tools", tuple(self.tools) if self.tools else None
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +193,8 @@ class Usage:
 class CompletionResponse:
     """Normalized response from a completion call.
 
-    Providers adapt SDK responses into this portable shape so that the rest of the
-    system never needs to interpret provider-specific payload formats.
+    Providers adapt SDK responses into this portable shape so that the rest of
+    the system never needs to interpret provider-specific payload formats.
     """
 
     message: LLMMessage
@@ -211,7 +213,8 @@ class CompletionResponse:
 class StreamEvent:
     """A streaming event emitted during completion.
 
-    This is a minimal common denominator; providers can emit richer events internally.
+    This is a minimal common denominator; providers can emit richer events
+    internally.
     """
 
     delta_text: str | None = None
@@ -231,12 +234,14 @@ StreamCallback = Callable[[StreamEvent], None]
 
 
 class CancelToken:
-    """Minimal cancellation contract compatible with PenguiFlow cancel propagation.
+    """Minimal cancellation contract matching PenguiFlow cancel propagation.
 
-    This protocol allows callers to signal cancellation to long-running LLM operations.
+    This protocol allows callers to signal cancellation to long-running LLM
+    operations.
     """
 
     def __init__(self) -> None:
+        """Create a token that is not cancelled."""
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -270,7 +275,11 @@ class Cost:
     def __add__(self, other: Cost) -> Cost:
         """Add two costs together."""
         if self.currency != other.currency:
-            raise ValueError(f"Cannot add costs with different currencies: {self.currency} vs {other.currency}")
+            msg = (
+                "Cannot add costs with different currencies: "
+                f"{self.currency} vs {other.currency}"
+            )
+            raise ValueError(msg)
         return Cost(
             input_cost=self.input_cost + other.input_cost,
             output_cost=self.output_cost + other.output_cost,
@@ -289,7 +298,9 @@ def extract_text(message: LLMMessage) -> str:
     return message.text
 
 
-def extract_single_tool_call(message: LLMMessage, expected_name: str | None = None) -> ToolCallPart:
+def extract_single_tool_call(
+    message: LLMMessage, expected_name: str | None = None
+) -> ToolCallPart:
     """Extract a single tool call from a message.
 
     Args:
@@ -304,13 +315,16 @@ def extract_single_tool_call(message: LLMMessage, expected_name: str | None = No
     """
     tool_calls = message.tool_calls
     if not tool_calls:
-        raise ValueError("No tool calls found in message")
+        msg = "No tool calls found in message"
+        raise ValueError(msg)
     if len(tool_calls) > 1:
-        raise ValueError(f"Expected single tool call, found {len(tool_calls)}")
+        msg = f"Expected single tool call, found {len(tool_calls)}"
+        raise ValueError(msg)
 
     call = tool_calls[0]
     if expected_name is not None and call.name != expected_name:
-        raise ValueError(f"Expected tool call '{expected_name}', got '{call.name}'")
+        msg = f"Expected tool call '{expected_name}', got '{call.name}'"
+        raise ValueError(msg)
 
     return call
 

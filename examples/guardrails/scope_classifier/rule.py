@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from penguiflow.planner.guardrails import (
     ContextSnapshotV1,
@@ -16,6 +15,9 @@ from penguiflow.planner.guardrails import (
     RetrySpec,
     RuleCost,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
@@ -63,17 +65,22 @@ class ScopeClassifierRule:
         event: GuardrailEvent,
         context_snapshot: ContextSnapshotV1,
     ) -> GuardrailDecision | None:
+        """Stop events whose text the classifier puts out of scope."""
         if not self._load_model():
             return None
         text = event.text_content
         if not text:
             return None
 
-        augmented = _augment_with_context(text, context_snapshot, event.payload)
+        augmented = _augment_with_context(
+            text, context_snapshot, event.payload
+        )
         loop = asyncio.get_running_loop()
         embedding = await loop.run_in_executor(
             None,
-            lambda: self._encoder.encode([augmented], normalize_embeddings=True),
+            lambda: self._encoder.encode(
+                [augmented], normalize_embeddings=True
+            ),
         )
         proba = self._classifier.predict_proba(embedding)[0]
         in_scope_score = float(proba[1]) if len(proba) > 1 else float(proba[0])
@@ -87,7 +94,8 @@ class ScopeClassifierRule:
                 confidence=1.0 - in_scope_score,
                 retry=RetrySpec(
                     corrective_message=(
-                        "I'm focused on analytics reporting. Could you clarify which metrics, "
+                        "I'm focused on analytics reporting. Could "
+                        "you clarify which metrics, "
                         "dimensions, or charts you want?"
                     )
                 ),
@@ -97,7 +105,9 @@ class ScopeClassifierRule:
         return None
 
 
-def _augment_with_context(text: str, context: ContextSnapshotV1, payload: dict[str, Any]) -> str:
+def _augment_with_context(
+    text: str, context: ContextSnapshotV1, payload: dict[str, Any]
+) -> str:
     parts = [f"[USER] {text}"]
     last_assistant = payload.get("last_assistant")
     if isinstance(last_assistant, str) and last_assistant.strip():

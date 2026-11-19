@@ -5,7 +5,47 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeVar
+
+StateStoreBackend = Literal["memory", "redis", "sqlite"]
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+TelemetryBackend = Literal["logging", "mlflow", "datadog"]
+Environment = Literal["development", "staging", "production"]
+
+_STATE_STORE_BACKENDS: tuple[StateStoreBackend, ...] = (
+    "memory",
+    "redis",
+    "sqlite",
+)
+_LOG_LEVELS: tuple[LogLevel, ...] = ("DEBUG", "INFO", "WARNING", "ERROR")
+_TELEMETRY_BACKENDS: tuple[TelemetryBackend, ...] = (
+    "logging",
+    "mlflow",
+    "datadog",
+)
+_ENVIRONMENTS: tuple[Environment, ...] = (
+    "development",
+    "staging",
+    "production",
+)
+
+_Choice = TypeVar("_Choice", bound=str)
+
+
+def _env_choice(
+    name: str, default: _Choice, choices: tuple[_Choice, ...]
+) -> _Choice:
+    """Read env var ``name``, which must hold one of ``choices``.
+
+    Raises:
+        ValueError: If the variable holds a value outside ``choices``.
+    """
+    value = os.getenv(name, default)
+    for choice in choices:
+        if value == choice:
+            return choice
+    msg = f"{name} must be one of {choices}, got {value!r}"
+    raise ValueError(msg)
 
 
 @dataclass(frozen=True)
@@ -52,23 +92,24 @@ class AgentConfig:
 
     # Planning Hints Configuration (v2 NEW)
     planning_hints_enabled: bool
-    planning_hints: dict[str, list[str] | dict[str, float] | int] | None
+    planning_hints: dict[str, object] | None
 
     # State Store Configuration (v2 NEW)
     state_store_enabled: bool
-    state_store_backend: Literal["memory", "redis", "sqlite"] | None
+    state_store_backend: StateStoreBackend | None
 
     # Observability
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+    log_level: LogLevel
     enable_telemetry: bool
-    telemetry_backend: Literal["logging", "mlflow", "datadog"]
+    telemetry_backend: TelemetryBackend
     mlflow_tracking_uri: str | None
 
-    # LLM Client Configuration
-    use_dspy_client: bool  # Explicitly use DSPy for structured outputs (better for non-OpenAI models)
+    # LLM Client Configuration Explicitly use DSPy for structured outputs
+    # (better for non-OpenAI models)
+    use_dspy_client: bool
 
     # Application Settings
-    environment: Literal["development", "staging", "production"]
+    environment: Environment
     agent_name: str
 
     @classmethod
@@ -100,15 +141,21 @@ class AgentConfig:
             llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4096")),
             # Planner settings
             planner_max_iters=int(os.getenv("PLANNER_MAX_ITERS", "15")),
-            planner_token_budget=int(os.getenv("PLANNER_TOKEN_BUDGET", "8000")),
+            planner_token_budget=int(
+                os.getenv("PLANNER_TOKEN_BUDGET", "8000")
+            ),
             planner_deadline_s=_parse_optional_float(
                 os.getenv("PLANNER_DEADLINE_S")
             ),
-            planner_hop_budget=_parse_optional_int(os.getenv("PLANNER_HOP_BUDGET")),
+            planner_hop_budget=_parse_optional_int(
+                os.getenv("PLANNER_HOP_BUDGET")
+            ),
             planner_absolute_max_parallel=int(
                 os.getenv("PLANNER_ABSOLUTE_MAX_PARALLEL", "50")
             ),
-            planner_repair_attempts=int(os.getenv("PLANNER_REPAIR_ATTEMPTS", "3")),
+            planner_repair_attempts=int(
+                os.getenv("PLANNER_REPAIR_ATTEMPTS", "3")
+            ),
             # Summarizer
             summarizer_model=os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini"),
             # Reflection (v2 FLAGSHIP)
@@ -118,13 +165,17 @@ class AgentConfig:
             reflection_quality_threshold=float(
                 os.getenv("REFLECTION_QUALITY_THRESHOLD", "0.80")
             ),
-            reflection_max_revisions=int(os.getenv("REFLECTION_MAX_REVISIONS", "2")),
+            reflection_max_revisions=int(
+                os.getenv("REFLECTION_MAX_REVISIONS", "2")
+            ),
             reflection_use_separate_llm=os.getenv(
                 "REFLECTION_USE_SEPARATE_LLM", "false"
             ).lower()
             == "true",
             # Tool Policy (v2)
-            tool_policy_enabled=os.getenv("TOOL_POLICY_ENABLED", "false").lower()
+            tool_policy_enabled=os.getenv(
+                "TOOL_POLICY_ENABLED", "false"
+            ).lower()
             == "true",
             tool_policy_allowed_tools=_parse_tool_list(
                 os.getenv("TOOL_POLICY_ALLOWED_TOOLS")
@@ -136,22 +187,34 @@ class AgentConfig:
                 os.getenv("TOOL_POLICY_REQUIRE_TAGS", "")
             ),
             # Planning Hints (v2)
-            planning_hints_enabled=os.getenv("PLANNING_HINTS_ENABLED", "false").lower()
+            planning_hints_enabled=os.getenv(
+                "PLANNING_HINTS_ENABLED", "false"
+            ).lower()
             == "true",
             planning_hints=_parse_planning_hints(os.getenv("PLANNING_HINTS")),
             # State Store (v2)
-            state_store_enabled=os.getenv("STATE_STORE_ENABLED", "false").lower()
+            state_store_enabled=os.getenv(
+                "STATE_STORE_ENABLED", "false"
+            ).lower()
             == "true",
-            state_store_backend=os.getenv("STATE_STORE_BACKEND", "memory"),  # type: ignore
+            state_store_backend=_env_choice(
+                "STATE_STORE_BACKEND", "memory", _STATE_STORE_BACKENDS
+            ),
             # Observability
-            log_level=os.getenv("LOG_LEVEL", "INFO"),  # type: ignore
-            enable_telemetry=os.getenv("ENABLE_TELEMETRY", "true").lower() == "true",
-            telemetry_backend=os.getenv("TELEMETRY_BACKEND", "logging"),  # type: ignore
+            log_level=_env_choice("LOG_LEVEL", "INFO", _LOG_LEVELS),
+            enable_telemetry=os.getenv("ENABLE_TELEMETRY", "true").lower()
+            == "true",
+            telemetry_backend=_env_choice(
+                "TELEMETRY_BACKEND", "logging", _TELEMETRY_BACKENDS
+            ),
             mlflow_tracking_uri=os.getenv("MLFLOW_TRACKING_URI"),
             # LLM Client
-            use_dspy_client=os.getenv("DSPY_CLIENT", "false").lower() == "true",
+            use_dspy_client=os.getenv("DSPY_CLIENT", "false").lower()
+            == "true",
             # Application
-            environment=os.getenv("AGENT_ENVIRONMENT", "development"),  # type: ignore
+            environment=_env_choice(
+                "AGENT_ENVIRONMENT", "development", _ENVIRONMENTS
+            ),
             agent_name=os.getenv("AGENT_NAME", "enterprise_agent_v2"),
         )
 
@@ -180,15 +243,17 @@ def _parse_tool_set(value: str) -> set[str]:
     return {tool.strip() for tool in value.split(",") if tool.strip()}
 
 
-def _parse_planning_hints(value: str | None) -> dict[str, list[str] | dict[str, float] | int] | None:
+def _parse_planning_hints(value: str | None) -> dict[str, object] | None:
     """Parse JSON planning hints from environment variable.
 
     Example:
-        PLANNING_HINTS='{"ordering_hints": ["triage", "retrieve"], "max_parallel": 3}'
+        PLANNING_HINTS='{"ordering_hints": ["triage", "retrieve"],
+        "max_parallel": 3}'
     """
     if value is None or value.strip() == "":
         return None
     try:
-        return json.loads(value)
+        hints = json.loads(value)
     except json.JSONDecodeError:
         return None
+    return hints if isinstance(hints, dict) else None

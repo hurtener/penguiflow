@@ -1,9 +1,9 @@
 """OpenRouter provider implementation.
 
-Uses the OpenAI SDK for OpenRouter's OpenAI-compatible API.
-OpenRouter provides unified access to 500+ models from multiple providers
-including OpenAI GPT-5.x, Anthropic Claude 4.x, Google Gemini 3.x,
-DeepSeek R1, Meta Llama 4, Qwen3, and more.
+Uses the OpenAI SDK for OpenRouter's OpenAI-compatible API. OpenRouter provides
+unified access to 500+ models from multiple providers including OpenAI GPT-5.x,
+Anthropic Claude 4.x, Google Gemini 3.x, DeepSeek R1, Meta Llama 4, Qwen3, and
+more.
 
 Reference: https://openrouter.ai/docs/quickstart
 
@@ -24,6 +24,8 @@ import asyncio
 import os
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from ..errors import (
     LLMAuthError,
     LLMCancelledError,
@@ -35,32 +37,95 @@ from ..errors import (
     LLMTimeoutError,
     is_context_length_error,
 )
-from ..profiles import ModelProfile
 from ..profiles.openrouter import get_openrouter_profile
 from ..types import (
     CompletionResponse,
-    LLMMessage,
     LLMRequest,
-    StreamEvent,
-    TextPart,
-    ToolCallPart,
-    Usage,
 )
 from ._params import resolve_temperature
-from .base import OpenAICompatibleProvider
+from .base import (
+    OpenAICompatibleProvider,
+    OpenAIStreamAccumulator,
+    _extract_openai_delta_reasoning,
+    _extract_openai_reasoning_content,
+    _from_openai_response,
+    _to_openai_messages,
+    _to_openai_response_format,
+    _to_openai_tools,
+)
 
 if TYPE_CHECKING:
+    from openai import AsyncOpenAI
+
+    from ..profiles import ModelProfile
     from ..types import CancelToken, StreamCallback
 
 _XAI_ROUTE_PREFIXES = frozenset({"x-ai", "xai"})
-_REASONING_OFF_VALUES = frozenset({"off", "none", "false", "0", "disable", "disabled", "no"})
+_REASONING_OFF_VALUES = frozenset(
+    {"off", "none", "false", "0", "disable", "disabled", "no"}
+)
+
+
+def _parse_model(model: str) -> tuple[str, str | None]:
+    """Parse model string and extract provider hint.
+
+    Args:
+        model: Model string like "openrouter/anthropic/claude-3-5-sonnet".
+
+    Returns:
+        Tuple of (model_for_api, provider_hint).
+    """
+    parts = model.split("/")
+
+    # Remove "openrouter" prefix if present
+    if parts[0] == "openrouter":
+        parts = parts[1:]
+
+    if len(parts) >= 2:
+        provider_hint = parts[0]
+        model_name = "/".join(parts)
+        return model_name, provider_hint
+
+    return model, None
+
+
+def _coerce_reasoning_enabled(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enable", "enabled"}:
+            return True
+        if normalized in {
+            "0",
+            "false",
+            "no",
+            "off",
+            "disable",
+            "disabled",
+        }:
+            return False
+    return None
+
+
+def _reasoning_enabled_from_effort(
+    reasoning_effort: object,
+) -> bool | None:
+    if reasoning_effort is None:
+        return None
+    effort = str(reasoning_effort).strip().lower()
+    if not effort:
+        return None
+    return effort not in _REASONING_OFF_VALUES
 
 
 class OpenRouterProvider(OpenAICompatibleProvider):
     """OpenRouter provider with model routing.
 
-    Parses model strings like "openrouter/anthropic/claude-sonnet-4.5"
-    and routes to appropriate profile based on the underlying provider.
+    Parses model strings like "openrouter/anthropic/claude-sonnet-4.5" and
+    routes to appropriate profile based on the underlying provider.
 
     Supports 500+ models including:
     - OpenAI: gpt-5, gpt-5.1, gpt-5.2-pro (up to 400K context)
@@ -90,26 +155,36 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         app_url: str | None = None,
         app_title: str | None = None,
         timeout: float = 360.0,
+        client: AsyncOpenAI | None = None,
     ) -> None:
         """Initialize the OpenRouter provider.
 
         Args:
-            model: Model identifier (e.g., "openrouter/anthropic/claude-sonnet-4.5").
+            model: Model identifier (e.g.,
+                "openrouter/anthropic/claude-sonnet-4.5").
                    Can include variants like "openai/gpt-5:thinking".
-            api_key: OpenRouter API key (uses OPENROUTER_API_KEY env var if not provided).
+            api_key: OpenRouter API key (uses OPENROUTER_API_KEY env var if not
+                provided).
             profile: Model profile override.
-            app_url: Application URL for OpenRouter attribution (HTTP-Referer header).
-            app_title: Application title for OpenRouter attribution (X-Title header).
+            app_url: Application URL for OpenRouter attribution (HTTP-Referer
+                header).
+            app_title: Application title for OpenRouter attribution (X-Title
+                header).
             timeout: Default timeout in seconds.
+            client: Pre-built SDK client to use instead of creating one.
         """
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
-            raise ImportError("OpenAI SDK not installed. Install with: pip install openai>=1.58.0") from e
+            msg = (
+                "OpenAI SDK not installed. Install with: pip install "
+                "openai>=1.58.0"
+            )
+            raise ImportError(msg) from e
 
         # Parse model string
         self._original_model = model
-        self._model, self._provider_hint = self._parse_model(model)
+        self._model, self._provider_hint = _parse_model(model)
 
         # Get profile based on underlying provider
         if profile:
@@ -121,83 +196,64 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
         api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
-            raise ValueError(
-                "OpenRouter API key required. Set OPENROUTER_API_KEY environment variable or pass api_key explicitly."
+            msg = (
+                "OpenRouter API key required. Set OPENROUTER_API_KEY "
+                "environment variable or pass api_key explicitly."
             )
+            raise ValueError(msg)
 
         app_url = app_url or os.environ.get("OPENROUTER_APP_URL", "")
-        app_title = app_title or os.environ.get("OPENROUTER_APP_TITLE", "penguiflow")
+        app_title = app_title or os.environ.get(
+            "OPENROUTER_APP_TITLE", "penguiflow"
+        )
 
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
-            timeout=timeout,
-            default_headers={
-                "HTTP-Referer": app_url,
-                "X-Title": app_title,
-            },
+        self._client = (
+            client
+            if client is not None
+            else AsyncOpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1",
+                timeout=timeout,
+                default_headers={
+                    "HTTP-Referer": app_url,
+                    "X-Title": app_title,
+                },
+            )
         )
 
     @property
+    def original_model(self) -> str:
+        """The model identifier as passed to the constructor."""
+        return self._original_model
+
+    @property
+    @override
     def provider_name(self) -> str:
         return "openrouter"
 
     @property
+    @override
     def profile(self) -> ModelProfile:
         return self._profile
 
     @property
+    @override
     def model(self) -> str:
         return self._model
 
-    def _parse_model(self, model: str) -> tuple[str, str | None]:
-        """Parse model string and extract provider hint.
+    @property
+    def client(self) -> AsyncOpenAI:
+        """The SDK client the provider sends requests with."""
+        return self._client
 
-        Args:
-            model: Model string like "openrouter/anthropic/claude-3-5-sonnet".
-
-        Returns:
-            Tuple of (model_for_api, provider_hint).
-        """
-        parts = model.split("/")
-
-        # Remove "openrouter" prefix if present
-        if parts[0] == "openrouter":
-            parts = parts[1:]
-
-        if len(parts) >= 2:
-            provider_hint = parts[0]
-            model_name = "/".join(parts)
-            return model_name, provider_hint
-
-        return model, None
+    @property
+    def timeout(self) -> float:
+        """The default request timeout, in seconds."""
+        return self._timeout
 
     def _is_xai_route(self) -> bool:
         provider = self._model.split("/", 1)[0].lower().strip()
         return provider in _XAI_ROUTE_PREFIXES
-
-    @staticmethod
-    def _coerce_reasoning_enabled(value: Any) -> bool | None:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, int):
-            return value != 0
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on", "enable", "enabled"}:
-                return True
-            if normalized in {"0", "false", "no", "off", "disable", "disabled"}:
-                return False
-        return None
-
-    @staticmethod
-    def _reasoning_enabled_from_effort(reasoning_effort: Any) -> bool | None:
-        if reasoning_effort is None:
-            return None
-        effort = str(reasoning_effort).strip().lower()
-        if not effort:
-            return None
-        return effort not in _REASONING_OFF_VALUES
 
     def _normalize_reasoning_controls(self, extra: dict[str, Any]) -> None:
         reasoning_effort = extra.pop("reasoning_effort", None)
@@ -206,14 +262,16 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         explicit_reasoning = extra.pop("reasoning", None)
 
         raw_extra_body = extra.get("extra_body")
-        extra_body = dict(raw_extra_body) if isinstance(raw_extra_body, dict) else {}
+        extra_body = (
+            dict(raw_extra_body) if isinstance(raw_extra_body, dict) else {}
+        )
 
         if explicit_reasoning is not None:
             extra_body["reasoning"] = explicit_reasoning
         else:
-            enabled = self._coerce_reasoning_enabled(reasoning_enabled)
+            enabled = _coerce_reasoning_enabled(reasoning_enabled)
             if enabled is None and self._is_xai_route():
-                enabled = self._reasoning_enabled_from_effort(reasoning_effort)
+                enabled = _reasoning_enabled_from_effort(reasoning_effort)
             if enabled is not None:
                 extra_body["reasoning"] = {"enabled": enabled}
 
@@ -228,6 +286,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         if not self._is_xai_route() and reasoning_effort is not None:
             extra["reasoning_effort"] = reasoning_effort
 
+    @override
     async def complete(
         self,
         request: LLMRequest,
@@ -239,25 +298,41 @@ class OpenRouterProvider(OpenAICompatibleProvider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="openrouter", retryable=False)
+            raise LLMCancelledError(
+                message="Request cancelled",
+                provider="openrouter",
+                retryable=False,
+            )
 
-        params = self._build_params(request)
+        params = self.build_params(request)
         timeout = timeout_s or self._timeout
 
         try:
             if stream and on_stream_event:
-                return await self._stream_completion(params, on_stream_event, timeout, cancel)
+                try:
+                    async with asyncio.timeout(timeout):
+                        return await self.stream_completion(
+                            params, on_stream_event, cancel
+                        )
+                except TimeoutError as e:
+                    raise LLMTimeoutError(
+                        message=f"Stream timed out after {timeout}s",
+                        provider="openrouter",
+                        raw=e,
+                    ) from e
 
             async with asyncio.timeout(timeout):
                 response = await self._client.chat.completions.create(**params)
 
-            message, usage = self._from_openai_response(response)
+            message, usage = _from_openai_response(response)
 
             return CompletionResponse(
                 message=message,
                 usage=usage,
                 raw_response=response,
-                reasoning_content=self._extract_openai_reasoning_content(response.choices[0].message),
+                reasoning_content=_extract_openai_reasoning_content(
+                    response.choices[0].message
+                ),
                 finish_reason=response.choices[0].finish_reason,
             )
 
@@ -268,15 +343,16 @@ class OpenRouterProvider(OpenAICompatibleProvider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(message="Request cancelled", provider="openrouter") from None
+            raise LLMCancelledError(
+                message="Request cancelled", provider="openrouter"
+            ) from None
         except Exception as e:
-            raise self._map_error(e) from e
+            raise self.map_error(e) from e
 
-    async def _stream_completion(
+    async def stream_completion(
         self,
         params: dict[str, Any],
         on_stream_event: StreamCallback,
-        timeout: float,
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
@@ -284,89 +360,23 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         stream_options = dict(params.get("stream_options") or {})
         stream_options.setdefault("include_usage", True)
         params["stream_options"] = stream_options
-
-        text_acc: list[str] = []
-        tool_calls_acc: dict[int, dict[str, Any]] = {}
-        usage: Usage | None = None
-        finish_reason: str | None = None
-        reasoning_acc: list[str] = []
-
-        try:
-            async with asyncio.timeout(timeout):
-                stream = await self._client.chat.completions.create(**params)
-                async for chunk in stream:
-                    if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="openrouter", retryable=False)
-
-                    if not chunk.choices:
-                        if hasattr(chunk, "usage") and chunk.usage:
-                            usage = Usage(
-                                input_tokens=chunk.usage.prompt_tokens,
-                                output_tokens=chunk.usage.completion_tokens,
-                                total_tokens=chunk.usage.total_tokens,
-                            )
-                        continue
-
-                    delta = chunk.choices[0].delta
-                    finish_reason = chunk.choices[0].finish_reason
-
-                    if delta.content:
-                        text_acc.append(delta.content)
-                        on_stream_event(StreamEvent(delta_text=delta.content))
-
-                    delta_reasoning = self._extract_openai_delta_reasoning(delta)
-                    if delta_reasoning:
-                        reasoning_acc.append(delta_reasoning)
-                        on_stream_event(StreamEvent(delta_reasoning=delta_reasoning))
-
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index
-                            if idx not in tool_calls_acc:
-                                tool_calls_acc[idx] = {
-                                    "id": tc.id or "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            if tc.function:
-                                if tc.function.name:
-                                    tool_calls_acc[idx]["name"] = tc.function.name
-                                if tc.function.arguments:
-                                    tool_calls_acc[idx]["arguments"] += tc.function.arguments
-
-        except TimeoutError as e:
-            raise LLMTimeoutError(
-                message=f"Stream timed out after {timeout}s",
-                provider="openrouter",
-                raw=e,
-            ) from e
-
-        parts: list[Any] = []
-        full_text = "".join(text_acc)
-        if full_text:
-            parts.append(TextPart(text=full_text))
-
-        for idx in sorted(tool_calls_acc.keys()):
-            tc = tool_calls_acc[idx]
-            parts.append(
-                ToolCallPart(
-                    name=tc["name"],
-                    arguments_json=tc["arguments"],
-                    call_id=tc["id"],
-                )
-            )
-
-        on_stream_event(StreamEvent(done=True, usage=usage, finish_reason=finish_reason))
-
-        return CompletionResponse(
-            message=LLMMessage(role="assistant", parts=parts),
-            usage=usage or Usage.zero(),
-            raw_response=None,
-            reasoning_content="".join(reasoning_acc) or None,
-            finish_reason=finish_reason,
+        accumulator = OpenAIStreamAccumulator(
+            on_stream_event, reasoning_of=_extract_openai_delta_reasoning
         )
 
-    def _build_params(self, request: LLMRequest) -> dict[str, Any]:
+        stream = await self._client.chat.completions.create(**params)
+        async for chunk in stream:
+            if cancel and cancel.is_cancelled():
+                raise LLMCancelledError(
+                    message="Request cancelled",
+                    provider="openrouter",
+                    retryable=False,
+                )
+            accumulator.add(chunk)
+
+        return accumulator.response()
+
+    def build_params(self, request: LLMRequest) -> dict[str, Any]:
         """Build OpenRouter API parameters from request.
 
         Supports OpenRouter-specific options via request.extra:
@@ -377,7 +387,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         """
         params: dict[str, Any] = {
             "model": self._model,
-            "messages": self._to_openai_messages(request.messages),
+            "messages": _to_openai_messages(request.messages),
         }
 
         temp = resolve_temperature(
@@ -393,7 +403,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             params["max_tokens"] = request.max_tokens
 
         if request.tools:
-            params["tools"] = self._to_openai_tools(request.tools)
+            params["tools"] = _to_openai_tools(request.tools)
 
         if request.tool_choice:
             params["tool_choice"] = {
@@ -402,7 +412,9 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             }
 
         if request.structured_output:
-            params["response_format"] = self._to_openai_response_format(request.structured_output)
+            params["response_format"] = _to_openai_response_format(
+                request.structured_output
+            )
 
         if request.extra:
             extra = dict(request.extra)
@@ -416,7 +428,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
         return params
 
-    def _map_error(self, exc: Exception) -> LLMError:
+    def map_error(self, exc: Exception) -> LLMError:
         """Map OpenRouter/OpenAI SDK exceptions to LLMError."""
         try:
             from openai import (

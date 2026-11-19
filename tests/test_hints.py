@@ -1,10 +1,11 @@
 """Tests for penguiflow/planner/hints.py."""
 
+from __future__ import annotations
 
 from penguiflow.planner.hints import _PlanningHints
 
 
-def test_planning_hints_from_mapping_empty():
+def test_planning_hints_from_mapping_empty() -> None:
     """Empty payload should return empty hints."""
     hints = _PlanningHints.from_mapping(None)
     assert hints.ordering_hints == ()
@@ -16,13 +17,13 @@ def test_planning_hints_from_mapping_empty():
     assert hints.budget_hints == {}
 
 
-def test_planning_hints_from_mapping_empty_dict():
+def test_planning_hints_from_mapping_empty_dict() -> None:
     """Empty dict should return empty hints."""
     hints = _PlanningHints.from_mapping({})
     assert hints.empty() is True
 
 
-def test_planning_hints_from_mapping_full():
+def test_planning_hints_from_mapping_full() -> None:
     """Full payload should populate all fields."""
     payload = {
         "ordering_hints": ["tool_a", "tool_b"],
@@ -44,7 +45,7 @@ def test_planning_hints_from_mapping_full():
     assert hints.budget_hints == {"max_hops": 10}
 
 
-def test_planning_hints_max_parallel_from_budget():
+def test_planning_hints_max_parallel_from_budget() -> None:
     """max_parallel can be extracted from budget_hints."""
     payload = {
         "budget_hints": {"max_parallel": 5},
@@ -53,7 +54,7 @@ def test_planning_hints_max_parallel_from_budget():
     assert hints.max_parallel == 5
 
 
-def test_planning_hints_max_parallel_invalid_type():
+def test_planning_hints_max_parallel_invalid_type() -> None:
     """Non-int max_parallel should be None."""
     payload = {
         "max_parallel": "not_an_int",
@@ -63,14 +64,14 @@ def test_planning_hints_max_parallel_invalid_type():
     assert hints.max_parallel is None
 
 
-def test_planning_hints_to_prompt_payload_empty():
+def test_planning_hints_to_prompt_payload_empty() -> None:
     """Empty hints should return empty payload."""
     hints = _PlanningHints((), (), set(), set(), (), None, {})
     payload = hints.to_prompt_payload()
     assert payload == {}
 
 
-def test_planning_hints_to_prompt_payload_max_parallel():
+def test_planning_hints_to_prompt_payload_max_parallel() -> None:
     """max_parallel should add constraints."""
     hints = _PlanningHints((), (), set(), set(), (), 4, {})
     payload = hints.to_prompt_payload()
@@ -78,7 +79,7 @@ def test_planning_hints_to_prompt_payload_max_parallel():
     assert "max_parallel=4" in payload["constraints"]
 
 
-def test_planning_hints_to_prompt_payload_sequential_only():
+def test_planning_hints_to_prompt_payload_sequential_only() -> None:
     """sequential_only should add constraints."""
     hints = _PlanningHints((), (), {"tool_a", "tool_b"}, set(), (), None, {})
     payload = hints.to_prompt_payload()
@@ -86,7 +87,7 @@ def test_planning_hints_to_prompt_payload_sequential_only():
     assert "sequential_only=" in payload["constraints"]
 
 
-def test_planning_hints_to_prompt_payload_both_constraints():
+def test_planning_hints_to_prompt_payload_both_constraints() -> None:
     """Both max_parallel and sequential_only should be in constraints."""
     hints = _PlanningHints((), (), {"seq_tool"}, set(), (), 2, {})
     payload = hints.to_prompt_payload()
@@ -95,84 +96,86 @@ def test_planning_hints_to_prompt_payload_both_constraints():
     assert "sequential_only=" in payload["constraints"]
 
 
-def test_planning_hints_to_prompt_payload_ordering():
+def test_planning_hints_to_prompt_payload_ordering() -> None:
     """ordering_hints should add preferred_order."""
     hints = _PlanningHints(("a", "b", "c"), (), set(), set(), (), None, {})
     payload = hints.to_prompt_payload()
     assert payload["preferred_order"] == ["a", "b", "c"]
 
 
-def test_planning_hints_to_prompt_payload_parallel_groups():
+def test_planning_hints_to_prompt_payload_parallel_groups() -> None:
     """parallel_groups should be converted to lists."""
-    hints = _PlanningHints((), (("x", "y"), ("z",)), set(), set(), (), None, {})
+    hints = _PlanningHints(
+        (), (("x", "y"), ("z",)), set(), set(), (), None, {}
+    )
     payload = hints.to_prompt_payload()
     assert payload["parallel_groups"] == [["x", "y"], ["z"]]
 
 
-def test_planning_hints_to_prompt_payload_disallow():
+def test_planning_hints_to_prompt_payload_disallow() -> None:
     """disallow_nodes should be sorted list."""
     hints = _PlanningHints((), (), set(), {"z_node", "a_node"}, (), None, {})
     payload = hints.to_prompt_payload()
     assert payload["disallow_nodes"] == ["a_node", "z_node"]
 
 
-def test_planning_hints_to_prompt_payload_prefer():
+def test_planning_hints_to_prompt_payload_prefer() -> None:
     """prefer_nodes should add preferred_nodes."""
     hints = _PlanningHints((), (), set(), set(), ("first", "second"), None, {})
     payload = hints.to_prompt_payload()
     assert payload["preferred_nodes"] == ["first", "second"]
 
 
-def test_planning_hints_to_prompt_payload_budget():
+def test_planning_hints_to_prompt_payload_budget() -> None:
     """budget_hints should add budget dict."""
     hints = _PlanningHints((), (), set(), set(), (), None, {"max_hops": 5})
     payload = hints.to_prompt_payload()
     assert payload["budget"] == {"max_hops": 5}
 
 
-def test_planning_hints_empty_true():
+def test_planning_hints_empty_true() -> None:
     """empty() should return True for empty hints."""
     hints = _PlanningHints((), (), set(), set(), (), None, {})
     assert hints.empty() is True
 
 
-def test_planning_hints_empty_false_ordering():
+def test_planning_hints_empty_false_ordering() -> None:
     """empty() should return False when ordering_hints populated."""
     hints = _PlanningHints(("a",), (), set(), set(), (), None, {})
     assert hints.empty() is False
 
 
-def test_planning_hints_empty_false_parallel():
+def test_planning_hints_empty_false_parallel() -> None:
     """empty() should return False when parallel_groups populated."""
     hints = _PlanningHints((), (("a",),), set(), set(), (), None, {})
     assert hints.empty() is False
 
 
-def test_planning_hints_empty_false_sequential():
+def test_planning_hints_empty_false_sequential() -> None:
     """empty() should return False when sequential_only populated."""
     hints = _PlanningHints((), (), {"a"}, set(), (), None, {})
     assert hints.empty() is False
 
 
-def test_planning_hints_empty_false_disallow():
+def test_planning_hints_empty_false_disallow() -> None:
     """empty() should return False when disallow_nodes populated."""
     hints = _PlanningHints((), (), set(), {"a"}, (), None, {})
     assert hints.empty() is False
 
 
-def test_planning_hints_empty_false_prefer():
+def test_planning_hints_empty_false_prefer() -> None:
     """empty() should return False when prefer_nodes populated."""
     hints = _PlanningHints((), (), set(), set(), ("a",), None, {})
     assert hints.empty() is False
 
 
-def test_planning_hints_empty_false_max_parallel():
+def test_planning_hints_empty_false_max_parallel() -> None:
     """empty() should return False when max_parallel set."""
     hints = _PlanningHints((), (), set(), set(), (), 1, {})
     assert hints.empty() is False
 
 
-def test_planning_hints_empty_false_budget():
+def test_planning_hints_empty_false_budget() -> None:
     """empty() should return False when budget_hints populated."""
     hints = _PlanningHints((), (), set(), set(), (), None, {"key": "value"})
     assert hints.empty() is False

@@ -6,10 +6,15 @@ Focuses on exercising schema transformers and compatibility flags.
 from __future__ import annotations
 
 from penguiflow.llm.profiles import ModelProfile
-from penguiflow.llm.schema.plan import OutputMode, choose_output_mode, plan_schema
+from penguiflow.llm.schema.plan import (
+    OutputMode,
+    choose_output_mode,
+    plan_schema,
+)
 
 
 def test_plan_schema_runs_transformer_and_marks_native_incompatible() -> None:
+    """Plan schema runs transformer and marks native incompatible."""
     profile = ModelProfile(
         supports_schema_guided_output=True,
         supports_tools=True,

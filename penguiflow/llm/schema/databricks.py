@@ -5,9 +5,22 @@ Handles Databricks' constrained decoding schema requirements.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
+
+from typing_extensions import override
 
 from .transformer import JsonSchemaTransformer
+
+
+def _non_null_option(options: object) -> dict[str, Any] | None:
+    """Return X when ``options`` is exactly ``[X, {"type": "null"}]``."""
+    if not isinstance(options, list) or len(options) != 2:
+        return None
+    dicts = [o for o in options if isinstance(o, dict)]
+    if "null" not in [o.get("type") for o in dicts]:
+        return None
+    non_null = [o for o in dicts if o.get("type") != "null"]
+    return non_null[0] if non_null else None
 
 
 class DatabricksJsonSchemaTransformer(JsonSchemaTransformer):
@@ -24,37 +37,41 @@ class DatabricksJsonSchemaTransformer(JsonSchemaTransformer):
     - Track key count for validation
     - Add additionalProperties: false
 
-    Reference: https://docs.databricks.com/aws/en/machine-learning/model-serving/structured-outputs
+    Reference:
+    https://docs.databricks.com/aws/en/machine-learning/model-serving/structured-outputs
     """
 
-    UNSUPPORTED_KEYWORDS = {
-        "pattern",
-        "patternProperties",
-        "minLength",
-        "maxLength",
-        "minProperties",
-        "maxProperties",
-        "minItems",
-        "maxItems",
-        "$ref",
-        "$defs",
-        "$schema",
-        "title",
-        "examples",
-        "default",
-    }
+    UNSUPPORTED_KEYWORDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "pattern",
+            "patternProperties",
+            "minLength",
+            "maxLength",
+            "minProperties",
+            "maxProperties",
+            "minItems",
+            "maxItems",
+            "$ref",
+            "$defs",
+            "$schema",
+            "title",
+            "examples",
+            "default",
+        }
+    )
 
     # Databricks limits
     MAX_KEYS = 64
     MAX_TOOLS = 32
     MAX_TOOL_SCHEMA_KEYS = 16
 
-    def __init__(self, schema: dict[str, Any], *, strict: bool = True):
+    def __init__(self, schema: dict[str, Any], *, strict: bool = True) -> None:
         """Initialize with key tracking."""
         super().__init__(schema, strict=strict)
         self._prefer_inline_refs = True  # Must inline all refs
         self._key_count = 0
 
+    @override
     def _transform_node(self, node: dict[str, Any]) -> dict[str, Any]:
         """Apply Databricks-specific transformations."""
         # Remove unsupported keywords
@@ -63,35 +80,19 @@ class DatabricksJsonSchemaTransformer(JsonSchemaTransformer):
                 node.pop(keyword)
                 self.is_strict_compatible = False
 
-        # Handle composition keywords - try to simplify or mark incompatible
+        # Handle composition keywords - simplify or mark incompatible
         for composition in ("anyOf", "oneOf", "allOf"):
             if composition in node:
-                options = node.get(composition, [])
-
-                # Try to simplify: if it's just [type, null], make it the non-null type
-                if len(options) == 2:
-                    types = [o.get("type") for o in options if isinstance(o, dict)]
-                    if "null" in types:
-                        non_null = [o for o in options if isinstance(o, dict) and o.get("type") != "null"]
-                        if non_null:
-                            node.pop(composition)
-                            # Merge the non-null option into this node
-                            for key, value in non_null[0].items():
-                                if key not in node:
-                                    node[key] = value
-                            continue
-
-                # Can't simplify - mark as incompatible
-                node.pop(composition)
-                self.is_strict_compatible = False
-                self._warnings.append(f"Removed unsupported {composition} composition.")
+                self._drop_composition(node, composition)
 
         # Track key count for validation
         if node.get("type") == "object" and "properties" in node:
             self._key_count += len(node["properties"])
             if self._key_count > self.MAX_KEYS:
                 self.is_strict_compatible = False
-                self._warnings.append(f"Schema exceeds {self.MAX_KEYS}-key limit.")
+                self._warnings.append(
+                    f"Schema exceeds {self.MAX_KEYS}-key limit."
+                )
 
         # Add additionalProperties: false for strict mode
         if node.get("type") == "object" and self.strict:
@@ -101,6 +102,25 @@ class DatabricksJsonSchemaTransformer(JsonSchemaTransformer):
                 node["required"] = list(node["properties"].keys())
 
         return node
+
+    def _drop_composition(
+        self, node: dict[str, Any], composition: str
+    ) -> None:
+        """Remove ``composition`` from ``node``, keeping a nullable type.
+
+        ``[type, null]`` simplifies to the non-null type, merged into the
+        node. Anything else is dropped and marks the schema incompatible.
+        """
+        options = node.pop(composition)
+        non_null = _non_null_option(options)
+        if non_null is not None:
+            for key, value in non_null.items():
+                node.setdefault(key, value)
+            return
+        self.is_strict_compatible = False
+        self._warnings.append(
+            f"Removed unsupported {composition} composition."
+        )
 
     def _handle_ref(self, node: dict[str, Any]) -> dict[str, Any]:
         """Handle $ref by inlining - Databricks doesn't support $ref."""
@@ -143,6 +163,9 @@ class DatabricksJsonSchemaTransformer(JsonSchemaTransformer):
 
         # Final key count check
         if self._key_count > self.MAX_KEYS:
-            self._warnings.append(f"Total key count ({self._key_count}) exceeds Databricks limit ({self.MAX_KEYS}).")
+            self._warnings.append(
+                f"Total key count ({self._key_count}) exceeds "
+                f"Databricks limit ({self.MAX_KEYS})."
+            )
 
         return schema

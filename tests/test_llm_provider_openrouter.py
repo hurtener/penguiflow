@@ -1,8 +1,8 @@
 """Tests for OpenRouter provider initialization and configuration.
 
-Tests cover the OpenRouter provider which routes to 500+ models from
-multiple providers including OpenAI GPT-5.x, Claude 4.x, Gemini 3.x,
-DeepSeek R1, Llama 4, and Qwen3.
+Tests cover the OpenRouter provider which routes to 500+ models from multiple
+providers including OpenAI GPT-5.x, Claude 4.x, Gemini 3.x, DeepSeek R1, Llama
+4, and Qwen3.
 
 Reference: https://openrouter.ai/docs/quickstart
 """
@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from types import SimpleNamespace
-from typing import Any
+from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,6 +28,11 @@ from penguiflow.llm.errors import (
     LLMServerError,
     LLMTimeoutError,
 )
+from penguiflow.llm.providers.openrouter import (
+    _coerce_reasoning_enabled,
+    _parse_model,
+    _reasoning_enabled_from_effort,
+)
 from penguiflow.llm.types import (
     LLMMessage,
     LLMRequest,
@@ -38,9 +43,12 @@ from penguiflow.llm.types import (
     ToolSpec,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping, Sequence
+
 
 @pytest.fixture
-def mock_openai_sdk() -> Any:
+def mock_openai_sdk() -> MagicMock:
     """Mock the OpenAI SDK (used by OpenRouter)."""
     mock_sdk = MagicMock()
     mock_client = MagicMock()
@@ -68,7 +76,9 @@ class TestOpenRouterProviderInit:
             assert call_kwargs["api_key"] == "openrouter-key-123"
             assert call_kwargs["base_url"] == "https://openrouter.ai/api/v1"
 
-    def test_init_parses_openrouter_prefix(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_parses_openrouter_prefix(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test that openrouter/ prefix is removed from model name."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -94,7 +104,10 @@ class TestOpenRouterProviderInit:
             )
 
             call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
-            assert call_kwargs["default_headers"]["HTTP-Referer"] == "https://myapp.com"
+            assert (
+                call_kwargs["default_headers"]["HTTP-Referer"]
+                == "https://myapp.com"
+            )
             assert call_kwargs["default_headers"]["X-Title"] == "My App"
 
     def test_init_with_timeout(self, mock_openai_sdk: MagicMock) -> None:
@@ -108,7 +121,7 @@ class TestOpenRouterProviderInit:
                 timeout=180.0,
             )
 
-            assert provider._timeout == 180.0
+            assert provider.timeout == 180.0
             call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
             assert call_kwargs["timeout"] == 180.0
 
@@ -129,10 +142,15 @@ class TestOpenRouterProviderInit:
 
                 call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
                 assert call_kwargs["api_key"] == "env-key"
-                assert call_kwargs["default_headers"]["HTTP-Referer"] == "https://env-app.com"
+                assert (
+                    call_kwargs["default_headers"]["HTTP-Referer"]
+                    == "https://env-app.com"
+                )
                 assert call_kwargs["default_headers"]["X-Title"] == "Env App"
 
-    def test_init_raises_without_api_key(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_raises_without_api_key(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test initialization raises without API key."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -140,10 +158,14 @@ class TestOpenRouterProviderInit:
             with patch.dict(os.environ, {}, clear=True):
                 os.environ.pop("OPENROUTER_API_KEY", None)
 
-                with pytest.raises(ValueError, match="OpenRouter API key required"):
+                with pytest.raises(
+                    ValueError, match="OpenRouter API key required"
+                ):
                     OpenRouterProvider("anthropic/claude-sonnet-4.5")
 
-    def test_init_with_custom_profile(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_with_custom_profile(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test initialization with custom model profile."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.profiles import ModelProfile
@@ -183,10 +205,7 @@ class TestOpenRouterProviderModelParsing:
     def test_parse_simple_model(self, mock_openai_sdk: MagicMock) -> None:
         """Test parsing simple model name."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
-            from penguiflow.llm.providers.openrouter import OpenRouterProvider
-
-            provider = OpenRouterProvider("gpt-4o", api_key="key")
-            model, hint = provider._parse_model("gpt-4o")
+            model, hint = _parse_model("gpt-4o")
 
             assert model == "gpt-4o"
             assert hint is None
@@ -194,10 +213,7 @@ class TestOpenRouterProviderModelParsing:
     def test_parse_provider_model(self, mock_openai_sdk: MagicMock) -> None:
         """Test parsing provider/model format."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
-            from penguiflow.llm.providers.openrouter import OpenRouterProvider
-
-            provider = OpenRouterProvider("anthropic/claude-sonnet-4.5", api_key="key")
-            model, hint = provider._parse_model("anthropic/claude-sonnet-4.5")
+            model, hint = _parse_model("anthropic/claude-sonnet-4.5")
 
             assert model == "anthropic/claude-sonnet-4.5"
             assert hint == "anthropic"
@@ -205,10 +221,7 @@ class TestOpenRouterProviderModelParsing:
     def test_parse_openrouter_prefix(self, mock_openai_sdk: MagicMock) -> None:
         """Test parsing openrouter/provider/model format."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
-            from penguiflow.llm.providers.openrouter import OpenRouterProvider
-
-            provider = OpenRouterProvider("openrouter/openai/gpt-4o", api_key="key")
-            model, hint = provider._parse_model("openrouter/openai/gpt-4o")
+            model, hint = _parse_model("openrouter/openai/gpt-4o")
 
             assert model == "openai/gpt-4o"
             assert hint == "openai"
@@ -229,16 +242,20 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 temperature=0.7,
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["model"] == "anthropic/claude-sonnet-4.5"
             assert params["temperature"] == 0.7
 
-    def test_build_params_with_transforms(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_transforms(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with OpenRouter transforms."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -250,11 +267,13 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={"transforms": ["middle-out"]},
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["transforms"] == ["middle-out"]
 
@@ -270,15 +289,19 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={"route": "fallback"},
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["route"] == "fallback"
 
-    def test_build_params_with_provider_preferences(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_provider_preferences(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with OpenRouter provider preferences."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -290,7 +313,9 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={
                     "provider": {
                         "order": ["Anthropic", "OpenAI"],
@@ -299,12 +324,14 @@ class TestOpenRouterProviderBuildParams:
                 },
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["provider"]["order"] == ["Anthropic", "OpenAI"]
             assert params["provider"]["allow_fallbacks"] is True
 
-    def test_build_params_with_fallback_models(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_fallback_models(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with fallback models list."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -316,7 +343,9 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="openai/gpt-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={
                     "models": [
                         "openai/gpt-5",
@@ -326,12 +355,14 @@ class TestOpenRouterProviderBuildParams:
                 },
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert len(params["models"]) == 3
             assert "openai/gpt-5" in params["models"]
 
-    def test_build_params_with_structured_output(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_structured_output(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with structured output."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -343,7 +374,9 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 structured_output=StructuredOutputSpec(
                     name="MySchema",
                     json_schema={"type": "object"},
@@ -351,12 +384,14 @@ class TestOpenRouterProviderBuildParams:
                 ),
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert "response_format" in params
             assert params["response_format"]["type"] == "json_schema"
 
-    def test_build_params_with_json_object_mode(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_json_object_mode(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test generic non-strict structured output maps to json_object."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -368,7 +403,9 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 structured_output=StructuredOutputSpec(
                     name="json_response",
                     json_schema={"type": "object"},
@@ -376,12 +413,15 @@ class TestOpenRouterProviderBuildParams:
                 ),
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert "response_format" in params
             assert params["response_format"]["type"] == "json_object"
 
-    def test_build_params_xai_maps_reasoning_enabled(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_xai_maps_reasoning_enabled(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Build params xai maps reasoning enabled."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -392,17 +432,22 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="x-ai/grok-4.1-fast",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={"reasoning_enabled": True},
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["extra_body"]["reasoning"] == {"enabled": True}
             assert "reasoning_enabled" not in params
             assert "reasoning" not in params
 
-    def test_build_params_xai_maps_reasoning_effort_off(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_xai_maps_reasoning_effort_off(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Build params xai maps reasoning effort off."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -413,17 +458,22 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="x-ai/grok-4.1-fast",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={"reasoning_effort": "off"},
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["extra_body"]["reasoning"] == {"enabled": False}
             assert "reasoning_effort" not in params
             assert "reasoning" not in params
 
-    def test_build_params_xai_keeps_explicit_reasoning(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_xai_keeps_explicit_reasoning(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Build params xai keeps explicit reasoning."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -434,18 +484,27 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="x-ai/grok-4.1-fast",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-                extra={"reasoning": {"enabled": False}, "reasoning_enabled": True, "reasoning_effort": "high"},
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
+                extra={
+                    "reasoning": {"enabled": False},
+                    "reasoning_enabled": True,
+                    "reasoning_effort": "high",
+                },
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["extra_body"]["reasoning"] == {"enabled": False}
             assert "reasoning_enabled" not in params
             assert "reasoning_effort" not in params
             assert "reasoning" not in params
 
-    def test_build_params_non_xai_maps_reasoning_controls_to_extra_body(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_non_xai_maps_reasoning_controls_to_extra_body(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Build params non xai maps reasoning controls to extra body."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -456,11 +515,17 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="openrouter/inception/mercury-2",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-                extra={"reasoning_enabled": True, "reasoning_effort": "high", "include_reasoning": True},
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
+                extra={
+                    "reasoning_enabled": True,
+                    "reasoning_effort": "high",
+                    "include_reasoning": True,
+                },
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["extra_body"]["reasoning"] == {"enabled": True}
             assert params["extra_body"]["include_reasoning"] is True
@@ -468,7 +533,10 @@ class TestOpenRouterProviderBuildParams:
             assert "reasoning_enabled" not in params
             assert "include_reasoning" not in params
 
-    def test_build_params_non_xai_keeps_explicit_reasoning_payload(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_non_xai_keeps_explicit_reasoning_payload(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Build params non xai keeps explicit reasoning payload."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -479,11 +547,16 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="openrouter/inception/mercury-2",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-                extra={"reasoning": {"enabled": False}, "include_reasoning": True},
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
+                extra={
+                    "reasoning": {"enabled": False},
+                    "include_reasoning": True,
+                },
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["extra_body"]["reasoning"] == {"enabled": False}
             assert params["extra_body"]["include_reasoning"] is True
@@ -492,6 +565,7 @@ class TestOpenRouterProviderBuildParams:
     def test_build_params_sets_max_tokens_tools_and_tool_choice(
         self, mock_openai_sdk: MagicMock
     ) -> None:
+        """Build params sets max tokens tools and tool choice."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -502,19 +576,24 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="openai/gpt-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 max_tokens=128,
                 tools=(
                     ToolSpec(
                         name="get_weather",
                         description="Get weather",
-                        json_schema={"type": "object", "properties": {"city": {"type": "string"}}},
+                        json_schema={
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
                     ),
                 ),
                 tool_choice="get_weather",
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["max_tokens"] == 128
             assert params["tools"][0]["type"] == "function"
@@ -524,6 +603,7 @@ class TestOpenRouterProviderBuildParams:
     def test_build_params_xai_empty_reasoning_values_skip_mapping(
         self, mock_openai_sdk: MagicMock
     ) -> None:
+        """Build params xai empty reasoning values skip mapping."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -534,34 +614,33 @@ class TestOpenRouterProviderBuildParams:
 
             request = LLMRequest(
                 model="x-ai/grok-4.1-fast",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 extra={"reasoning_effort": "", "reasoning_enabled": "maybe"},
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert "extra_body" not in params
 
-    def test_reasoning_helpers_cover_non_boolean_cases(self, mock_openai_sdk: MagicMock) -> None:
+    def test_reasoning_helpers_cover_non_boolean_cases(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Reasoning helpers cover non boolean cases."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
-            from penguiflow.llm.providers.openrouter import OpenRouterProvider
-
-            provider = OpenRouterProvider(
-                "openrouter/x-ai/grok-4.1-fast",
-                api_key="key",
-            )
-
-            assert provider._coerce_reasoning_enabled(1) is True
-            assert provider._coerce_reasoning_enabled("enabled") is True
-            assert provider._coerce_reasoning_enabled("disabled") is False
-            assert provider._coerce_reasoning_enabled(object()) is None
-            assert provider._reasoning_enabled_from_effort(None) is None
-            assert provider._reasoning_enabled_from_effort("") is None
-            assert provider._reasoning_enabled_from_effort("OFF") is False
-            assert provider._reasoning_enabled_from_effort("high") is True
+            assert _coerce_reasoning_enabled(1) is True
+            assert _coerce_reasoning_enabled("enabled") is True
+            assert _coerce_reasoning_enabled("disabled") is False
+            assert _coerce_reasoning_enabled(object()) is None
+            assert _reasoning_enabled_from_effort(None) is None
+            assert _reasoning_enabled_from_effort("") is None
+            assert _reasoning_enabled_from_effort("OFF") is False
+            assert _reasoning_enabled_from_effort("high") is True
 
 
 def test_openrouter_stepfun_profile_disables_json_output_modes() -> None:
+    """OpenRouter stepfun profile disables JSON output modes."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/stepfun/step-3.5-flash")
@@ -570,6 +649,7 @@ def test_openrouter_stepfun_profile_disables_json_output_modes() -> None:
 
 
 def test_openrouter_xai_profile_supports_reasoning() -> None:
+    """OpenRouter xai profile supports reasoning."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/x-ai/grok-4.1-fast:thinking")
@@ -578,6 +658,7 @@ def test_openrouter_xai_profile_supports_reasoning() -> None:
 
 
 def test_openrouter_inception_profile_supports_reasoning() -> None:
+    """OpenRouter inception profile supports reasoning."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/inception/mercury-2")
@@ -587,6 +668,7 @@ def test_openrouter_inception_profile_supports_reasoning() -> None:
 
 
 def test_openrouter_minimax_profile_supports_reasoning() -> None:
+    """OpenRouter minimax profile supports reasoning."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/minimax/minimax-m2.7")
@@ -597,6 +679,7 @@ def test_openrouter_minimax_profile_supports_reasoning() -> None:
 
 
 def test_openrouter_xiaomi_profile_supports_reasoning() -> None:
+    """OpenRouter xiaomi profile supports reasoning."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/xiaomi/mimo-v2-pro")
@@ -607,6 +690,7 @@ def test_openrouter_xiaomi_profile_supports_reasoning() -> None:
 
 
 def test_openrouter_openai_gpt_5_3_chat_profile() -> None:
+    """OpenRouter OpenAI gpt 5 3 chat profile."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/openai/gpt-5.3-chat")
@@ -617,6 +701,7 @@ def test_openrouter_openai_gpt_5_3_chat_profile() -> None:
 
 
 def test_openrouter_anthropic_claude_4_6_profile() -> None:
+    """OpenRouter Anthropic claude 4 6 profile."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/anthropic/claude-sonnet-4.6")
@@ -627,9 +712,12 @@ def test_openrouter_anthropic_claude_4_6_profile() -> None:
 
 
 def test_openrouter_google_gemini_3_1_flash_lite_profile() -> None:
+    """OpenRouter Google Gemini 3 1 flash lite profile."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
-    profile = get_openrouter_profile("openrouter/google/gemini-3.1-flash-lite-preview")
+    profile = get_openrouter_profile(
+        "openrouter/google/gemini-3.1-flash-lite-preview"
+    )
     assert profile.supports_reasoning is True
     assert profile.supports_schema_guided_output is True
     assert profile.max_context_tokens == 1048576
@@ -637,6 +725,7 @@ def test_openrouter_google_gemini_3_1_flash_lite_profile() -> None:
 
 
 def test_openrouter_zai_glm_5_turbo_profile() -> None:
+    """OpenRouter zai glm 5 turbo profile."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
     profile = get_openrouter_profile("openrouter/z-ai/glm-5-turbo")
@@ -647,9 +736,12 @@ def test_openrouter_zai_glm_5_turbo_profile() -> None:
 
 
 def test_openrouter_nvidia_nemotron_profile() -> None:
+    """OpenRouter nvidia nemotron profile."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
-    profile = get_openrouter_profile("openrouter/nvidia/nemotron-3-super-120b-a12b")
+    profile = get_openrouter_profile(
+        "openrouter/nvidia/nemotron-3-super-120b-a12b"
+    )
     assert profile.supports_reasoning is True
     assert profile.supports_schema_guided_output is True
     assert profile.max_context_tokens == 262144
@@ -657,9 +749,12 @@ def test_openrouter_nvidia_nemotron_profile() -> None:
 
 
 def test_openrouter_mistral_explicit_profile_fallback_match() -> None:
+    """OpenRouter mistral explicit profile fallback match."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
-    profile = get_openrouter_profile("openrouter/mistralai/mistral-small-2603:online")
+    profile = get_openrouter_profile(
+        "openrouter/mistralai/mistral-small-2603:online"
+    )
     assert profile.supports_reasoning is True
     assert profile.supports_schema_guided_output is True
     assert profile.max_context_tokens == 262144
@@ -667,25 +762,34 @@ def test_openrouter_mistral_explicit_profile_fallback_match() -> None:
 
 
 def test_openrouter_anthropic_profile_fallback_match() -> None:
+    """OpenRouter Anthropic profile fallback match."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
-    profile = get_openrouter_profile("openrouter/anthropic/claude-sonnet-4-5-20260101")
+    profile = get_openrouter_profile(
+        "openrouter/anthropic/claude-sonnet-4-5-20260101"
+    )
     assert profile.supports_schema_guided_output is True
     assert profile.supports_tools is True
 
 
 def test_openrouter_google_profile_fallback_match() -> None:
+    """OpenRouter Google profile fallback match."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
-    profile = get_openrouter_profile("openrouter/google/gemini-2.5-pro-preview")
+    profile = get_openrouter_profile(
+        "openrouter/google/gemini-2.5-pro-preview"
+    )
     assert profile.supports_schema_guided_output is True
     assert profile.supports_tools is True
 
 
 def test_openrouter_stepfun_profile_fallback_match() -> None:
+    """OpenRouter stepfun profile fallback match."""
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
 
-    profile = get_openrouter_profile("openrouter/stepfun/step-3.5-flash:online")
+    profile = get_openrouter_profile(
+        "openrouter/stepfun/step-3.5-flash:online"
+    )
     assert profile.supports_schema_guided_output is False
     assert profile.supports_json_only_output is False
 
@@ -737,9 +841,13 @@ class TestOpenRouterProviderComplete:
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
-            mock_response = self._create_mock_response("Hello from OpenRouter!")
+            mock_response = self._create_mock_response(
+                "Hello from OpenRouter!"
+            )
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=mock_response
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenRouterProvider(
@@ -749,7 +857,9 @@ class TestOpenRouterProviderComplete:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -759,17 +869,27 @@ class TestOpenRouterProviderComplete:
             assert response.usage.output_tokens == 5
 
     @pytest.mark.asyncio
-    async def test_complete_with_tool_calls(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_with_tool_calls(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test completion with tool calls."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
             mock_response = self._create_mock_response(
                 content="",
-                tool_calls=[{"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}],
+                tool_calls=[
+                    {
+                        "id": "call_123",
+                        "name": "get_weather",
+                        "arguments": '{"city": "NYC"}',
+                    }
+                ],
             )
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=mock_response
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenRouterProvider(
@@ -779,7 +899,9 @@ class TestOpenRouterProviderComplete:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Weather?")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Weather?")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -795,7 +917,9 @@ class TestOpenRouterProviderComplete:
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(side_effect=TimeoutError())
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=TimeoutError()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenRouterProvider(
@@ -805,20 +929,26 @@ class TestOpenRouterProviderComplete:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMTimeoutError):
                 await provider.complete(request)
 
     @pytest.mark.asyncio
-    async def test_complete_cancelled(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_cancelled(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test cancellation handling."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(side_effect=asyncio.CancelledError())
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=asyncio.CancelledError()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenRouterProvider(
@@ -828,14 +958,18 @@ class TestOpenRouterProviderComplete:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
                 await provider.complete(request)
 
     @pytest.mark.asyncio
-    async def test_complete_with_cancel_token(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_with_cancel_token(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test early cancellation via cancel token."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -852,31 +986,46 @@ class TestOpenRouterProviderComplete:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
                 await provider.complete(request, cancel=cancel_token)
 
     @pytest.mark.asyncio
-    async def test_complete_maps_unhandled_exception(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_maps_unhandled_exception(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Complete maps unhandled exception."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(side_effect=ValueError("boom"))
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=ValueError("boom")
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
-            provider = OpenRouterProvider("anthropic/claude-sonnet-4.5", api_key="key")
+            provider = OpenRouterProvider(
+                "anthropic/claude-sonnet-4.5", api_key="key"
+            )
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
             mapped = LLMError(message="mapped", provider="openrouter")
 
-            with patch.object(provider, "_map_error", return_value=mapped) as mock_map:
-                with pytest.raises(LLMError, match="mapped"):
-                    await provider.complete(request)
+            with (
+                patch.object(
+                    provider, "map_error", return_value=mapped
+                ) as mock_map,
+                pytest.raises(LLMError, match="mapped"),
+            ):
+                await provider.complete(request)
 
             mock_map.assert_called_once()
 
@@ -919,12 +1068,14 @@ class TestOpenRouterProviderStreaming:
             usage_chunk.usage.total_tokens = 14
             chunks.append(usage_chunk)
 
-            async def async_gen():
+            async def async_gen() -> AsyncIterator[object]:
                 for chunk in chunks:
                     yield chunk
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=async_gen())
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=async_gen()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenRouterProvider(
@@ -940,7 +1091,9 @@ class TestOpenRouterProviderStreaming:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(
@@ -956,6 +1109,7 @@ class TestOpenRouterProviderStreaming:
     async def test_streaming_accumulates_tool_calls_and_reasoning(
         self, mock_openai_sdk: MagicMock
     ) -> None:
+        """Streaming accumulates tool calls and reasoning."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -968,7 +1122,9 @@ class TestOpenRouterProviderStreaming:
                 SimpleNamespace(
                     index=0,
                     id="call_1",
-                    function=SimpleNamespace(name="search", arguments='{"q": "hel'),
+                    function=SimpleNamespace(
+                        name="search", arguments='{"q": "hel'
+                    ),
                 )
             ]
             first.choices[0].finish_reason = None
@@ -994,16 +1150,20 @@ class TestOpenRouterProviderStreaming:
             usage_chunk.usage.completion_tokens = 3
             usage_chunk.usage.total_tokens = 5
 
-            async def async_gen():
+            async def async_gen() -> AsyncIterator[object]:
                 yield first
                 yield second
                 yield usage_chunk
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=async_gen())
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=async_gen()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
-            provider = OpenRouterProvider("anthropic/claude-sonnet-4.5", api_key="key")
+            provider = OpenRouterProvider(
+                "anthropic/claude-sonnet-4.5", api_key="key"
+            )
 
             streamed_reasoning: list[str] = []
 
@@ -1013,7 +1173,9 @@ class TestOpenRouterProviderStreaming:
 
             request = LLMRequest(
                 model="anthropic/claude-sonnet-4.5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Tools?")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Tools?")]),
+                ),
             )
 
             response = await provider.complete(
@@ -1033,6 +1195,7 @@ class TestOpenRouterProviderStreaming:
     async def test_streaming_cancel_token_raises_cancelled(
         self, mock_openai_sdk: MagicMock
     ) -> None:
+        """Streaming cancel token raises cancelled."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
@@ -1043,26 +1206,34 @@ class TestOpenRouterProviderStreaming:
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = None
 
-            async def async_gen():
+            async def async_gen() -> AsyncIterator[object]:
                 yield chunk
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=async_gen())
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=async_gen()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
-            provider = OpenRouterProvider("anthropic/claude-sonnet-4.5", api_key="key")
+            provider = OpenRouterProvider(
+                "anthropic/claude-sonnet-4.5", api_key="key"
+            )
             cancel = MagicMock()
             cancel.is_cancelled.return_value = True
 
             with pytest.raises(LLMCancelledError):
-                await provider._stream_completion({}, lambda _event: None, 10.0, cancel)
+                await provider.stream_completion(
+                    {}, lambda _event: None, cancel
+                )
 
 
 class TestOpenRouterProviderErrorMapping:
     """Test OpenRouter provider error mapping."""
 
-    def test_map_unknown_error_without_sdk_imports(self, mock_openai_sdk: MagicMock) -> None:
-        """Test error mapping falls back to generic error when SDK classes unavailable."""
+    def test_map_unknown_error_without_sdk_imports(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
+        """Errors map to a generic error when SDK classes are missing."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.errors import LLMError
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -1073,14 +1244,16 @@ class TestOpenRouterProviderErrorMapping:
             )
 
             # Test via the mocked path
-            with patch.object(provider, "_map_error") as mock_map:
-                mock_map.return_value = LLMError(message="Unknown error", provider="openrouter")
+            with patch.object(provider, "map_error") as mock_map:
+                mock_map.return_value = LLMError(
+                    message="Unknown error", provider="openrouter"
+                )
                 result = mock_map(ValueError("Unknown error"))
 
                 assert isinstance(result, LLMError)
                 assert "Unknown error" in result.message
 
-    def _fake_openai_errors(self) -> Any:
+    def _fake_openai_errors(self) -> SimpleNamespace:
         class APIConnectionError(Exception):
             pass
 
@@ -1106,18 +1279,29 @@ class TestOpenRouterProviderErrorMapping:
             RateLimitError=RateLimitError,
         )
 
-    def test_map_error_auth_rate_limit_bad_request_and_connection(self) -> None:
+    def test_map_error_auth_rate_limit_bad_request_and_connection(
+        self,
+    ) -> None:
+        """Map error auth rate limit bad request and connection."""
         from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
         fake_openai = self._fake_openai_errors()
         provider = object.__new__(OpenRouterProvider)
 
         with patch.dict(sys.modules, {"openai": fake_openai}):
-            auth = provider._map_error(fake_openai.AuthenticationError("no auth"))
-            rate = provider._map_error(fake_openai.RateLimitError("slow down"))
-            context = provider._map_error(fake_openai.BadRequestError("context length exceeded"))
-            invalid = provider._map_error(fake_openai.BadRequestError("bad request"))
-            conn = provider._map_error(fake_openai.APIConnectionError("network"))
+            auth = provider.map_error(
+                fake_openai.AuthenticationError("no auth")
+            )
+            rate = provider.map_error(fake_openai.RateLimitError("slow down"))
+            context = provider.map_error(
+                fake_openai.BadRequestError("context length exceeded")
+            )
+            invalid = provider.map_error(
+                fake_openai.BadRequestError("bad request")
+            )
+            conn = provider.map_error(
+                fake_openai.APIConnectionError("network")
+            )
 
         assert isinstance(auth, LLMAuthError)
         assert isinstance(rate, LLMRateLimitError)
@@ -1126,21 +1310,29 @@ class TestOpenRouterProviderErrorMapping:
         assert isinstance(conn, LLMServerError)
 
     def test_map_error_api_status_and_fallback(self) -> None:
+        """Map error API status and fallback."""
         from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
         fake_openai = self._fake_openai_errors()
         provider = object.__new__(OpenRouterProvider)
 
         with patch.dict(sys.modules, {"openai": fake_openai}):
-            server = provider._map_error(fake_openai.APIStatusError("bad gateway", status_code=502))
-            client = provider._map_error(fake_openai.APIStatusError("bad input", status_code=422))
-            unknown = provider._map_error(ValueError("unexpected"))
+            server = provider.map_error(
+                fake_openai.APIStatusError("bad gateway", status_code=502)
+            )
+            client = provider.map_error(
+                fake_openai.APIStatusError("bad input", status_code=422)
+            )
+            unknown = provider.map_error(ValueError("unexpected"))
 
         assert isinstance(server, LLMServerError)
         assert isinstance(client, LLMInvalidRequestError)
         assert isinstance(unknown, LLMError)
 
-    def test_map_error_handles_openai_import_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_map_error_handles_openai_import_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Map error handles OpenAI import error."""
         import builtins
 
         from penguiflow.llm.providers.openrouter import OpenRouterProvider
@@ -1148,11 +1340,18 @@ class TestOpenRouterProviderErrorMapping:
         provider = object.__new__(OpenRouterProvider)
         real_import = builtins.__import__
 
-        def _raising_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        def _raising_import(
+            name: str,
+            globals_: Mapping[str, object] | None = None,
+            locals_: Mapping[str, object] | None = None,
+            fromlist: Sequence[str] = (),
+            level: int = 0,
+        ) -> ModuleType:
             if name == "openai":
-                raise ImportError("missing openai")
-            return real_import(name, *args, **kwargs)
+                msg = "missing openai"
+                raise ImportError(msg)
+            return real_import(name, globals_, locals_, fromlist, level)
 
         monkeypatch.setattr(builtins, "__import__", _raising_import)
-        result = provider._map_error(ValueError("generic"))
+        result = provider.map_error(ValueError("generic"))
         assert isinstance(result, LLMError)

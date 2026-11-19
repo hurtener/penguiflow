@@ -1,4 +1,8 @@
-from typing import Any
+"""Tests for A2A push."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,14 +23,28 @@ from penguiflow_a2a.models import (
 )
 from penguiflow_a2a.push import is_safe_webhook_url
 
-from .planner_doubles import ScriptedPlanner, ScriptedRun, echo_planner, slow_planner
+from .planner_doubles import (
+    ScriptedPlanner,
+    ScriptedRun,
+    echo_planner,
+    slow_planner,
+)
+
+if TYPE_CHECKING:
+    from penguiflow_a2a.models import StreamResponse
 
 
 class FakePushSender:
+    """Push sender that records what it would send."""
+
     def __init__(self) -> None:
+        """Start with no recorded state."""
         self.events: list[tuple[PushNotificationConfig, Any]] = []
 
-    async def send(self, config: PushNotificationConfig, event: Any) -> None:
+    async def send(
+        self, config: PushNotificationConfig, event: StreamResponse
+    ) -> None:
+        """Record ``event`` for the push ``config``."""
         self.events.append((config, event))
 
 
@@ -35,7 +53,11 @@ def _agent_card(*, push_notifications: bool) -> AgentCard:
         protocol_versions=["0.3"],
         name="Test Agent",
         description="Test",
-        supported_interfaces=[AgentInterface(url="https://example.com/a2a", protocol_binding="HTTP+JSON")],
+        supported_interfaces=[
+            AgentInterface(
+                url="https://example.com/a2a", protocol_binding="HTTP+JSON"
+            )
+        ],
         version="1.0.0",
         capabilities=AgentCapabilities(
             streaming=True,
@@ -45,20 +67,34 @@ def _agent_card(*, push_notifications: bool) -> AgentCard:
         ),
         default_input_modes=["application/json"],
         default_output_modes=["application/json"],
-        skills=[AgentSkill(id="echo", name="Echo", description="Echo", tags=["test"])],
+        skills=[
+            AgentSkill(
+                id="echo", name="Echo", description="Echo", tags=["test"]
+            )
+        ],
     )
 
 
 def _build_client(*, push_notifications: bool) -> TestClient:
     planner = echo_planner()
-    service = A2AService(planner, agent_card=_agent_card(push_notifications=push_notifications), config=A2AConfig())
+    service = A2AService(
+        planner,
+        agent_card=_agent_card(push_notifications=push_notifications),
+        config=A2AConfig(),
+    )
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _build_slow_client(*, push_notifications: bool, delay: float = 0.4) -> TestClient:
+def _build_slow_client(
+    *, push_notifications: bool, delay: float = 0.4
+) -> TestClient:
     planner = slow_planner(delay)
-    service = A2AService(planner, agent_card=_agent_card(push_notifications=push_notifications), config=A2AConfig())
+    service = A2AService(
+        planner,
+        agent_card=_agent_card(push_notifications=push_notifications),
+        config=A2AConfig(),
+    )
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
@@ -79,16 +115,20 @@ def _message_payload(text: str, *, blocking: bool = True) -> dict[str, Any]:
 
 
 def test_push_config_endpoints_require_capability() -> None:
+    """Push config endpoints require capability."""
     with _build_client(push_notifications=False) as client:
         response = client.get(
             "/tasks/task-1/pushNotificationConfigs",
             headers=_base_headers(),
         )
         assert response.status_code == 400
-        assert response.json()["type"].endswith("push-notification-not-supported")
+        assert response.json()["type"].endswith(
+            "push-notification-not-supported"
+        )
 
 
 def test_push_config_crud() -> None:
+    """Push config crud."""
     with _build_slow_client(push_notifications=True) as client:
         response = client.post(
             "/message:send",
@@ -100,7 +140,10 @@ def test_push_config_crud() -> None:
             "pushNotificationConfig": {
                 "url": "https://example.com/webhook",
                 "token": "tok",
-                "authentication": {"schemes": ["Bearer"], "credentials": "secret"},
+                "authentication": {
+                    "schemes": ["Bearer"],
+                    "credentials": "secret",
+                },
             }
         }
         response = client.post(
@@ -138,6 +181,8 @@ def test_push_config_crud() -> None:
 
 @pytest.mark.asyncio
 async def test_push_delivery_receives_status_and_artifacts() -> None:
+    """Push delivery receives status and artifacts."""
+
     async def streamer(run: ScriptedRun) -> str:
         run.emit_chunk("hi", done=True)
         return "hi"
@@ -162,13 +207,21 @@ async def test_push_delivery_receives_status_and_artifacts() -> None:
                 blocking=True,
                 push_notification_config=PushNotificationConfig(
                     url="https://example.com/webhook",
-                    authentication=AuthenticationInfo(schemes=["Bearer"], credentials="token"),
+                    authentication=AuthenticationInfo(
+                        schemes=["Bearer"], credentials="token"
+                    ),
                 ),
             ),
         )
-        await service.send_message(request, tenant=None, requested_extensions=[])
-        status_events = [event for _config, event in sender.events if event.status_update]
-        artifact_events = [event for _config, event in sender.events if event.artifact_update]
+        await service.send_message(
+            request, tenant=None, requested_extensions=[]
+        )
+        status_events = [
+            event for _config, event in sender.events if event.status_update
+        ]
+        artifact_events = [
+            event for _config, event in sender.events if event.artifact_update
+        ]
         assert artifact_events
         assert any(event.status_update.final for event in status_events)
     finally:
@@ -176,6 +229,7 @@ async def test_push_delivery_receives_status_and_artifacts() -> None:
 
 
 def test_webhook_url_ssrf_checks() -> None:
+    """Webhook URL ssrf checks."""
     assert not is_safe_webhook_url("http://localhost:8000")
     assert not is_safe_webhook_url("http://127.0.0.1:8000")
     assert not is_safe_webhook_url("http://10.0.0.1")

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -33,7 +33,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from .output.base import OutputStrategy
 
 logger = logging.getLogger("penguiflow.llm.client")
 
@@ -57,10 +57,10 @@ class LLMClientConfig:
 
 
 @dataclass
-class LLMResult:
+class LLMResult(Generic[T]):
     """Result from an LLM structured output call."""
 
-    data: BaseModel
+    data: T
     usage: Usage
     cost: Cost
     mode_used: OutputMode
@@ -74,10 +74,11 @@ def _merge_fallback_profile(
     """Conservative capability profile across a fallback chain.
 
     The booleans that drive output-mode selection are AND-ed across every model
-    in the chain so the mode chosen for the primary is also honored by any model
-    we fail over to. Native schema-guided output additionally requires every
-    model to share the same ``native_structured_kind`` (an OpenAI response-format
-    request is not interchangeable with Databricks constrained decoding).
+    in the chain so the mode chosen for the primary is also honored by any
+    model we fail over to. Native schema-guided output additionally requires
+    every model to share the same ``native_structured_kind`` (an OpenAI
+    response-format request is not interchangeable with Databricks constrained
+    decoding).
 
     Non-capability fields (pricing, token limits, transformers) are inherited
     from the primary; per-attempt cost is still attributed to the model that
@@ -89,7 +90,9 @@ def _merge_fallback_profile(
 
     merged = profiles[0]
     for other in profiles[1:]:
-        same_native_kind = merged.native_structured_kind == other.native_structured_kind
+        same_native_kind = (
+            merged.native_structured_kind == other.native_structured_kind
+        )
         merged = replace(
             merged,
             supports_schema_guided_output=(
@@ -98,23 +101,34 @@ def _merge_fallback_profile(
                 and same_native_kind
             ),
             supports_json_only_output=(
-                merged.supports_json_only_output and other.supports_json_only_output
+                merged.supports_json_only_output
+                and other.supports_json_only_output
             ),
             supports_tools=merged.supports_tools and other.supports_tools,
             supports_native_tool_calls=(
-                merged.supports_native_tool_calls and other.supports_native_tool_calls
+                merged.supports_native_tool_calls
+                and other.supports_native_tool_calls
             ),
-            supports_streaming=merged.supports_streaming and other.supports_streaming,
-            supports_image_input=merged.supports_image_input and other.supports_image_input,
-            supports_audio_input=merged.supports_audio_input and other.supports_audio_input,
-            supports_reasoning=merged.supports_reasoning and other.supports_reasoning,
+            supports_streaming=merged.supports_streaming
+            and other.supports_streaming,
+            supports_image_input=merged.supports_image_input
+            and other.supports_image_input,
+            supports_audio_input=merged.supports_audio_input
+            and other.supports_audio_input,
+            supports_reasoning=merged.supports_reasoning
+            and other.supports_reasoning,
         )
 
     # Don't lead with a mode the merged chain can't uniformly satisfy.
-    if merged.default_output_mode == "native" and not merged.supports_schema_guided_output:
+    if (
+        merged.default_output_mode == "native"
+        and not merged.supports_schema_guided_output
+    ):
         merged = replace(
             merged,
-            default_output_mode="tools" if merged.supports_tools else "prompted",
+            default_output_mode="tools"
+            if merged.supports_tools
+            else "prompted",
         )
     return merged
 
@@ -134,7 +148,9 @@ class LLMClient:
 
         client = LLMClient("openai/gpt-4o")
         result = await client.generate(
-            messages=[LLMMessage(role="user", parts=[TextPart(text="What is 2+2?")])],
+            messages=[
+                LLMMessage(role="user", parts=[TextPart(text="What is 2+2?")])
+            ],
             response_model=Answer,
         )
         print(result.data.text)  # "4"
@@ -151,7 +167,7 @@ class LLMClient:
         config: LLMClientConfig | None = None,
         provider: Provider | None = None,
         profile: ModelProfile | None = None,
-        **provider_kwargs: Any,
+        **provider_kwargs: object,
     ) -> None:
         """Initialize the LLM client.
 
@@ -162,7 +178,8 @@ class LLMClient:
             fallback: Optional model fallback chain applied on 429s.
             cooldown_store: Optional shared cooldown store used with fallback.
             config: Client configuration.
-            provider: Pre-configured provider instance (overrides model-based creation).
+            provider: Pre-configured provider instance (overrides model-based
+                creation).
             profile: Pre-configured model profile (overrides automatic lookup).
             **provider_kwargs: Additional provider-specific configuration.
         """
@@ -170,7 +187,8 @@ class LLMClient:
         self.config = config or LLMClientConfig()
 
         if provider is not None and fallback is not None:
-            raise ValueError("fallback cannot be combined with a pre-configured provider")
+            msg = "fallback cannot be combined with a pre-configured provider"
+            raise ValueError(msg)
 
         # Create or use provided provider
         if provider is not None:
@@ -197,12 +215,13 @@ class LLMClient:
         if profile is not None:
             self._profile = profile
         elif fallback is not None:
-            # Output mode is chosen ONCE above the FallbackProvider seam and the
-            # resulting request (response_format / tools) is reused across every
-            # model in the chain. Use a capability profile that is the intersection
-            # of all chain models so the chosen mode is honored by whichever model
-            # answers (e.g. downgrade native structured output -> prompted when a
-            # fallback model lacks it).
+            # Output mode is chosen ONCE above the FallbackProvider seam and
+            # the resulting request (response_format / tools) is reused across
+            # every model in the chain. Use a capability profile that is the
+            # intersection of all chain models so the chosen mode is honored by
+            # whichever model
+            # answers (e.g. downgrade native structured output -> prompted when
+            # a fallback model lacks it).
             self._profile = _merge_fallback_profile(model, fallback)
         else:
             self._profile = get_profile(self._provider.model)
@@ -246,7 +265,7 @@ class LLMClient:
         max_retries: int | None = None,
         temperature: float | None = None,
         force_mode: OutputMode | None = None,
-    ) -> LLMResult:
+    ) -> LLMResult[T]:
         """Generate structured output from an LLM.
 
         Args:
@@ -278,11 +297,13 @@ class LLMClient:
             plan = plan_schema(self._profile, schema, mode=mode)
 
         # Get strategy for the chosen mode
-        strategy = self._get_strategy(mode)
+        strategy = self.get_strategy(mode)
 
         # Build retry config
         retry_config = RetryConfig(
-            max_retries=max_retries if max_retries is not None else self.config.max_retries,
+            max_retries=max_retries
+            if max_retries is not None
+            else self.config.max_retries,
             retry_on_validation=self.config.retry_on_validation,
             retry_on_parse=self.config.retry_on_parse,
             retry_on_provider_errors=self.config.retry_on_provider_errors,
@@ -333,15 +354,20 @@ class LLMClient:
                 cancel=cancel,
                 stream=stream,
                 on_stream_event=on_stream_event,
-                pricing_fn=calculate_cost if self.config.enable_cost_tracking else None,
+                pricing_fn=calculate_cost
+                if self.config.enable_cost_tracking
+                else None,
                 profile=self._profile,
                 plan=plan,
-                temperature=temperature if temperature is not None else self.config.temperature,
+                temperature=temperature
+                if temperature is not None
+                else self.config.temperature,
             )
 
             # Build cost object
             cost = Cost(
-                input_cost=0.0,  # Detailed breakdown not available from retry loop
+                # Detailed breakdown not available from retry loop
+                input_cost=0.0,
                 output_cost=0.0,
                 total_cost=total_cost,
             )
@@ -368,7 +394,8 @@ class LLMClient:
 
             return LLMResult(
                 data=parsed,
-                usage=Usage.zero(),  # Aggregated usage not tracked in retry loop
+                # Aggregated usage not tracked in retry loop
+                usage=Usage.zero(),
                 cost=cost,
                 mode_used=mode,
                 attempts=attempts + 1,
@@ -417,14 +444,13 @@ class LLMClient:
             on_stream_event=on_stream_event,
         )
 
-    def _get_strategy(self, mode: OutputMode) -> Any:
+    def get_strategy(self, mode: OutputMode) -> OutputStrategy:
         """Get the output strategy for a mode."""
         if mode == OutputMode.NATIVE:
             return self._native_strategy
-        elif mode == OutputMode.TOOLS:
+        if mode == OutputMode.TOOLS:
             return self._tools_strategy
-        else:
-            return self._prompted_strategy
+        return self._prompted_strategy
 
 
 async def generate_structured(
@@ -435,7 +461,13 @@ async def generate_structured(
     api_key: str | None = None,
     fallback: ModelFallbackConfig | None = None,
     cooldown_store: CooldownStore | None = None,
-    **kwargs: Any,
+    timeout_s: float | None = None,
+    cancel: CancelToken | None = None,
+    stream: bool = False,
+    on_stream_event: StreamCallback | None = None,
+    max_retries: int | None = None,
+    temperature: float | None = None,
+    force_mode: OutputMode | None = None,
 ) -> T:
     """Convenience function for one-shot structured generation.
 
@@ -446,14 +478,35 @@ async def generate_structured(
         api_key: API key.
         fallback: Optional model fallback chain applied on 429s.
         cooldown_store: Optional shared cooldown store used with fallback.
-        **kwargs: Additional arguments for LLMClient.generate().
+        timeout_s: Request timeout override, see :meth:`LLMClient.generate`.
+        cancel: Optional cancellation token.
+        stream: Whether to stream the response.
+        on_stream_event: Callback for streaming events.
+        max_retries: Retry limit override.
+        temperature: Optional sampling temperature.
+        force_mode: Force a specific output mode.
 
     Returns:
         Parsed Pydantic model instance.
     """
-    client = LLMClient(model, api_key=api_key, fallback=fallback, cooldown_store=cooldown_store)
-    result = await client.generate(messages, response_model, **kwargs)
-    return result.data  # type: ignore
+    client = LLMClient(
+        model,
+        api_key=api_key,
+        fallback=fallback,
+        cooldown_store=cooldown_store,
+    )
+    result = await client.generate(
+        messages,
+        response_model,
+        timeout_s=timeout_s,
+        cancel=cancel,
+        stream=stream,
+        on_stream_event=on_stream_event,
+        max_retries=max_retries,
+        temperature=temperature,
+        force_mode=force_mode,
+    )
+    return result.data
 
 
 __all__ = [

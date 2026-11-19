@@ -1,3 +1,5 @@
+"""Tests for sessions scheduler."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +18,7 @@ from penguiflow.sessions.scheduler import (
 
 @pytest.mark.asyncio
 async def test_schedule_config_next_after() -> None:
+    """Schedule config next after."""
     now = datetime.now(UTC)
     cfg = ScheduleConfig(interval_s=None)
     assert cfg.next_after(now) is None
@@ -25,12 +28,15 @@ async def test_schedule_config_next_after() -> None:
 
 @pytest.mark.asyncio
 async def test_job_scheduler_ticks_due_jobs_and_updates_next_run() -> None:
+    """Job scheduler ticks due jobs and updates next run."""
     store = InMemoryJobStore()
     now = datetime.now(UTC)
     job = JobDefinition(
         session_id="s1",
         task_payload={"query": "report"},
-        schedule=ScheduleConfig(interval_s=10, next_run_at=now - timedelta(seconds=1)),
+        schedule=ScheduleConfig(
+            interval_s=10, next_run_at=now - timedelta(seconds=1)
+        ),
     )
     await store.save_job(job)
 
@@ -51,12 +57,15 @@ async def test_job_scheduler_ticks_due_jobs_and_updates_next_run() -> None:
 
 @pytest.mark.asyncio
 async def test_job_scheduler_skips_disabled_jobs() -> None:
+    """Job scheduler skips disabled jobs."""
     store = InMemoryJobStore()
     now = datetime.now(UTC)
     job = JobDefinition(
         session_id="s1",
         task_payload={"query": "report"},
-        schedule=ScheduleConfig(interval_s=10, next_run_at=now - timedelta(seconds=1)),
+        schedule=ScheduleConfig(
+            interval_s=10, next_run_at=now - timedelta(seconds=1)
+        ),
         enabled=False,
     )
     await store.save_job(job)
@@ -74,6 +83,7 @@ async def test_job_scheduler_skips_disabled_jobs() -> None:
 
 @pytest.mark.asyncio
 async def test_job_scheduler_runner_start_stop() -> None:
+    """Job scheduler runner start stop."""
     store = InMemoryJobStore()
 
     async def _spawn(_job: JobDefinition) -> str:
@@ -85,4 +95,3 @@ async def test_job_scheduler_runner_start_stop() -> None:
     await asyncio.sleep(0.03)
     await runner.stop()
     await runner.stop()
-

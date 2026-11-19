@@ -1,3 +1,5 @@
+"""Tests for planner prompts."""
+
 from __future__ import annotations
 
 import json
@@ -6,6 +8,7 @@ from penguiflow.planner import ToolExamplesConfig, prompts
 
 
 def test_render_tool_includes_optional_fields() -> None:
+    """Render tool includes optional fields."""
     record = {
         "name": "search",
         "desc": "Lookup",
@@ -26,6 +29,7 @@ def test_render_tool_includes_optional_fields() -> None:
 
 
 def test_render_tool_includes_examples_in_priority_order() -> None:
+    """Render tool includes examples in priority order."""
     record = {
         "name": "search",
         "desc": "Lookup",
@@ -33,9 +37,21 @@ def test_render_tool_includes_examples_in_priority_order() -> None:
         "args_schema": {"title": "Args"},
         "out_schema": {"title": "Out"},
         "examples": [
-            {"args": {"query": "edge"}, "description": "Edge", "tags": ["edge-case"]},
-            {"args": {"query": "minimal"}, "description": "Minimal", "tags": ["minimal"]},
-            {"args": {"query": "common"}, "description": "Common", "tags": ["common"]},
+            {
+                "args": {"query": "edge"},
+                "description": "Edge",
+                "tags": ["edge-case"],
+            },
+            {
+                "args": {"query": "minimal"},
+                "description": "Minimal",
+                "tags": ["minimal"],
+            },
+            {
+                "args": {"query": "common"},
+                "description": "Common",
+                "tags": ["common"],
+            },
         ],
     }
     config = ToolExamplesConfig(max_examples_per_tool=2)
@@ -45,6 +61,7 @@ def test_render_tool_includes_examples_in_priority_order() -> None:
 
 
 def test_render_tool_can_hide_example_descriptions() -> None:
+    """Render tool can hide example descriptions."""
     record = {
         "name": "search",
         "desc": "Lookup",
@@ -52,7 +69,11 @@ def test_render_tool_can_hide_example_descriptions() -> None:
         "args_schema": {"title": "Args"},
         "out_schema": {"title": "Out"},
         "examples": [
-            {"args": {"query": "basic"}, "description": "Basic", "tags": ["minimal"]},
+            {
+                "args": {"query": "basic"},
+                "description": "Basic",
+                "tags": ["minimal"],
+            },
         ],
     }
     config = ToolExamplesConfig(include_descriptions=False)
@@ -61,6 +82,7 @@ def test_render_tool_can_hide_example_descriptions() -> None:
 
 
 def test_build_system_prompt_appends_extra_guidance() -> None:
+    """Build system prompt appends extra guidance."""
     prompt = prompts.build_system_prompt(
         [
             {
@@ -77,11 +99,13 @@ def test_build_system_prompt_appends_extra_guidance() -> None:
 
 
 def test_build_user_prompt_serialises_context() -> None:
+    """Build user prompt serialises context."""
     payload = prompts.build_user_prompt("question", {"tenant": "acme"})
     assert "tenant" in payload
 
 
 def test_render_helpers() -> None:
+    """Render helpers."""
     error_obs = prompts.render_observation(observation=None, error="boom")
     error_payload = json.loads(error_obs)
     assert error_payload["error"] == "boom"
@@ -94,19 +118,23 @@ def test_render_helpers() -> None:
 
 
 def test_build_system_prompt_includes_current_date() -> None:
+    """Build system prompt includes current date."""
     prompt = prompts.build_system_prompt([], current_date="2025-12-04")
     assert "Current date: 2025-12-04" in prompt
 
 
 def test_build_system_prompt_default_date() -> None:
-    from datetime import date
+    """Build system prompt default date."""
+    from datetime import datetime
 
     prompt = prompts.build_system_prompt([])
-    expected_date = date.today().isoformat()
+    # The prompt uses the local date, as a user reads it.
+    expected_date = datetime.now().astimezone().date().isoformat()
     assert f"Current date: {expected_date}" in prompt
 
 
 def test_build_system_prompt_has_tagged_sections() -> None:
+    """Build system prompt has tagged sections."""
     prompt = prompts.build_system_prompt([])
     # Check for key tagged sections
     assert "<identity>" in prompt
@@ -123,7 +151,7 @@ def test_build_system_prompt_has_tagged_sections() -> None:
 
 
 def test_build_system_prompt_action_schema_snapshot_markers() -> None:
-    """Guardrails: keep core schema markers stable for repair behavior and UI tooling."""
+    """Core schema markers stay stable for repair and UI tooling."""
     prompt = prompts.build_system_prompt([])
     assert "Emit keys in this order for stability: next_node, args." in prompt
     assert "args.answer" in prompt
@@ -131,6 +159,7 @@ def test_build_system_prompt_action_schema_snapshot_markers() -> None:
 
 
 def test_build_system_prompt_extra_in_tagged_section() -> None:
+    """Build system prompt extra in tagged section."""
     prompt = prompts.build_system_prompt([], extra="Custom instructions")
     assert "<additional_guidance>" in prompt
     assert "Custom instructions" in prompt
@@ -138,6 +167,7 @@ def test_build_system_prompt_extra_in_tagged_section() -> None:
 
 
 def test_build_system_prompt_planning_hints_in_tagged_section() -> None:
+    """Build system prompt planning hints in tagged section."""
     hints = {"constraints": "No external calls"}
     prompt = prompts.build_system_prompt([], planning_hints=hints)
     assert "<planning_constraints>" in prompt
@@ -146,6 +176,7 @@ def test_build_system_prompt_planning_hints_in_tagged_section() -> None:
 
 
 def test_render_planning_hints_comprehensive() -> None:
+    """Render planning hints comprehensive."""
     hints = {
         "constraints": "Stay within budget",
         "preferred_order": ["step1", "step2"],
@@ -164,57 +195,69 @@ def test_render_planning_hints_comprehensive() -> None:
 
 
 def test_render_planning_hints_empty() -> None:
+    """Render planning hints empty."""
     result = prompts.render_planning_hints({})
     assert result == ""
 
 
 def test_render_disallowed_node() -> None:
+    """Render disallowed node."""
     result = prompts.render_disallowed_node("forbidden_tool")
     assert "forbidden_tool" in result
     assert "not permitted" in result
 
 
 def test_render_ordering_hint_violation() -> None:
-    result = prompts.render_ordering_hint_violation(["first", "second"], "third")
+    """Render ordering hint violation."""
+    result = prompts.render_ordering_hint_violation(
+        ["first", "second"], "third"
+    )
     assert "first, second" in result
     assert "third" in result
 
 
 def test_render_parallel_limit() -> None:
+    """Render parallel limit."""
     result = prompts.render_parallel_limit(5)
     assert "max_parallel=5" in result
 
 
 def test_render_sequential_only() -> None:
+    """Render sequential only."""
     result = prompts.render_sequential_only("serial_tool")
     assert "serial_tool" in result
     assert "sequentially" in result
 
 
 def test_render_parallel_setup_error() -> None:
+    """Render parallel setup error."""
     result = prompts.render_parallel_setup_error(["error1", "error2"])
     assert "error1" in result
     assert "error2" in result
 
 
 def test_render_empty_parallel_plan() -> None:
+    """Render empty parallel plan."""
     result = prompts.render_empty_parallel_plan()
     assert "at least one branch" in result
 
 
 def test_render_skill_proposal_guidance() -> None:
+    """Render skill proposal guidance."""
     result = prompts.render_skill_proposal_guidance()
     assert "skill_propose" in result
     assert "does NOT save or persist skills" in result
 
 
 def test_render_parallel_with_next_node() -> None:
+    """Render parallel with next node."""
     result = prompts.render_parallel_with_next_node("next_tool")
     assert "next_tool" in result
     assert "must set next_node" in result
 
 
 def test_render_parallel_unknown_failure() -> None:
+    """Render parallel unknown failure."""
     result = prompts.render_parallel_unknown_failure("failed_tool")
     assert "failed_tool" in result
     assert "failed" in result

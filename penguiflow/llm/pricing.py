@@ -7,20 +7,21 @@ from __future__ import annotations
 
 import importlib
 import logging
-from decimal import Decimal
 from functools import cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .types import Cost, Usage
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from decimal import Decimal
+    from types import ModuleType
 
 logger = logging.getLogger("penguiflow.llm.pricing")
 
-# Pricing per 1K tokens: (input_price, output_price) in USD
-# Updated March 2026
-# OpenRouter prices sourced from https://openrouter.ai/api/v1/models on 2026-03-03.
+# Pricing per 1K tokens: (input_price, output_price) in USD Updated March 2026
+# OpenRouter prices sourced from https://openrouter.ai/api/v1/models on
+# 2026-03-03.
 PRICING: dict[str, tuple[float, float]] = {
     # OpenAI - GPT-5.x Series (OpenRouter/OpenAI catalog, March 2026)
     "gpt-5": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
@@ -56,7 +57,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1-nano": (0.0001, 0.0004),  # $0.10/$0.40 per 1M tokens
     "gpt-4-turbo": (0.01, 0.03),  # Legacy pricing
     "gpt-4-turbo-preview": (0.01, 0.03),  # Legacy pricing
-    "gpt-oss-120b": (0.00015, 0.0006),  # $0.15/$0.60 per 1M tokens (open-weight MoE)
+    "gpt-oss-120b": (
+        0.00015,
+        0.0006,
+    ),  # $0.15/$0.60 per 1M tokens (open-weight MoE)
     "gpt-4": (0.03, 0.06),  # Legacy pricing
     "gpt-3.5-turbo": (0.0005, 0.0015),  # Legacy pricing
     # OpenAI - Reasoning Models (o-series)
@@ -71,8 +75,8 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-5": (0.005, 0.025),  # $5/$25 per 1M tokens
     "claude-sonnet-4-5": (0.003, 0.015),  # $3/$15 per 1M tokens
     "claude-haiku-4-5": (0.001, 0.005),  # $1/$5 per 1M tokens
-    # Anthropic - Claude 4.8 Series
-    # Assumed same rate card as Opus 4.7 - verify against account pricing.
+    # Anthropic - Claude 4.8 Series Assumed same rate card as Opus 4.7 - verify
+    # against account pricing.
     "claude-opus-4-8": (0.005, 0.025),  # $5/$25 per 1M tokens
     # Anthropic - Claude 4.7 Series
     "claude-opus-4-7": (0.005, 0.025),  # $5/$25 per 1M tokens
@@ -91,7 +95,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-3-sonnet": (0.003, 0.015),  # $3/$15 per 1M tokens
     "claude-3-haiku": (0.00025, 0.00125),  # $0.25/$1.25 per 1M tokens
     # Google - Gemini 2.5 Series
-    "gemini-2.5-pro": (0.00125, 0.01),  # $1.25/$10 per 1M tokens (<=200k context)
+    "gemini-2.5-pro": (
+        0.00125,
+        0.01,
+    ),  # $1.25/$10 per 1M tokens (<=200k context)
     "gemini-2.5-flash": (0.0003, 0.0025),  # $0.30/$2.50 per 1M tokens
     "gemini-2.5-flash-lite": (0.0001, 0.0004),  # $0.10/$0.40 per 1M tokens
     # Google - Gemini 2.0 Series
@@ -104,10 +111,19 @@ PRICING: dict[str, tuple[float, float]] = {
     "gemini-3-flash-preview": (0.0005, 0.003),  # $0.50/$3 per 1M tokens
     "gemini-3-pro-preview": (0.002, 0.012),  # $2/$12 per 1M tokens
     "gemini-3-pro-image-preview": (0.002, 0.012),  # $2/$12 per 1M tokens
-    "gemini-3.1-flash-image-preview": (0.00025, 0.0015),  # $0.25/$1.50 per 1M tokens
-    "gemini-3.1-flash-lite-preview": (0.00025, 0.0015),  # $0.25/$1.50 per 1M tokens
+    "gemini-3.1-flash-image-preview": (
+        0.00025,
+        0.0015,
+    ),  # $0.25/$1.50 per 1M tokens
+    "gemini-3.1-flash-lite-preview": (
+        0.00025,
+        0.0015,
+    ),  # $0.25/$1.50 per 1M tokens
     "gemini-3.1-pro-preview": (0.002, 0.012),  # $2/$12 per 1M tokens
-    "gemini-3.1-pro-preview-customtools": (0.002, 0.012),  # $2/$12 per 1M tokens
+    "gemini-3.1-pro-preview-customtools": (
+        0.002,
+        0.012,
+    ),  # $2/$12 per 1M tokens
     # Google - Gemini 1.5 Series (Legacy)
     "gemini-1.5-pro": (0.00125, 0.005),  # $1.25/$5 per 1M tokens
     "gemini-1.5-flash": (0.000075, 0.0003),  # $0.075/$0.30 per 1M tokens
@@ -144,8 +160,8 @@ PRICING: dict[str, tuple[float, float]] = {
     "databricks-claude-sonnet-4": (0.003, 0.015),
     "databricks-claude-sonnet-4-5": (0.003, 0.015),
     "databricks-claude-sonnet-4-6": (0.003, 0.015),
-    # Anthropic introductory Sonnet 5 rate through 2026-08-31;
-    # update to $3/$15 per MTok on 2026-09-01.
+    # Anthropic introductory Sonnet 5 rate through 2026-08-31; update to $3/$15
+    # per MTok on 2026-09-01.
     "databricks-claude-sonnet-5": (0.002, 0.01),
     "databricks-claude-opus-4-5": (0.005, 0.025),
     "databricks-claude-opus-4-6": (0.005, 0.025),
@@ -169,7 +185,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "mistralai/mistral-large": (0.002, 0.006),  # $2/$6 per 1M tokens
     "mistralai/mistral-medium": (0.00275, 0.0081),
     "mistralai/mistral-small": (0.0002, 0.0006),
-    "mistralai/mistral-small-2603": (0.00015, 0.0006),  # $0.15/$0.60 per 1M tokens
+    "mistralai/mistral-small-2603": (
+        0.00015,
+        0.0006,
+    ),  # $0.15/$0.60 per 1M tokens
     # OpenRouter - Meta Llama
     "meta-llama/llama-3.1-70b-instruct": (0.00052, 0.00075),
     "meta-llama/llama-3.1-8b-instruct": (0.00006, 0.00006),
@@ -205,7 +224,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "glm-4.7": (0.00038, 0.00198),  # $0.38/$1.98 per 1M tokens
     "glm-5": (0.00072, 0.0023),  # $0.72/$2.30 per 1M tokens
     "glm-5-turbo": (0.00096, 0.0032),  # $0.96/$3.20 per 1M tokens
-    "nvidia/nemotron-3-super-120b-a12b": (0.0001, 0.0005),  # $0.10/$0.50 per 1M tokens
+    "nvidia/nemotron-3-super-120b-a12b": (
+        0.0001,
+        0.0005,
+    ),  # $0.10/$0.50 per 1M tokens
 }
 
 _REGISTERED_PRICING: dict[str, tuple[float, float]] = {}
@@ -213,7 +235,7 @@ _PROVIDER_PREFIXES = ("databricks-",)
 
 
 def _pricing_candidates(model: str) -> list[str]:
-    """Generate exact and normalized candidates for nested model identifiers."""
+    """Generate exact and normalized candidates for a nested model id."""
     seen: set[str] = set()
     candidates: list[str] = []
 
@@ -241,7 +263,7 @@ def _pricing_candidates(model: str) -> list[str]:
 
 
 @cache
-def _genai_prices_module() -> Any | None:
+def _genai_prices_module() -> ModuleType | None:
     """Import genai-prices lazily because pricing automation is optional."""
     try:
         return importlib.import_module("genai_prices")
@@ -249,7 +271,9 @@ def _genai_prices_module() -> Any | None:
         return None
 
 
-def _lookup_registered_pricing(candidates: Iterable[str]) -> tuple[float, float] | None:
+def _lookup_registered_pricing(
+    candidates: Iterable[str],
+) -> tuple[float, float] | None:
     candidate_list = list(candidates)
     for candidate in candidate_list:
         if candidate in _REGISTERED_PRICING:
@@ -267,7 +291,9 @@ def _lookup_registered_pricing(candidates: Iterable[str]) -> tuple[float, float]
     return None
 
 
-def _lookup_static_pricing(candidates: list[str]) -> tuple[float, float] | None:
+def _lookup_static_pricing(
+    candidates: list[str],
+) -> tuple[float, float] | None:
     for candidate in candidates:
         if candidate in PRICING:
             return PRICING[candidate]
@@ -281,8 +307,10 @@ def _lookup_static_pricing(candidates: list[str]) -> tuple[float, float] | None:
     return None
 
 
-def _lookup_exact_static_zero_pricing(candidates: list[str]) -> tuple[float, float] | None:
-    """Preserve explicit static free-tier entries before broad upstream matches."""
+def _lookup_exact_static_zero_pricing(
+    candidates: list[str],
+) -> tuple[float, float] | None:
+    """Keep static free-tier entries ahead of broad upstream matches."""
     for candidate in candidates:
         if PRICING.get(candidate) == (0.0, 0.0):
             return (0.0, 0.0)
@@ -303,19 +331,27 @@ def _lookup_genai_pricing(model: str) -> tuple[float, float] | None:
     return (cost.input_cost, cost.output_cost)
 
 
-def _calculate_genai_cost(model: str, *, input_tokens: int, output_tokens: int) -> Cost | None:
+def _calculate_genai_cost(
+    model: str, *, input_tokens: int, output_tokens: int
+) -> Cost | None:
     genai_prices = _genai_prices_module()
     if genai_prices is None:
         return None
 
     for candidate in _pricing_candidates(model):
         try:
-            usage = genai_prices.Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+            usage = genai_prices.Usage(
+                input_tokens=input_tokens, output_tokens=output_tokens
+            )
             calculation = genai_prices.calc_price(usage, model_ref=candidate)
         except (LookupError, ValueError):
             continue
         except Exception:
-            logger.debug("genai-prices lookup failed for model %r", candidate, exc_info=True)
+            logger.debug(
+                "genai-prices lookup failed for model %r",
+                candidate,
+                exc_info=True,
+            )
             continue
 
         input_cost = _decimal_to_float(calculation.input_price)
@@ -358,7 +394,8 @@ def get_pricing(model: str) -> tuple[float, float]:
 
     # Default: unknown pricing (free)
     logger.warning(
-        f"Unknown model '{model}' - cost tracking will not work. Use register_pricing() to add pricing for this model."
+        f"Unknown model '{model}' - cost tracking will not work. Use "
+        "register_pricing() to add pricing for this model."
     )
     return (0.0, 0.0)
 
@@ -377,20 +414,28 @@ def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     candidates = _pricing_candidates(model)
     if registered := _lookup_registered_pricing(candidates):
         input_price, output_price = registered
-        return (input_tokens * input_price / 1000) + (output_tokens * output_price / 1000)
+        return (input_tokens * input_price / 1000) + (
+            output_tokens * output_price / 1000
+        )
 
     if static_zero_price := _lookup_exact_static_zero_pricing(candidates):
         input_price, output_price = static_zero_price
-        return (input_tokens * input_price / 1000) + (output_tokens * output_price / 1000)
+        return (input_tokens * input_price / 1000) + (
+            output_tokens * output_price / 1000
+        )
 
-    if genai_cost := _calculate_genai_cost(model, input_tokens=input_tokens, output_tokens=output_tokens):
+    if genai_cost := _calculate_genai_cost(
+        model, input_tokens=input_tokens, output_tokens=output_tokens
+    ):
         return genai_cost.total_cost
 
     if static_price := _lookup_static_pricing(candidates):
         input_price, output_price = static_price
     else:
         input_price, output_price = get_pricing(model)
-    return (input_tokens * input_price / 1000) + (output_tokens * output_price / 1000)
+    return (input_tokens * input_price / 1000) + (
+        output_tokens * output_price / 1000
+    )
 
 
 def calculate_cost_from_usage(model: str, usage: Usage) -> Cost:
@@ -408,13 +453,21 @@ def calculate_cost_from_usage(model: str, usage: Usage) -> Cost:
         input_price, output_price = registered
         input_cost = usage.input_tokens * input_price / 1000
         output_cost = usage.output_tokens * output_price / 1000
-        return Cost(input_cost=input_cost, output_cost=output_cost, total_cost=input_cost + output_cost)
+        return Cost(
+            input_cost=input_cost,
+            output_cost=output_cost,
+            total_cost=input_cost + output_cost,
+        )
 
     if static_zero_price := _lookup_exact_static_zero_pricing(candidates):
         input_price, output_price = static_zero_price
         input_cost = usage.input_tokens * input_price / 1000
         output_cost = usage.output_tokens * output_price / 1000
-        return Cost(input_cost=input_cost, output_cost=output_cost, total_cost=input_cost + output_cost)
+        return Cost(
+            input_cost=input_cost,
+            output_cost=output_cost,
+            total_cost=input_cost + output_cost,
+        )
 
     if genai_cost := _calculate_genai_cost(
         model,
@@ -434,7 +487,9 @@ def calculate_cost_from_usage(model: str, usage: Usage) -> Cost:
     )
 
 
-def register_pricing(model: str, input_price: float, output_price: float) -> None:
+def register_pricing(
+    model: str, input_price: float, output_price: float
+) -> None:
     """Register custom pricing for a model.
 
     Args:

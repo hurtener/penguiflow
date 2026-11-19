@@ -3,58 +3,75 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner
+from penguiflow.planner import PlannerFinish, ReactPlanner
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.planner.react import ReflectionConfig, ReflectionCritique
 from penguiflow.registry import ModelRegistry
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from penguiflow.planner.models import PlannerEvent
+
 
 class Query(BaseModel):
+    """Query payload."""
+
     question: str
 
 
 class SearchResult(BaseModel):
+    """Output of the search tool."""
+
     documents: list[str]
 
 
 @tool(desc="Search knowledge base")
-async def search(args: Query, ctx: object) -> SearchResult:  # pragma: no cover
-    return SearchResult(documents=["Doc A about parallel", "Doc B about errors"])
+async def search(
+    _args: Query, _ctx: object
+) -> SearchResult:  # pragma: no cover
+    """Return canned search results."""
+    return SearchResult(
+        documents=["Doc A about parallel", "Doc B about errors"]
+    )
 
 
-class ReflectionStubClient:
+class ReflectionStubClient(JSONLLMClient):
     """Stubbed JSON LLM client returning pre-configured responses."""
 
     def __init__(self, responses: list[Mapping[str, object]]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
         self.calls: list[list[Mapping[str, str]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
-            raise AssertionError("No stub responses left")
+            msg = "No stub responses left"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.0
 
 
 @pytest.mark.asyncio()
 async def test_reflection_improves_incomplete_answer() -> None:
     """Reflection should detect incomplete answers and request a revision."""
-
     main_client = ReflectionStubClient(
         [
             {
@@ -72,7 +89,8 @@ async def test_reflection_improves_incomplete_answer() -> None:
                 "next_node": None,
                 "args": {
                     "raw_answer": (
-                        "PenguiFlow uses asyncio.gather for parallel execution "
+                        "PenguiFlow uses asyncio.gather for parallel "
+                        "execution "
                         "with exponential backoff for error recovery"
                     ),
                 },
@@ -124,9 +142,11 @@ async def test_reflection_improves_incomplete_answer() -> None:
         ),
         reflection_llm="stub-model",
     )
-    planner._reflection_client = reflection_client
+    planner.reflection_client = reflection_client
 
-    result = await planner.run("Explain parallel execution with error recovery")
+    result = await planner.run(
+        "Explain parallel execution with error recovery"
+    )
 
     assert result.reason == "answer_complete"
     assert "reflection" in result.metadata
@@ -141,7 +161,6 @@ async def test_reflection_improves_incomplete_answer() -> None:
 @pytest.mark.asyncio()
 async def test_reflection_stops_after_max_revisions() -> None:
     """Reflection should stop after the configured number of revisions."""
-
     main_client = ReflectionStubClient(
         [
             {
@@ -217,7 +236,7 @@ async def test_reflection_stops_after_max_revisions() -> None:
         ),
         reflection_llm="stub-model",
     )
-    planner._reflection_client = reflection_client
+    planner.reflection_client = reflection_client
 
     result = await planner.run("Test")
 
@@ -231,7 +250,6 @@ async def test_reflection_stops_after_max_revisions() -> None:
 @pytest.mark.asyncio()
 async def test_reflection_disabled_by_default() -> None:
     """Reflection behaviour must be opt-in."""
-
     client = ReflectionStubClient(
         [
             {
@@ -264,7 +282,6 @@ async def test_reflection_disabled_by_default() -> None:
 @pytest.mark.asyncio()
 async def test_reflection_respects_hop_budget() -> None:
     """Reflection loop should not exceed hop budgets."""
-
     client = ReflectionStubClient(
         [
             {
@@ -311,10 +328,11 @@ async def test_reflection_respects_hop_budget() -> None:
         ),
         reflection_llm="stub-model",
     )
-    planner._reflection_client = reflection_client
+    planner.reflection_client = reflection_client
 
     result = await planner.run("Test")
 
+    assert isinstance(result, PlannerFinish)
     constraints = result.metadata["constraints"]
     assert constraints["hop_exhausted"] is True
     assert constraints["hops_used"] == 1
@@ -323,10 +341,9 @@ async def test_reflection_respects_hop_budget() -> None:
 @pytest.mark.asyncio()
 async def test_reflection_event_emission() -> None:
     """Reflection should emit structured planner events."""
-
     events: list[Any] = []
 
-    def event_callback(event: Any) -> None:
+    def event_callback(event: PlannerEvent) -> None:
         events.append(event)
 
     client = ReflectionStubClient(
@@ -362,11 +379,13 @@ async def test_reflection_event_emission() -> None:
     planner = ReactPlanner(
         llm_client=client,
         catalog=build_catalog([Node(search, name="search")], registry),
-        reflection_config=ReflectionConfig(enabled=True, use_separate_llm=True),
+        reflection_config=ReflectionConfig(
+            enabled=True, use_separate_llm=True
+        ),
         reflection_llm="stub-model",
         event_callback=event_callback,
     )
-    planner._reflection_client = reflection_client
+    planner.reflection_client = reflection_client
 
     await planner.run("Test")
 
@@ -382,7 +401,6 @@ async def test_reflection_event_emission() -> None:
 
 def test_reflection_critique_model_enforces_bounds() -> None:
     """ReflectionCritique validates the provided score bounds."""
-
     with pytest.raises(ValueError):
         ReflectionCritique(score=1.5, passed=False, feedback="bad")
 
@@ -392,7 +410,6 @@ def test_reflection_critique_model_enforces_bounds() -> None:
 
 def test_reflection_config_defaults() -> None:
     """Reflection config defaults keep the feature disabled."""
-
     config = ReflectionConfig()
     assert config.enabled is False
     assert pytest.approx(config.quality_threshold) == 0.80
@@ -401,8 +418,7 @@ def test_reflection_config_defaults() -> None:
 
 @pytest.mark.asyncio()
 async def test_critique_uses_main_llm_when_shared_client() -> None:
-    """When no separate LLM configured the main client handles critique calls."""
-
+    """Without a separate LLM, the main client does the critique."""
     critique_payload = {
         "score": 0.9,
         "passed": True,
@@ -412,23 +428,27 @@ async def test_critique_uses_main_llm_when_shared_client() -> None:
     }
 
     class CaptureClient(ReflectionStubClient):
+        @override
         async def complete(
             self,
             *,
-            messages: list[Mapping[str, str]],
-            response_format: Mapping[str, object] | None = None,
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
             stream: bool = False,
-            on_stream_chunk: object = None,
-        ) -> str:
-            del response_format, stream, on_stream_chunk
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
+        ) -> tuple[str, float]:
             self.calls.append(list(messages))
             if self._responses:
-                return self._responses.pop(0)
-            return json.dumps(critique_payload)
+                return self._responses.pop(0), 0.0
+            return json.dumps(critique_payload), 0.0
 
     client = CaptureClient(
         [
-            {"thought": "Done", "next_node": None, "args": {"raw_answer": "Result"}},
+            {
+                "thought": "Done",
+                "next_node": None,
+                "args": {"raw_answer": "Result"},
+            },
         ]
     )
 
@@ -442,7 +462,7 @@ async def test_critique_uses_main_llm_when_shared_client() -> None:
 
     await planner.run("Test")
 
-    # First call is the planning action, second is the critique using same client
+    # First call is the planning action, second is the critique using same
+    # client
     assert len(client.calls) >= 2
     assert client.calls[-1][0]["role"] == "system"
-

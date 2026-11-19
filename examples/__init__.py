@@ -1,1 +1,1 @@
-# Examples package marker for test imports.
+"""Examples package for test imports."""

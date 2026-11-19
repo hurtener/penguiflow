@@ -4,23 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from typing_extensions import override
 
 from penguiflow.state import StateStore, StoredEvent
 from penguiflow.steering import SteeringEvent
 
 from .models import StateUpdate, TaskState, TaskStateModel
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 
 class SessionStateStore(Protocol):
-    async def save_task(self, state: TaskState) -> None: ...
+    """Storage for session tasks, updates and steering events."""
 
-    async def save_update(self, update: StateUpdate) -> None: ...
+    async def save_task(self, state: TaskState) -> None:
+        """Persist a task's state."""
+        ...
 
-    async def save_steering(self, event: SteeringEvent) -> None: ...
+    async def save_update(self, update: StateUpdate) -> None:
+        """Persist a session update."""
+        ...
 
-    async def list_tasks(self, session_id: str) -> Sequence[TaskState]: ...
+    async def save_steering(self, event: SteeringEvent) -> None:
+        """Persist a steering event."""
+        ...
+
+    async def list_tasks(self, session_id: str) -> Sequence[TaskState]:
+        """Return a session's tasks."""
+        ...
 
     async def list_updates(
         self,
@@ -29,7 +43,9 @@ class SessionStateStore(Protocol):
         task_id: str | None = None,
         since_id: str | None = None,
         limit: int = 500,
-    ) -> Sequence[StateUpdate]: ...
+    ) -> Sequence[StateUpdate]:
+        """Return a session's updates, optionally filtered and paginated."""
+        ...
 
     async def list_steering(
         self,
@@ -38,7 +54,9 @@ class SessionStateStore(Protocol):
         task_id: str | None = None,
         since_id: str | None = None,
         limit: int = 500,
-    ) -> Sequence[SteeringEvent]: ...
+    ) -> Sequence[SteeringEvent]:
+        """Return a session's steering events, filtered and paginated."""
+        ...
 
 
 def _clone_task(state: TaskState) -> TaskState:
@@ -68,6 +86,7 @@ class InMemorySessionStateStore(SessionStateStore):
         max_updates_per_session: int = 10_000,
         max_steering_events_per_session: int = 10_000,
     ) -> None:
+        """Create an empty store with per-session retention limits."""
         self._tasks: dict[str, dict[str, TaskState]] = {}
         self._updates: dict[str, list[StateUpdate]] = {}
         self._steering: dict[str, list[SteeringEvent]] = {}
@@ -75,29 +94,40 @@ class InMemorySessionStateStore(SessionStateStore):
         self._max_steering = max_steering_events_per_session
         self._lock = asyncio.Lock()
 
+    @override
     async def save_task(self, state: TaskState) -> None:
         async with self._lock:
-            self._tasks.setdefault(state.session_id, {})[state.task_id] = _clone_task(state)
+            self._tasks.setdefault(state.session_id, {})[state.task_id] = (
+                _clone_task(state)
+            )
 
+    @override
     async def save_update(self, update: StateUpdate) -> None:
         async with self._lock:
             updates = self._updates.setdefault(update.session_id, [])
             updates.append(update)
             if self._max_updates and len(updates) > self._max_updates:
-                self._updates[update.session_id] = updates[-self._max_updates :]
+                self._updates[update.session_id] = updates[
+                    -self._max_updates :
+                ]
 
+    @override
     async def save_steering(self, event: SteeringEvent) -> None:
         async with self._lock:
             events = self._steering.setdefault(event.session_id, [])
             events.append(event)
             if self._max_steering and len(events) > self._max_steering:
-                self._steering[event.session_id] = events[-self._max_steering :]
+                self._steering[event.session_id] = events[
+                    -self._max_steering :
+                ]
 
+    @override
     async def list_tasks(self, session_id: str) -> Sequence[TaskState]:
         async with self._lock:
             tasks = list(self._tasks.get(session_id, {}).values())
         return [_clone_task(state) for state in tasks]
 
+    @override
     async def list_updates(
         self,
         session_id: str,
@@ -121,6 +151,7 @@ class InMemorySessionStateStore(SessionStateStore):
             filtered.append(update)
         return filtered[-limit:]
 
+    @override
     async def list_steering(
         self,
         session_id: str,
@@ -146,14 +177,21 @@ class InMemorySessionStateStore(SessionStateStore):
 
 
 class StateStoreSessionAdapter(SessionStateStore):
-    """Adapter that persists session updates into a core StateStore audit log."""
+    """Adapter that persists session updates into a StateStore audit log."""
 
     def __init__(self, store: StateStore) -> None:
+        """Wrap a core StateStore, recording session data as its events."""
         self._store = store
+
+    @property
+    def store(self) -> StateStore:
+        """The wrapped core StateStore."""
+        return self._store
 
     def _trace_id(self, session_id: str) -> str:
         return f"session:{session_id}"
 
+    @override
     async def save_task(self, state: TaskState) -> None:
         payload = TaskStateModel.from_state(state).model_dump(mode="json")
         await self._store.save_event(
@@ -167,6 +205,7 @@ class StateStoreSessionAdapter(SessionStateStore):
             )
         )
 
+    @override
     async def save_update(self, update: StateUpdate) -> None:
         payload = update.model_dump(mode="json")
         await self._store.save_event(
@@ -180,6 +219,7 @@ class StateStoreSessionAdapter(SessionStateStore):
             )
         )
 
+    @override
     async def save_steering(self, event: SteeringEvent) -> None:
         payload = event.model_dump(mode="json")
         await self._store.save_event(
@@ -193,6 +233,7 @@ class StateStoreSessionAdapter(SessionStateStore):
             )
         )
 
+    @override
     async def list_tasks(self, session_id: str) -> Sequence[TaskState]:
         history = await self._store.load_history(self._trace_id(session_id))
         latest: dict[str, TaskState] = {}
@@ -220,6 +261,7 @@ class StateStoreSessionAdapter(SessionStateStore):
             )
         return list(latest.values())
 
+    @override
     async def list_updates(
         self,
         session_id: str,
@@ -247,6 +289,7 @@ class StateStoreSessionAdapter(SessionStateStore):
                     break
         return updates[-limit:]
 
+    @override
     async def list_steering(
         self,
         session_id: str,

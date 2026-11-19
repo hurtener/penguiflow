@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from .models import RedactionSpec
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import RedactionSpec
 
 
-def apply_redactions_to_text(text: str, redactions: tuple[RedactionSpec, ...]) -> str:
+def apply_redactions_to_text(
+    text: str, redactions: tuple[RedactionSpec, ...]
+) -> str:
     """Apply redaction specs to a text string using offsets when available."""
-
     if not redactions:
         return text
 

@@ -60,7 +60,9 @@ class UtcpMode(str, Enum):
     """
 
     AUTO = "auto"  # Try manual_url first, fallback to base_url
-    MANUAL_URL = "manual_url"  # Connection is a UTCP manual endpoint (recommended)
+    MANUAL_URL = (
+        "manual_url"  # Connection is a UTCP manual endpoint (recommended)
+    )
     BASE_URL = "base_url"  # Connection is a REST base URL (limited discovery)
 
 
@@ -73,11 +75,13 @@ class McpTransportMode(str, Enum):
 
     AUTO = "auto"  # Let FastMCP auto-detect (default when no auth headers)
     SSE = "sse"  # Force Server-Sent Events transport (legacy)
-    STREAMABLE_HTTP = "streamable_http"  # Force Streamable HTTP (modern, recommended)
+    STREAMABLE_HTTP = (
+        "streamable_http"  # Force Streamable HTTP (modern, recommended)
+    )
 
 
 class RetryPolicy(BaseModel):
-    """Retry configuration for ``ToolNode`` tool calls, using tenacity semantics.
+    """Retry configuration for ``ToolNode`` tool calls (tenacity semantics).
 
     Consumed by ``ToolNode._call_with_retry``, which retries only on
     retryable errors (timeouts, connection errors, or ``ToolNodeError``
@@ -88,21 +92,33 @@ class RetryPolicy(BaseModel):
         default=3,
         ge=1,
         le=10,
-        description="Maximum number of call attempts, including the first (non-retry) attempt.",
+        description=(
+            "Maximum number of call attempts, including the first "
+            "(non-retry) attempt."
+        ),
     )
     wait_exponential_min_s: float = Field(
         default=0.1,
         ge=0.01,
-        description="Minimum wait time in seconds before a retry (exponential backoff floor).",
+        description=(
+            "Minimum wait time in seconds before a retry (exponential "
+            "backoff floor)."
+        ),
     )
     wait_exponential_max_s: float = Field(
         default=5.0,
         ge=0.1,
-        description="Maximum wait time in seconds before a retry (exponential backoff ceiling).",
+        description=(
+            "Maximum wait time in seconds before a retry (exponential "
+            "backoff ceiling)."
+        ),
     )
     retry_on_status: list[int] = Field(
         default_factory=lambda: [429, 500, 502, 503, 504],
-        description="HTTP status codes that are treated as retryable when surfaced by adapters.",
+        description=(
+            "HTTP status codes that are treated as retryable when "
+            "surfaced by adapters."
+        ),
     )
 
 
@@ -110,7 +126,8 @@ class RetryPolicy(BaseModel):
 # Artifact Extraction Configuration (Phase 1)
 # -----------------------------------------------------------------------------
 
-# Default binary signatures for detection (base64 prefixes -> (extension, mime_type))
+# Default binary signatures for detection (base64 prefixes -> (extension,
+# mime_type))
 DEFAULT_BINARY_SIGNATURES: dict[str, tuple[str, str]] = {
     "JVBERi": ("pdf", "application/pdf"),  # PDF (%PDF-)
     "iVBORw": ("png", "image/png"),  # PNG
@@ -118,14 +135,19 @@ DEFAULT_BINARY_SIGNATURES: dict[str, tuple[str, str]] = {
     "R0lGOD": ("gif", "image/gif"),  # GIF (GIF8)
     "UEsDB": ("zip", "application/zip"),  # ZIP/DOCX/XLSX/PPTX
     "UEsFB": ("zip", "application/zip"),  # ZIP variant
-    "AAAA": ("unknown", "application/octet-stream"),  # Ambiguous but often binary
+    "AAAA": (
+        "unknown",
+        "application/octet-stream",
+    ),  # Ambiguous but often binary
 }
 
 
 class BinaryDetectionConfig(BaseModel):
     """Configuration for automatic binary content detection."""
 
-    enabled: bool = Field(default=True, description="Enable binary content detection")
+    enabled: bool = Field(
+        default=True, description="Enable binary content detection"
+    )
     signatures: dict[str, tuple[str, str]] = Field(
         default_factory=lambda: dict(DEFAULT_BINARY_SIGNATURES),
         description="Map of base64 prefix -> (extension, mime_type)",
@@ -149,11 +171,15 @@ class BinaryDetectionConfig(BaseModel):
 class ResourceHandlingConfig(BaseModel):
     """Policy for MCP resources and resource_links."""
 
-    enabled: bool = Field(default=True, description="Enable resource link handling")
+    enabled: bool = Field(
+        default=True, description="Enable resource link handling"
+    )
     auto_read_if_size_under_bytes: int = Field(
         default=0,
         ge=0,
-        description="Auto-read resources smaller than this (0 = never auto-read)",
+        description=(
+            "Auto-read resources smaller than this (0 = never auto-read)"
+        ),
     )
     inline_text_if_under_chars: int = Field(
         default=10_000,
@@ -171,7 +197,10 @@ class ArtifactFieldConfig(BaseModel):
 
     field_path: str = Field(
         ...,
-        description="JSONPath or dot notation to the field (e.g., 'content' or 'result.pdf_data')",
+        description=(
+            "JSONPath or dot notation to the field (e.g., 'content' or "
+            "'result.pdf_data')"
+        ),
     )
     content_type: str = Field(
         ...,
@@ -225,16 +254,24 @@ class ArtifactExtractionConfig(BaseModel):
 
     # Summary templates
     default_binary_summary: str = Field(
-        default="Binary content stored as artifact ({mime_type}, {size} bytes). Artifact ID: {artifact_id}",
+        default=(
+            "Binary content stored as artifact ({mime_type}, {size} "
+            "bytes). Artifact ID: {artifact_id}"
+        ),
         description=(
-            "Format string for the LLM-facing summary of extracted binary content. "
+            "Format string for the LLM-facing summary of extracted "
+            "binary content. "
             "Supports {mime_type}, {size}, and {artifact_id} placeholders."
         ),
     )
     default_text_summary: str = Field(
-        default="Large text stored as artifact ({size} chars). Artifact ID: {artifact_id}",
+        default=(
+            "Large text stored as artifact ({size} chars). Artifact ID: "
+            "{artifact_id}"
+        ),
         description=(
-            "Format string for the LLM-facing summary of extracted oversized text. "
+            "Format string for the LLM-facing summary of extracted "
+            "oversized text. "
             "Supports {size} and {artifact_id} placeholders."
         ),
     )
@@ -247,7 +284,9 @@ OutputTransformer = Callable[[str, Any, ToolContext], Any | Awaitable[Any]]
 class PromptsConfig(BaseModel):
     """Configuration for MCP prompts discovery and tool generation."""
 
-    enabled: bool = Field(default=True, description="Auto-discover prompts during connect")
+    enabled: bool = Field(
+        default=True, description="Auto-discover prompts during connect"
+    )
     generate_tools: bool = Field(
         default=True,
         description="Create {ns}.prompts_list / prompts_get tools",
@@ -257,7 +296,9 @@ class PromptsConfig(BaseModel):
 class AppsConfig(BaseModel):
     """Configuration for MCP Apps interactive UI support."""
 
-    enabled: bool = Field(default=True, description="Detect and render MCP Apps")
+    enabled: bool = Field(
+        default=True, description="Detect and render MCP Apps"
+    )
     fetch_html_on_call: bool = Field(
         default=True,
         description="Auto-fetch ui:// resource after tool execution",
@@ -269,7 +310,7 @@ class AppsConfig(BaseModel):
 
 
 class ExternalToolConfig(BaseModel):
-    """Configuration for a single external tool source consumed by ``ToolNode``.
+    """Configuration for one external tool source consumed by ``ToolNode``.
 
     One instance describes how to reach and authenticate against one MCP
     server or UTCP/HTTP/CLI endpoint, plus the resilience and
@@ -278,17 +319,28 @@ class ExternalToolConfig(BaseModel):
     """
 
     # Identity
-    name: str = Field(..., description="Unique namespace for tools (e.g., 'github')")
-    description: str = Field(default="", description="Human-readable description of this tool source.")
+    name: str = Field(
+        ..., description="Unique namespace for tools (e.g., 'github')"
+    )
+    description: str = Field(
+        default="",
+        description="Human-readable description of this tool source.",
+    )
 
     # Transport
     transport: TransportType
-    connection: str = Field(..., description="Connection string (command for MCP, URL for HTTP/UTCP)")
+    connection: str = Field(
+        ...,
+        description="Connection string (command for MCP, URL for HTTP/UTCP)",
+    )
 
     # UTCP-specific: how to interpret the connection string
     utcp_mode: UtcpMode = Field(
         default=UtcpMode.AUTO,
-        description="For HTTP/UTCP: how to interpret connection (manual_url recommended)",
+        description=(
+            "For HTTP/UTCP: how to interpret connection (manual_url "
+            "recommended)"
+        ),
     )
 
     # MCP-specific: which transport to use for URL-based connections
@@ -301,25 +353,37 @@ class ExternalToolConfig(BaseModel):
     env: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Environment variables passed to an MCP stdio subprocess, or used as UTCP "
-            "variable substitutions. Values may reference ${VAR} to substitute from the "
+            "Environment variables passed to an MCP stdio subprocess, "
+            "or used as UTCP "
+            "variable substitutions. Values may reference ${VAR} to "
+            "substitute from the "
             "host process environment."
         ),
     )
 
     # Authentication
-    auth_type: AuthType = Field(default=AuthType.NONE, description="Authentication method used for this tool source.")
+    auth_type: AuthType = Field(
+        default=AuthType.NONE,
+        description="Authentication method used for this tool source.",
+    )
     auth_config: dict[str, Any] = Field(
         default_factory=dict,
         description=(
             "Auth-type-specific settings, e.g. {'token': ...} for BEARER, "
-            "{'api_key': ..., 'header': ...} for API_KEY, or {'cookie_name': ..., "
-            "'cookie_value': ...} for COOKIE. Values may reference ${VAR} for env substitution."
+            "{'api_key': ..., 'header': ...} for API_KEY, or {'cookie_name': "
+            "..., "
+            "'cookie_value': ...} for COOKIE. Values may reference "
+            "${VAR} for env substitution."
         ),
     )
 
     # Resilience
-    timeout_s: float = Field(default=30.0, ge=1.0, le=300.0, description="Per-call timeout in seconds.")
+    timeout_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        description="Per-call timeout in seconds.",
+    )
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description="Retry/backoff policy applied to tool calls.",
@@ -328,7 +392,10 @@ class ExternalToolConfig(BaseModel):
         default=10,
         ge=1,
         le=100,
-        description="Maximum number of concurrent in-flight tool calls for this source.",
+        description=(
+            "Maximum number of concurrent in-flight tool calls for this "
+            "source."
+        ),
     )
 
     # Discovery filtering
@@ -346,13 +413,17 @@ class ExternalToolConfig(BaseModel):
     # Artifact extraction (Phase 1)
     artifact_extraction: ArtifactExtractionConfig = Field(
         default_factory=ArtifactExtractionConfig,
-        description="Configuration for extracting binary/large content as artifacts",
+        description=(
+            "Configuration for extracting binary/large content as artifacts"
+        ),
     )
 
     # MCP Prompts (Phase 3)
     prompts: PromptsConfig = Field(
         default_factory=lambda: PromptsConfig(),
-        description="Configuration for MCP prompts discovery and tool generation",
+        description=(
+            "Configuration for MCP prompts discovery and tool generation"
+        ),
     )
 
     # MCP Apps
@@ -361,8 +432,8 @@ class ExternalToolConfig(BaseModel):
         description="Configuration for MCP Apps interactive UI support",
     )
 
-    # Custom output transformer (Layer 5 escape hatch)
-    # Note: Not serializable, must be set programmatically
+    # Custom output transformer (Layer 5 escape hatch) Note: Not serializable,
+    # must be set programmatically
     output_transformer: OutputTransformer | None = Field(
         default=None,
         exclude=True,  # Exclude from serialization
@@ -384,29 +455,43 @@ class ExternalToolConfig(BaseModel):
         Returns:
             The validated ``ExternalToolConfig`` instance (unchanged).
         """
-        if self.auth_type == AuthType.BEARER and "token" not in self.auth_config:
-            raise ValueError("auth_type=BEARER requires auth_config.token")
-        if self.auth_type == AuthType.API_KEY and "api_key" not in self.auth_config:
-            raise ValueError("auth_type=API_KEY requires auth_config.api_key")
+        if (
+            self.auth_type == AuthType.BEARER
+            and "token" not in self.auth_config
+        ):
+            msg = "auth_type=BEARER requires auth_config.token"
+            raise ValueError(msg)
+        if (
+            self.auth_type == AuthType.API_KEY
+            and "api_key" not in self.auth_config
+        ):
+            msg = "auth_type=API_KEY requires auth_config.api_key"
+            raise ValueError(msg)
         if self.auth_type == AuthType.COOKIE:
             if "cookie_name" not in self.auth_config:
-                raise ValueError("auth_type=COOKIE requires auth_config.cookie_name")
+                msg = "auth_type=COOKIE requires auth_config.cookie_name"
+                raise ValueError(msg)
             if "cookie_value" not in self.auth_config:
-                raise ValueError("auth_type=COOKIE requires auth_config.cookie_value")
+                msg = "auth_type=COOKIE requires auth_config.cookie_value"
+                raise ValueError(msg)
 
-        if self.transport == TransportType.MCP and self.utcp_mode != UtcpMode.AUTO:
-            raise ValueError("utcp_mode is only valid for HTTP/UTCP transports")
+        if (
+            self.transport == TransportType.MCP
+            and self.utcp_mode != UtcpMode.AUTO
+        ):
+            msg = "utcp_mode is only valid for HTTP/UTCP transports"
+            raise ValueError(msg)
 
         return self
 
 
 __all__ = [
+    "DEFAULT_BINARY_SIGNATURES",
     "AppsConfig",
     "ArtifactExtractionConfig",
     "ArtifactFieldConfig",
     "AuthType",
     "BinaryDetectionConfig",
-    "DEFAULT_BINARY_SIGNATURES",
     "ExternalToolConfig",
     "McpTransportMode",
     "OutputTransformer",

@@ -16,7 +16,7 @@ from penguiflow.logging import (
 class TestStructuredFormatter:
     """Tests for StructuredFormatter."""
 
-    def test_basic_format(self):
+    def test_basic_format(self) -> None:
         """Test basic message formatting."""
         formatter = StructuredFormatter(include_timestamp=False)
         record = logging.LogRecord(
@@ -36,7 +36,7 @@ class TestStructuredFormatter:
         assert data["message"] == "Hello world"
         assert "timestamp" not in data
 
-    def test_with_timestamp(self):
+    def test_with_timestamp(self) -> None:
         """Test that timestamp is included when enabled."""
         formatter = StructuredFormatter(include_timestamp=True)
         record = logging.LogRecord(
@@ -55,7 +55,7 @@ class TestStructuredFormatter:
         # Should be ISO format
         assert "T" in data["timestamp"]
 
-    def test_extra_fields(self):
+    def test_extra_fields(self) -> None:
         """Test that extra fields are captured."""
         formatter = StructuredFormatter(include_timestamp=False)
         record = logging.LogRecord(
@@ -80,7 +80,7 @@ class TestStructuredFormatter:
         assert data["extra"]["tool"] == "search"
         assert data["extra"]["custom_data"] == {"nested": "value"}
 
-    def test_non_serializable_value(self):
+    def test_non_serializable_value(self) -> None:
         """Test that non-serializable values fall back to str."""
         formatter = StructuredFormatter(include_timestamp=False)
         record = logging.LogRecord(
@@ -103,15 +103,11 @@ class TestStructuredFormatter:
         # Should be converted to string
         assert "<object object" in data["extra"]["my_object"]
 
-    def test_exception_info(self):
+    def test_exception_info(self) -> None:
         """Test that exception info is included."""
         formatter = StructuredFormatter(include_timestamp=False)
-        try:
-            raise ValueError("test error")
-        except ValueError:
-            import sys
-
-            exc_info = sys.exc_info()
+        error = ValueError("test error")
+        exc_info = (ValueError, error, error.__traceback__)
 
         record = logging.LogRecord(
             name="test",
@@ -130,7 +126,7 @@ class TestStructuredFormatter:
         assert "ValueError" in data["exception"]
         assert "test error" in data["exception"]
 
-    def test_indent_option(self):
+    def test_indent_option(self) -> None:
         """Test that indent option produces formatted JSON."""
         formatter = StructuredFormatter(include_timestamp=False, indent=2)
         record = logging.LogRecord(
@@ -154,7 +150,7 @@ class TestStructuredFormatter:
 class TestExtraFormatter:
     """Tests for ExtraFormatter."""
 
-    def test_basic_format(self):
+    def test_basic_format(self) -> None:
         """Test basic message formatting without extras."""
         formatter = ExtraFormatter()
         record = logging.LogRecord(
@@ -172,7 +168,7 @@ class TestExtraFormatter:
         # No extras, no brackets
         assert "[" not in output
 
-    def test_with_extra_fields(self):
+    def test_with_extra_fields(self) -> None:
         """Test that extra fields are appended in brackets."""
         formatter = ExtraFormatter()
         record = logging.LogRecord(
@@ -191,10 +187,10 @@ class TestExtraFormatter:
 
         assert "planner action" in output
         assert "[" in output
-        assert 'step=3' in output
+        assert "step=3" in output
         assert 'tool="search"' in output
 
-    def test_long_string_truncation(self):
+    def test_long_string_truncation(self) -> None:
         """Test that long string values are truncated."""
         formatter = ExtraFormatter()
         record = logging.LogRecord(
@@ -218,7 +214,7 @@ class TestExtraFormatter:
         # But first 100 should be
         assert "x" * 100 in output
 
-    def test_non_string_values(self):
+    def test_non_string_values(self) -> None:
         """Test that non-string values are formatted without quotes."""
         formatter = ExtraFormatter()
         record = logging.LogRecord(
@@ -238,7 +234,7 @@ class TestExtraFormatter:
         assert "count=42" in output
         assert "active=True" in output
 
-    def test_custom_format(self):
+    def test_custom_format(self) -> None:
         """Test that custom format string is respected."""
         formatter = ExtraFormatter(fmt="%(levelname)s - %(message)s")
         record = logging.LogRecord(
@@ -261,14 +257,18 @@ class TestExtraFormatter:
 class TestConfigureLogging:
     """Tests for configure_logging function."""
 
-    def test_structured_mode(self):
+    def test_structured_mode(self) -> None:
         """Test structured JSON logging mode."""
-        configure_logging(level="DEBUG", structured=True, logger_name="test_struct")
+        configure_logging(
+            level="DEBUG", structured=True, logger_name="test_struct"
+        )
         logger = logging.getLogger("test_struct")
 
         # Capture output
         stream = StringIO()
-        logger.handlers[0].stream = stream
+        handler = logger.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(stream)
 
         logger.info("test message", extra={"step": 1})
 
@@ -278,7 +278,7 @@ class TestConfigureLogging:
         assert data["message"] == "test message"
         assert data["extra"]["step"] == 1
 
-    def test_extras_mode(self):
+    def test_extras_mode(self) -> None:
         """Test human-readable mode with extras."""
         configure_logging(
             level="DEBUG",
@@ -289,7 +289,9 @@ class TestConfigureLogging:
         logger = logging.getLogger("test_extras")
 
         stream = StringIO()
-        logger.handlers[0].stream = stream
+        handler = logger.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(stream)
 
         logger.info("action", extra={"tool": "search"})
 
@@ -297,7 +299,7 @@ class TestConfigureLogging:
         assert "action" in output
         assert 'tool="search"' in output
 
-    def test_simple_mode(self):
+    def test_simple_mode(self) -> None:
         """Test simple logging mode without extras."""
         configure_logging(
             level="DEBUG",
@@ -308,7 +310,9 @@ class TestConfigureLogging:
         logger = logging.getLogger("test_simple")
 
         stream = StringIO()
-        logger.handlers[0].stream = stream
+        handler = logger.handlers[0]
+        assert isinstance(handler, logging.StreamHandler)
+        handler.setStream(stream)
 
         logger.info("simple message", extra={"ignored": "value"})
 
@@ -317,7 +321,7 @@ class TestConfigureLogging:
         # Extra should not appear
         assert "ignored" not in output
 
-    def test_removes_existing_handlers(self):
+    def test_removes_existing_handlers(self) -> None:
         """Test that existing handlers are removed."""
         logger_name = "test_replace"
         logger = logging.getLogger(logger_name)
@@ -332,21 +336,21 @@ class TestConfigureLogging:
         assert len(logger.handlers) == 1
         assert logger.handlers[0] is not dummy_handler
 
-    def test_propagation_disabled(self):
+    def test_propagation_disabled(self) -> None:
         """Test that propagation to root logger is disabled."""
         configure_logging(level="INFO", logger_name="test_propagate")
         logger = logging.getLogger("test_propagate")
 
         assert logger.propagate is False
 
-    def test_level_as_string(self):
+    def test_level_as_string(self) -> None:
         """Test that level can be specified as string."""
         configure_logging(level="WARNING", logger_name="test_level_str")
         logger = logging.getLogger("test_level_str")
 
         assert logger.level == logging.WARNING
 
-    def test_level_as_int(self):
+    def test_level_as_int(self) -> None:
         """Test that level can be specified as int."""
         configure_logging(level=logging.ERROR, logger_name="test_level_int")
         logger = logging.getLogger("test_level_int")

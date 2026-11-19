@@ -93,7 +93,6 @@ class GuardrailDecision:
 
     def with_effects(self, *new_effects: str) -> GuardrailDecision:
         """Return a new decision with additional effects."""
-
         return GuardrailDecision(
             action=self.action,
             rule_id=self.rule_id,

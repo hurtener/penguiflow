@@ -8,12 +8,14 @@ Provides three output modes for structured responses:
 
 from __future__ import annotations
 
+from .base import OutputStrategy
 from .native import NativeOutputStrategy
 from .prompted import PromptedOutputStrategy
 from .tool import ToolsOutputStrategy
 
 __all__ = [
     "NativeOutputStrategy",
+    "OutputStrategy",
     "PromptedOutputStrategy",
     "ToolsOutputStrategy",
 ]

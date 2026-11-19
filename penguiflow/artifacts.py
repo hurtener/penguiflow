@@ -1,5 +1,4 @@
-"""
-Artifact storage for binary and large text content.
+"""Artifact storage for binary and large text content.
 
 This module provides the ArtifactStore protocol and implementations for storing
 binary content (PDFs, images, etc.) and large text out-of-band, keeping only
@@ -15,20 +14,18 @@ import logging
 import re
 import time
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
-
-if TYPE_CHECKING:
-    pass
+from typing_extensions import override
 
 __all__ = [
     "ArtifactRef",
+    "ArtifactRetentionConfig",
     "ArtifactScope",
     "ArtifactStore",
-    "ArtifactRetentionConfig",
-    "NoOpArtifactStore",
     "InMemoryArtifactStore",
+    "NoOpArtifactStore",
     "ScopedArtifacts",
     "discover_artifact_store",
 ]
@@ -223,11 +220,13 @@ class ArtifactStore(Protocol):
         """
         ...
 
-    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+    async def list(
+        self, *, scope: ArtifactScope | None = None
+    ) -> list[ArtifactRef]:
         """List artifacts matching the given scope filter.
 
-        None fields in scope = don't filter on that dimension.
-        If scope is None, returns all artifacts.
+        None fields in scope = don't filter on that dimension. If scope is
+        None, returns all artifacts.
         """
         ...
 
@@ -235,11 +234,11 @@ class ArtifactStore(Protocol):
 class ScopedArtifacts:
     """Scoped facade over ArtifactStore for tool developers.
 
-    Automatically injects tenant_id/user_id/session_id/trace_id on writes
-    and enforces scope on reads. Immutable after construction.
+    Automatically injects tenant_id/user_id/session_id/trace_id on writes and
+    enforces scope on reads. Immutable after construction.
     """
 
-    __slots__ = ("_store", "_scope", "_read_scope")
+    __slots__ = ("_read_scope", "_scope", "_store")
 
     _store: ArtifactStore
     _scope: ArtifactScope
@@ -254,6 +253,7 @@ class ScopedArtifacts:
         session_id: str | None,
         trace_id: str | None,
     ) -> None:
+        """Bind the facade to a store and a fixed scope."""
         # IMPORTANT: Must use object.__setattr__ because __setattr__ is
         # overridden to raise AttributeError (immutability).
         object.__setattr__(self, "_store", store)
@@ -280,8 +280,10 @@ class ScopedArtifacts:
             ),
         )
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError("ScopedArtifacts is immutable")
+    def __setattr__(self, name: str, value: object) -> None:
+        """Reject attribute assignment; the facade is immutable."""
+        msg = "ScopedArtifacts is immutable"
+        raise AttributeError(msg)
 
     @property
     def scope(self) -> ArtifactScope:
@@ -301,21 +303,21 @@ class ScopedArtifacts:
         if isinstance(data, str):
             return await self._store.put_text(
                 data,
-                mime_type=mime_type or "text/plain",  # resolve None -> "text/plain"
+                mime_type=mime_type
+                or "text/plain",  # resolve None -> "text/plain"
                 filename=filename,
                 namespace=namespace,
                 scope=self._scope,
                 meta=meta,
             )
-        else:
-            return await self._store.put_bytes(
-                data,
-                mime_type=mime_type,  # None is valid for bytes
-                filename=filename,
-                namespace=namespace,
-                scope=self._scope,
-                meta=meta,
-            )
+        return await self._store.put_bytes(
+            data,
+            mime_type=mime_type,  # None is valid for bytes
+            filename=filename,
+            namespace=namespace,
+            scope=self._scope,
+            meta=meta,
+        )
 
     async def download(self, artifact_id: str) -> bytes | None:
         """Retrieve artifact bytes by ID (scope-checked)."""
@@ -336,7 +338,7 @@ class ScopedArtifacts:
         return ref
 
     async def list(self) -> list[ArtifactRef]:
-        """List artifacts matching this facade's tenant/user/session (not trace)."""
+        """List artifacts in this facade's tenant/user/session (not trace)."""
         return await self._store.list(scope=self._read_scope)
 
     async def exists(self, artifact_id: str) -> bool:
@@ -359,17 +361,22 @@ class ScopedArtifacts:
         """Check if an artifact's scope is compatible with this facade's scope.
 
         Access control semantics (NOT filtering):
-        - If artifact has no scope (ref.scope is None) -> PASS (unrestricted artifact).
-        - For each of tenant_id, user_id, session_id (NOT trace_id):
-          if BOTH facade field and artifact field are non-None, they must match.
-          If either is None, that dimension passes.
+        - If artifact has no scope (ref.scope is None) -> PASS (unrestricted
+          artifact).
+        - For each of tenant_id, user_id, session_id (NOT trace_id): if BOTH
+          facade field and artifact field are non-None, they must match. If
+          either is None, that dimension passes.
         """
         if ref.scope is None:
             return True
         for field in ("tenant_id", "user_id", "session_id"):
             facade_val = getattr(self._scope, field)
             artifact_val = getattr(ref.scope, field)
-            if facade_val is not None and artifact_val is not None and facade_val != artifact_val:
+            if (
+                facade_val is not None
+                and artifact_val is not None
+                and facade_val != artifact_val
+            ):
                 return False
         return True
 
@@ -379,7 +386,7 @@ class ScopedArtifacts:
 # -----------------------------------------------------------------------------
 
 
-def discover_artifact_store(state_store: Any) -> ArtifactStore | None:
+def discover_artifact_store(state_store: object) -> ArtifactStore | None:
     """Attempt to discover ArtifactStore from state_store via duck-typing.
 
     Checks for:
@@ -387,16 +394,16 @@ def discover_artifact_store(state_store: Any) -> ArtifactStore | None:
     2. state_store implementing ArtifactStore protocol directly
 
     Args:
-        state_store: A StateStore or similar object that might provide artifacts.
+        state_store: A StateStore or similar object that might provide
+            artifacts.
 
     Returns:
         An ArtifactStore if discovered, None otherwise.
     """
     # Option 1: Explicit attribute
-    if hasattr(state_store, "artifact_store"):
-        candidate = state_store.artifact_store
-        if isinstance(candidate, ArtifactStore):
-            return candidate
+    candidate = getattr(state_store, "artifact_store", None)
+    if isinstance(candidate, ArtifactStore):
+        return candidate
 
     # Option 2: State store implements ArtifactStore directly
     if isinstance(state_store, ArtifactStore):
@@ -436,28 +443,34 @@ def sanitize_artifact_namespace(namespace: str | None) -> str | None:
     return sanitized or None
 
 
-def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactScope) -> bool:
+def _scope_matches(
+    artifact_scope: ArtifactScope | None, filter_scope: ArtifactScope
+) -> bool:
     """Check if an artifact's scope matches a filter scope.
 
     Matching rules:
-    - If filter_scope has a non-None field, the artifact must have the same value
-      in that field to match.
+    - If filter_scope has a non-None field, the artifact must have the same
+      value in that field to match.
     - If filter_scope has a None field, any value (including None) matches.
-    - If the artifact has no scope at all (artifact_scope is None), it is treated
-      as having all-None fields -- so it matches any filter field that is None,
-      but FAILS any filter field that is non-None.
+    - If the artifact has no scope at all (artifact_scope is None), it is
+      treated as having all-None fields -- so it matches any filter field that
+      is None, but FAILS any filter field that is non-None.
     """
     for field in ("tenant_id", "user_id", "session_id", "trace_id"):
         filter_val = getattr(filter_scope, field)
         if filter_val is None:
             continue  # None filter = wildcard, matches anything
-        artifact_val = getattr(artifact_scope, field) if artifact_scope is not None else None
+        artifact_val = (
+            getattr(artifact_scope, field)
+            if artifact_scope is not None
+            else None
+        )
         if artifact_val != filter_val:
             return False
     return True
 
 
-class NoOpArtifactStore:
+class NoOpArtifactStore(ArtifactStore):
     """Fallback store that logs warnings but doesn't persist content.
 
     Used when no real ArtifactStore is configured. Returns truncated
@@ -465,9 +478,11 @@ class NoOpArtifactStore:
     """
 
     def __init__(self, max_inline_preview: int = 500) -> None:
+        """Configure the preview length used for truncated text refs."""
         self._max_preview = max_inline_preview
         self._warned = False
 
+    @override
     async def put_bytes(
         self,
         data: bytes,
@@ -481,8 +496,10 @@ class NoOpArtifactStore:
         """Store binary data (no-op: logs warning, returns truncated ref)."""
         if not self._warned:
             logger.warning(
-                "No ArtifactStore configured. Binary content will not be stored. "
-                "Configure artifact_store= in ReactPlanner for full binary support."
+                "No ArtifactStore configured. Binary content will not "
+                "be stored. "
+                "Configure artifact_store= in ReactPlanner for full "
+                "binary support."
             )
             self._warned = True
 
@@ -509,6 +526,7 @@ class NoOpArtifactStore:
             source=source,
         )
 
+    @override
     async def put_text(
         self,
         text: str,
@@ -519,11 +537,12 @@ class NoOpArtifactStore:
         scope: ArtifactScope | None = None,
         meta: dict[str, Any] | None = None,
     ) -> ArtifactRef:
-        """Store large text (no-op: logs warning, returns truncated ref with preview)."""
+        """Return a truncated ref with a preview, logging a warning once."""
         if not self._warned:
             logger.warning(
                 "No ArtifactStore configured. Large text will be truncated. "
-                "Configure artifact_store= in ReactPlanner for full text storage."
+                "Configure artifact_store= in ReactPlanner for full "
+                "text storage."
             )
             self._warned = True
 
@@ -534,7 +553,9 @@ class NoOpArtifactStore:
         # Generate preview
         preview = text[: self._max_preview]
         if len(text) > self._max_preview:
-            preview += f"\n... [{len(text) - self._max_preview} more chars truncated]"
+            preview += (
+                f"\n... [{len(text) - self._max_preview} more chars truncated]"
+            )
 
         source = dict(meta or {})
         source.update(
@@ -557,23 +578,30 @@ class NoOpArtifactStore:
             source=source,
         )
 
+    @override
     async def get(self, artifact_id: str) -> bytes | None:
         """Cannot retrieve from no-op store."""
         return None
 
+    @override
     async def get_ref(self, artifact_id: str) -> ArtifactRef | None:
         """Cannot retrieve metadata from no-op store."""
         return None
 
+    @override
     async def delete(self, artifact_id: str) -> bool:
         """No-op delete always returns False."""
         return False
 
+    @override
     async def exists(self, artifact_id: str) -> bool:
         """No-op store never has artifacts."""
         return False
 
-    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+    @override
+    async def list(
+        self, *, scope: ArtifactScope | None = None
+    ) -> list[ArtifactRef]:
         """No-op list always returns empty."""
         return []
 
@@ -622,10 +650,11 @@ class InMemoryArtifactStore:
         """Store binary data in memory."""
         # Check size limit
         if len(data) > self._retention.max_artifact_bytes:
-            raise ValueError(
+            msg = (
                 f"Artifact size ({len(data)} bytes) exceeds limit "
                 f"({self._retention.max_artifact_bytes} bytes)"
             )
+            raise ValueError(msg)
 
         # Generate ID and hash
         content_hash = hashlib.sha256(data).hexdigest()
@@ -722,12 +751,18 @@ class InMemoryArtifactStore:
         await self._expire_old_artifacts()
         return artifact_id in self._artifacts
 
-    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+    async def list(
+        self, *, scope: ArtifactScope | None = None
+    ) -> list[ArtifactRef]:
         """List artifacts matching the given scope filter."""
         await self._expire_old_artifacts()
         if scope is None:
             return [stored.ref for stored in self._artifacts.values()]
-        return [stored.ref for stored in self._artifacts.values() if _scope_matches(stored.ref.scope, scope)]
+        return [
+            stored.ref
+            for stored in self._artifacts.values()
+            if _scope_matches(stored.ref.scope, scope)
+        ]
 
     async def _expire_old_artifacts(self) -> None:
         """Remove expired artifacts based on TTL."""
@@ -750,7 +785,9 @@ class InMemoryArtifactStore:
             return
 
         # Check count limit
-        while len(self._artifacts) >= self._retention.max_artifacts_per_session:
+        while (
+            len(self._artifacts) >= self._retention.max_artifacts_per_session
+        ):
             if self._retention.cleanup_strategy == "lru":
                 # Remove least recently used (first item in OrderedDict)
                 oldest_id = next(iter(self._artifacts))

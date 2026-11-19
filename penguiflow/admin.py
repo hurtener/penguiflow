@@ -7,50 +7,61 @@ import asyncio
 import importlib
 import json
 import sys
-from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING
 
-from .state import StateStore, StoredEvent
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine, Sequence
 
-__all__ = ["load_state_store", "render_events", "main"]
+    from .state import StoredEvent
+
+from .state import StateStore
+
+__all__ = ["load_state_store", "main", "render_events"]
 
 
 class _Args(argparse.Namespace):
-    handler: Callable[[_Args], Any]
+    handler: Callable[[_Args], Coroutine[None, None, None]]
     state_store: str
     trace_id: str
     tail: int | None
     delay: float
 
 
-def _resolve_factory(spec: str) -> Callable[[], Any]:
+def _resolve_factory(spec: str) -> Callable[[], object]:
     module_name, _, attr = spec.partition(":")
     if not module_name or not attr:
-        raise ValueError("state store spec must be in the form 'package.module:callable'")
+        msg = "state store spec must be in the form 'package.module:callable'"
+        raise ValueError(msg)
     module = importlib.import_module(module_name)
     try:
-        factory = getattr(module, attr)
+        factory: object = getattr(module, attr)
     except AttributeError as exc:  # pragma: no cover - defensive guard
-        raise ValueError(f"{spec!r} does not resolve to a callable") from exc
+        msg = f"{spec!r} does not resolve to a callable"
+        raise ValueError(msg) from exc
     if not callable(factory):
-        raise TypeError(f"{spec!r} resolved to {type(factory)!r}, not a callable")
+        msg = f"{spec!r} resolved to {type(factory)!r}, not a callable"
+        raise TypeError(msg)
     return factory
 
 
 async def load_state_store(spec: str) -> StateStore:
     """Instantiate a :class:`StateStore` from ``module:callable`` spec."""
-
     factory = _resolve_factory(spec)
     instance = factory()
     if asyncio.iscoroutine(instance):
         instance = await instance
-    required = ("save_event", "load_history", "save_remote_binding")
-    if not all(hasattr(instance, attr) for attr in required):  # pragma: no cover
-        raise TypeError("StateStore factories must implement save_event/load_history/save_remote_binding")
+    if not isinstance(instance, StateStore):  # pragma: no cover
+        msg = (
+            "StateStore factories must implement "
+            "save_event/load_history/save_remote_binding"
+        )
+        raise TypeError(msg)
     return instance
 
 
-def _trim_events(events: Sequence[StoredEvent], tail: int | None) -> list[StoredEvent]:
+def _trim_events(
+    events: Sequence[StoredEvent], tail: int | None
+) -> list[StoredEvent]:
     items = list(events)
     if tail is None:
         return items
@@ -59,9 +70,10 @@ def _trim_events(events: Sequence[StoredEvent], tail: int | None) -> list[Stored
     return items[-tail:]
 
 
-def render_events(events: Sequence[StoredEvent], *, tail: int | None = None) -> list[str]:
-    """Return JSON line representations of ``events`` (optionally tail-truncated)."""
-
+def render_events(
+    events: Sequence[StoredEvent], *, tail: int | None = None
+) -> list[str]:
+    """Return JSON lines for ``events``, optionally keeping only the tail."""
     trimmed = _trim_events(events, tail)
     lines: list[str] = []
     for event in trimmed:
@@ -79,7 +91,7 @@ async def _cmd_history(args: _Args) -> None:
     store = await load_state_store(args.state_store)
     events = await store.load_history(args.trace_id)
     for line in render_events(events, tail=args.tail):
-        print(line)
+        sys.stdout.write(f"{line}\n")
 
 
 async def _cmd_replay(args: _Args) -> None:
@@ -87,12 +99,12 @@ async def _cmd_replay(args: _Args) -> None:
     events = _trim_events(await store.load_history(args.trace_id), args.tail)
     total = len(events)
     if not total:
-        print(f"# trace {args.trace_id} has no stored events")
+        sys.stdout.write(f"# trace {args.trace_id} has no stored events\n")
         return
-    print(f"# replay trace={args.trace_id} events={total}")
+    sys.stdout.write(f"# replay trace={args.trace_id} events={total}\n")
     for event in events:
         payload = render_events([event])[0]
-        print(payload)
+        sys.stdout.write(f"{payload}\n")
         if args.delay > 0:
             await asyncio.sleep(args.delay)
 
@@ -100,13 +112,18 @@ async def _cmd_replay(args: _Args) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="penguiflow-admin",
-        description=("Inspect PenguiFlow trace history via configured StateStore adapters."),
+        description=(
+            "Inspect PenguiFlow trace history via configured "
+            "StateStore adapters."
+        ),
     )
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--state-store",
         required=True,
-        help="Import path to a factory returning a StateStore (module:callable)",
+        help=(
+            "Import path to a factory returning a StateStore (module:callable)"
+        ),
     )
     common.add_argument(
         "--tail",
@@ -143,7 +160,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``penguiflow-admin`` CLI."""
-
     parser = _build_parser()
     args = parser.parse_args(argv)
     handler = getattr(args, "handler", None)
@@ -154,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         asyncio.run(handler(args))
     except Exception as exc:  # pragma: no cover - runtime guard
-        print(f"error: {exc}", file=sys.stderr)
+        sys.stderr.write(f"error: {exc}\n")
         return 1
     return 0
 

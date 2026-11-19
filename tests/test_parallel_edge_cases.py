@@ -2,17 +2,41 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Never
 
 import pytest
 from pydantic import BaseModel, model_validator
+from typing_extensions import override
 
-from penguiflow.planner.models import JoinInjection, ParallelCall, ParallelJoin, PlannerAction
-from penguiflow.planner.parallel import _BranchExecutionResult, execute_parallel_plan
+from penguiflow.catalog import build_catalog, tool
+from penguiflow.node import Node
+from penguiflow.planner import ReactPlanner
+from penguiflow.planner.constraints import _ConstraintTracker
+from penguiflow.planner.models import (
+    JoinInjection,
+    JSONLLMClient,
+    ParallelCall,
+    ParallelJoin,
+    PlannerAction,
+)
+from penguiflow.planner.parallel import (
+    _BranchExecutionResult,
+    execute_parallel_plan,
+)
 from penguiflow.planner.trajectory import Trajectory
+from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from penguiflow.planner import PlannerEvent
+    from penguiflow.planner.context import ToolContext
 
 
 class EchoOut(BaseModel):
+    """Output of the echo tool."""
+
     echoed: str
 
 
@@ -86,20 +110,24 @@ class TestParallelModels:
         join = ParallelJoin(
             node="merge",
             args={},
-            inject=JoinInjection(mapping={"results": "$results", "expect": "$expect"}),
+            inject=JoinInjection(
+                mapping={"results": "$results", "expect": "$expect"}
+            ),
         )
         assert join.inject is not None
         assert join.inject.mapping["results"] == "$results"
 
     def test_join_injection_shorthand(self) -> None:
         """Test JoinInjection accepts shorthand without 'mapping' wrapper."""
-        # Shorthand: {"field": "$source"}
+        # Shorthand form: field name mapped straight to the source.
         injection = JoinInjection.model_validate({"results": "$results"})
         assert injection.mapping["results"] == "$results"
 
     def test_join_injection_full_form(self) -> None:
         """Test JoinInjection with full 'mapping' wrapper."""
-        injection = JoinInjection.model_validate({"mapping": {"results": "$results"}})
+        injection = JoinInjection.model_validate(
+            {"mapping": {"results": "$results"}}
+        )
         assert injection.mapping["results"] == "$results"
 
 
@@ -152,12 +180,15 @@ class TestParallelExecutionErrors:
 
     @pytest.mark.asyncio
     async def test_rejects_non_parallel_next_node(self) -> None:
-        planner = SimpleNamespace(_spec_by_name={})
+        """Rejects non parallel next node."""
+        planner, _events = _make_planner()
         action = PlannerAction(next_node="echo", args={}, thought="bad")
         trajectory = Trajectory(query="test")
-        tracker = SimpleNamespace(record_hop=lambda: None)
+        tracker = _make_tracker()
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert observation is None
         assert pause is None
@@ -166,12 +197,17 @@ class TestParallelExecutionErrors:
 
     @pytest.mark.asyncio
     async def test_rejects_empty_steps(self) -> None:
-        planner = SimpleNamespace(_spec_by_name={})
-        action = PlannerAction(next_node="parallel", args={"steps": []}, thought="bad")
+        """Rejects empty steps."""
+        planner, _events = _make_planner()
+        action = PlannerAction(
+            next_node="parallel", args={"steps": []}, thought="bad"
+        )
         trajectory = Trajectory(query="test")
-        tracker = SimpleNamespace(record_hop=lambda: None)
+        tracker = _make_tracker()
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert observation is None
         assert pause is None
@@ -180,12 +216,19 @@ class TestParallelExecutionErrors:
 
     @pytest.mark.asyncio
     async def test_rejects_plan_with_only_invalid_step_payloads(self) -> None:
-        planner = SimpleNamespace(_spec_by_name={})
-        action = PlannerAction(next_node="parallel", args={"steps": [{"node": 123}]}, thought="bad")
+        """Rejects plan with only invalid step payloads."""
+        planner, _events = _make_planner()
+        action = PlannerAction(
+            next_node="parallel",
+            args={"steps": [{"node": 123}]},
+            thought="bad",
+        )
         trajectory = Trajectory(query="test")
-        tracker = SimpleNamespace(record_hop=lambda: None)
+        tracker = _make_tracker()
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert observation is None
         assert pause is None
@@ -194,16 +237,19 @@ class TestParallelExecutionErrors:
 
     @pytest.mark.asyncio
     async def test_setup_error_for_unknown_tool_node(self) -> None:
-        planner = SimpleNamespace(_spec_by_name={})
+        """Setup error for unknown tool node."""
+        planner, _events = _make_planner()
         action = PlannerAction(
             next_node="parallel",
             args={"steps": [{"node": "missing_tool", "args": {}}]},
             thought="bad",
         )
         trajectory = Trajectory(query="test")
-        tracker = SimpleNamespace(record_hop=lambda: None)
+        tracker = _make_tracker()
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert observation is None
         assert pause is None
@@ -211,7 +257,11 @@ class TestParallelExecutionErrors:
         assert trajectory.steps[-1].error is not None
 
     @pytest.mark.asyncio
-    async def test_setup_error_handles_non_serializable_validator_context(self) -> None:
+    async def test_setup_error_handles_non_serializable_validator_context(
+        self,
+    ) -> None:
+        """Setup error handles non serializable validator context."""
+
         class BadArgs(BaseModel):
             mode: str = "research"
             stream: bool = False
@@ -219,16 +269,19 @@ class TestParallelExecutionErrors:
             @model_validator(mode="after")
             def validate_mode(self) -> BadArgs:
                 if self.mode == "research" and not self.stream:
-                    raise ValueError("research requires stream=true")
+                    msg = "research requires stream=true"
+                    raise ValueError(msg)
                 return self
 
         class BadOut(BaseModel):
             ok: bool = True
 
-        async def bad_tool(args: BadArgs, ctx: object):
+        async def bad_tool(_args: BadArgs, _ctx: object) -> dict[str, bool]:
             return {"ok": True}
 
-        planner, _events = _make_planner(("bad_tool", BadArgs, BadOut, bad_tool))
+        planner, _events = _make_planner(
+            ("bad_tool", BadArgs, BadOut, bad_tool)
+        )
         action = PlannerAction(
             next_node="parallel",
             args={"steps": [{"node": "bad_tool", "args": {}}]},
@@ -237,7 +290,9 @@ class TestParallelExecutionErrors:
         trajectory = Trajectory(query="test")
         tracker = _make_tracker()
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert observation is None
         assert pause is None
@@ -245,30 +300,34 @@ class TestParallelExecutionErrors:
         assert "research requires stream=true" in trajectory.steps[-1].error
 
 
-class _NoopLLMClient:
-    async def send_messages(
+class _NoopLLMClient(JSONLLMClient):
+    @override
+    async def complete(
         self,
-        messages: list[dict],
         *,
-        response_format: type | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object | None = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> str:
         return '{"thought": "noop", "next_node": null}'
 
 
-def _make_tracker():
-    from penguiflow.planner.constraints import _ConstraintTracker
+_ToolDef = tuple[
+    str, type[BaseModel], type[BaseModel], Callable[..., Awaitable[object]]
+]
+"""A tool for ``_make_planner``: name, args model, output model, function."""
 
-    return _ConstraintTracker(deadline_s=None, hop_budget=None, time_source=lambda: 0.0)
+
+def _make_tracker() -> _ConstraintTracker:
+    return _ConstraintTracker(
+        deadline_s=None, hop_budget=None, time_source=lambda: 0.0
+    )
 
 
-def _make_planner(*nodes):
-    from penguiflow.catalog import build_catalog, tool
-    from penguiflow.node import Node
-    from penguiflow.planner import ReactPlanner
-    from penguiflow.registry import ModelRegistry
-
+def _make_planner(
+    *nodes: _ToolDef,
+) -> tuple[ReactPlanner, list[PlannerEvent]]:
     registry = ModelRegistry()
     node_specs = []
     for node_name, args_model, out_model, fn in nodes:
@@ -277,7 +336,7 @@ def _make_planner(*nodes):
         node_specs.append(Node(wrapped, name=node_name))
 
     catalog = build_catalog(node_specs, registry)
-    events: list[object] = []
+    events: list[PlannerEvent] = []
 
     planner = ReactPlanner(
         llm_client=_NoopLLMClient(),
@@ -292,7 +351,11 @@ class TestParallelJoinEdgeCases:
     """Covers join error handling and pause paths in execute_parallel_plan."""
 
     @pytest.mark.asyncio
-    async def test_join_injection_invalid_source_creates_join_error(self) -> None:
+    async def test_join_injection_invalid_source_creates_join_error(
+        self,
+    ) -> None:
+        """Join injection invalid source creates join error."""
+
         class EchoArgs(BaseModel):
             text: str
 
@@ -302,10 +365,10 @@ class TestParallelJoinEdgeCases:
         class JoinOut(BaseModel):
             ok: bool = True
 
-        async def echo(args: EchoArgs, ctx: object):
+        async def echo(args: EchoArgs, _ctx: object) -> dict[str, str]:
             return {"echoed": args.text}
 
-        async def join_tool(args: JoinArgs, ctx: object):
+        async def join_tool(_args: JoinArgs, _ctx: object) -> dict[str, bool]:
             return {"ok": True}
 
         planner, _events = _make_planner(
@@ -328,7 +391,9 @@ class TestParallelJoinEdgeCases:
             thought="bad inject",
         )
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert pause is None
         assert observation is not None
@@ -338,7 +403,11 @@ class TestParallelJoinEdgeCases:
         assert observation["join"].get("error")
 
     @pytest.mark.asyncio
-    async def test_join_validation_error_when_required_field_missing(self) -> None:
+    async def test_join_validation_error_when_required_field_missing(
+        self,
+    ) -> None:
+        """Join validation error when required field missing."""
+
         class EchoArgs(BaseModel):
             text: str
 
@@ -348,10 +417,12 @@ class TestParallelJoinEdgeCases:
         class JoinOut(BaseModel):
             ok: bool = True
 
-        async def echo(args: EchoArgs, ctx: object):
+        async def echo(args: EchoArgs, _ctx: object) -> dict[str, str]:
             return {"echoed": args.text}
 
-        async def join_requires_foo(args: JoinArgs, ctx: object):
+        async def join_requires_foo(
+            _args: JoinArgs, _ctx: object
+        ) -> dict[str, bool]:
             return {"ok": True}
 
         planner, _events = _make_planner(
@@ -370,7 +441,9 @@ class TestParallelJoinEdgeCases:
             thought="missing foo",
         )
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert pause is None
         assert observation is not None
@@ -379,6 +452,8 @@ class TestParallelJoinEdgeCases:
 
     @pytest.mark.asyncio
     async def test_join_skipped_when_branch_failure_exists(self) -> None:
+        """Join skipped when branch failure exists."""
+
         class EchoArgs(BaseModel):
             text: str
 
@@ -388,13 +463,14 @@ class TestParallelJoinEdgeCases:
         class JoinOut(BaseModel):
             ok: bool = True
 
-        async def ok(args: EchoArgs, ctx: object):
+        async def ok(args: EchoArgs, _ctx: object) -> dict[str, str]:
             return {"echoed": args.text}
 
-        async def fail(args: EchoArgs, ctx: object):
-            raise RuntimeError("boom")
+        async def fail(_args: EchoArgs, _ctx: object) -> Never:
+            msg = "boom"
+            raise RuntimeError(msg)
 
-        async def join_tool(args: JoinArgs, ctx: object):
+        async def join_tool(_args: JoinArgs, _ctx: object) -> dict[str, bool]:
             return {"ok": True}
 
         planner, _events = _make_planner(
@@ -417,7 +493,9 @@ class TestParallelJoinEdgeCases:
             thought="branch failure",
         )
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert pause is None
         assert observation is not None
@@ -426,6 +504,8 @@ class TestParallelJoinEdgeCases:
 
     @pytest.mark.asyncio
     async def test_join_pause_short_circuits_parallel_plan(self) -> None:
+        """Join pause short circuits parallel plan."""
+
         class EchoArgs(BaseModel):
             text: str
 
@@ -435,10 +515,12 @@ class TestParallelJoinEdgeCases:
         class JoinOut(BaseModel):
             ok: bool = True
 
-        async def echo(args: EchoArgs, ctx: object):
+        async def echo(args: EchoArgs, _ctx: object) -> dict[str, str]:
             return {"echoed": args.text}
 
-        async def join_pause(args: JoinArgs, ctx):
+        async def join_pause(
+            _args: JoinArgs, ctx: ToolContext
+        ) -> dict[str, bool]:
             await ctx.pause("await_input", {"reason": "need confirmation"})
             return {"ok": True}
 
@@ -458,7 +540,9 @@ class TestParallelJoinEdgeCases:
             thought="pause",
         )
 
-        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+        observation, pause = await execute_parallel_plan(
+            planner, action, trajectory, tracker, action_seq=1
+        )
 
         assert pause is not None
         assert pause.reason == "await_input"

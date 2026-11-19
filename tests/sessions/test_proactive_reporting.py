@@ -7,12 +7,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from typing_extensions import override
 
-from penguiflow.sessions.models import ContextPatch, MergeStrategy, ProactiveReportRequest, StateUpdate
-from penguiflow.sessions.proactive import create_default_proactive_generator, setup_proactive_reporting
+from penguiflow.sessions.models import (
+    ContextPatch,
+    MergeStrategy,
+    ProactiveReportRequest,
+    StateUpdate,
+)
+from penguiflow.sessions.proactive import (
+    ProactivePlanner,
+    create_default_proactive_generator,
+    setup_proactive_reporting,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass
@@ -21,44 +34,65 @@ class _FakeSession:
     consumed: list[str]
     configured: dict[str, object] | None = None
 
-    def _publish(self, update):
+    def publish(self, update: StateUpdate) -> None:
         self.published.append(update)
 
     async def mark_background_consumed(self, *, task_ids: list[str]) -> int:
         self.consumed.extend(task_ids)
         return len(task_ids)
 
-    def configure_proactive_reporting(self, **kwargs):
+    def configure_proactive_reporting(self, **kwargs: object) -> None:
         self.configured = dict(kwargs)
 
 
-class _FakePlanner:
-    async def run(self, *, query: str, llm_context: dict, tool_context: dict):
-        _ = (query, llm_context, tool_context)
+class _FakePlanner(ProactivePlanner):
+    @override
+    async def run(
+        self,
+        query: str,
+        *,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+    ) -> SimpleNamespace:
         return SimpleNamespace(payload={"answer": "proactive ok"})
 
 
-class _FakePlannerAttrPayload:
-    async def run(self, *, query: str, llm_context: dict, tool_context: dict):
-        _ = (query, llm_context, tool_context)
+class _FakePlannerAttrPayload(ProactivePlanner):
+    @override
+    async def run(
+        self,
+        query: str,
+        *,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+    ) -> SimpleNamespace:
         return SimpleNamespace(payload=SimpleNamespace(answer="attr ok"))
 
 
-class _FakePlannerStringPayload:
-    async def run(self, *, query: str, llm_context: dict, tool_context: dict):
-        _ = (query, llm_context, tool_context)
+class _FakePlannerStringPayload(ProactivePlanner):
+    @override
+    async def run(
+        self,
+        query: str,
+        *,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+    ) -> SimpleNamespace:
         return SimpleNamespace(payload="string ok")
 
 
 @pytest.mark.asyncio
-async def test_proactive_generator_publishes_result_and_consumes_background() -> None:
+async def test_proactive_generator_publishes_and_consumes() -> None:
+    """Proactive generator publishes result and consumes background."""
     session = _FakeSession(published=[], consumed=[])
 
     patch = ContextPatch(
         task_id="t1",
         digest=["did thing"],
         facts={"k": "v"},
-        artifacts=[{"id": "a1", "mime_type": "text/plain", "filename": "note.txt"}],
+        artifacts=[
+            {"id": "a1", "mime_type": "text/plain", "filename": "note.txt"}
+        ],
     )
     req = ProactiveReportRequest(
         task_id="t1",
@@ -71,7 +105,9 @@ async def test_proactive_generator_publishes_result_and_consumes_background() ->
         proactive_hops_remaining=1,
     )
 
-    gen = create_default_proactive_generator(lambda: _FakePlanner(), cast(Any, session), max_hops=2)
+    gen = create_default_proactive_generator(
+        lambda: _FakePlanner(), cast("Any", session), max_hops=2
+    )
     await gen(req)
 
     assert len(session.published) == 1
@@ -85,10 +121,11 @@ async def test_proactive_generator_publishes_result_and_consumes_background() ->
 
 
 def test_setup_proactive_reporting_configures_session() -> None:
+    """Setup proactive reporting configures session."""
     session = _FakeSession(published=[], consumed=[])
 
     setup_proactive_reporting(
-        cast(Any, session),
+        cast("Any", session),
         planner_factory=lambda: _FakePlanner(),
         enabled=True,
         strategies=["APPEND"],
@@ -108,6 +145,7 @@ def test_setup_proactive_reporting_configures_session() -> None:
 
 @pytest.mark.asyncio
 async def test_proactive_generator_noop_when_hops_exhausted() -> None:
+    """Proactive generator noop when hops exhausted."""
     session = _FakeSession(published=[], consumed=[])
     patch = ContextPatch(task_id="t0", digest=["done"], facts={})
     req = ProactiveReportRequest(
@@ -117,16 +155,19 @@ async def test_proactive_generator_noop_when_hops_exhausted() -> None:
         merge_strategy=MergeStrategy.APPEND,
         proactive_hops_remaining=0,
     )
-    gen = create_default_proactive_generator(lambda: _FakePlanner(), cast(Any, session), max_hops=2)
+    gen = create_default_proactive_generator(
+        lambda: _FakePlanner(), cast("Any", session), max_hops=2
+    )
     await gen(req)
     assert session.published == []
     assert session.consumed == []
 
 
 def test_setup_proactive_reporting_disabled_is_noop() -> None:
+    """Setup proactive reporting disabled is noop."""
     session = _FakeSession(published=[], consumed=[])
     setup_proactive_reporting(
-        cast(Any, session),
+        cast("Any", session),
         planner_factory=lambda: _FakePlanner(),
         enabled=False,
     )
@@ -135,6 +176,7 @@ def test_setup_proactive_reporting_disabled_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_proactive_generator_group_report_and_nested_artifacts() -> None:
+    """Proactive generator group report and nested artifacts."""
     session = _FakeSession(published=[], consumed=[])
 
     patch = ContextPatch(
@@ -173,7 +215,9 @@ async def test_proactive_generator_group_report_and_nested_artifacts() -> None:
     )
 
     bundle = SimpleNamespace(planner=_FakePlannerAttrPayload())
-    gen = create_default_proactive_generator(lambda: bundle, cast(Any, session), max_hops=2)
+    gen = create_default_proactive_generator(
+        lambda: bundle, cast("Any", session), max_hops=2
+    )
     await gen(req)
 
     assert len(session.published) == 1
@@ -185,7 +229,10 @@ async def test_proactive_generator_group_report_and_nested_artifacts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_proactive_generator_default_summary_and_payload_string() -> None:
+async def test_proactive_generator_default_summary_and_payload_string() -> (
+    None
+):
+    """Proactive generator default summary and payload string."""
     session = _FakeSession(published=[], consumed=[])
 
     patch = ContextPatch(
@@ -204,27 +251,55 @@ async def test_proactive_generator_default_summary_and_payload_string() -> None:
     )
 
     bundle = SimpleNamespace(planner=_FakePlannerStringPayload())
-    gen = create_default_proactive_generator(lambda: bundle, cast(Any, session), max_hops=1)
+    gen = create_default_proactive_generator(
+        lambda: bundle, cast("Any", session), max_hops=1
+    )
     await gen(req)
 
     assert len(session.published) == 1
     assert session.published[0].content["text"] == "string ok"
 
 
-def test_proactive_helpers_cover_edge_cases() -> None:
-    import penguiflow.sessions.proactive as proactive_mod
+class _FixedPayloadPlanner(ProactivePlanner):
+    """Planner fake whose run result carries a fixed payload."""
 
-    assert proactive_mod._extract_answer(None) is None
-    assert proactive_mod._extract_answer(SimpleNamespace(foo="bar")) is None
-    assert proactive_mod._extract_artifact_ref("not-a-mapping") is None
-    assert proactive_mod._normalize_artifact_ref({"id": ""}) is None
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.calls: list[tuple[str, object, object]] = []
 
-    # Cover ref=None path inside _collect_artifact_refs.
-    patch = ContextPatch(task_id="t5", artifacts=[{}])
+    @override
+    async def run(
+        self,
+        query: str,
+        *,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+    ) -> SimpleNamespace:
+        """Record the call and return the fixed payload."""
+        self.calls.append((query, llm_context, tool_context))
+        return SimpleNamespace(payload=self.payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [None, SimpleNamespace(foo="bar")])
+async def test_proactive_generator_defaults_when_payload_has_no_answer(
+    payload: object,
+) -> None:
+    """No answer and no usable artifact refs publish the defaults."""
+    session = _FakeSession(published=[], consumed=[])
+    patch = ContextPatch(task_id="t5", artifacts=[{"id": ""}, {}])
     req = ProactiveReportRequest(
         task_id="t5",
         session_id="s5",
         patch=patch,
         merge_strategy=MergeStrategy.APPEND,
     )
-    assert proactive_mod._collect_artifact_refs(req) == []
+    planner = _FixedPayloadPlanner(payload)
+    gen = create_default_proactive_generator(
+        lambda: planner, cast("Any", session)
+    )
+    await gen(req)
+
+    content = session.published[0].content
+    assert content["text"] == "Background task completed."
+    assert content["artifacts"] is None

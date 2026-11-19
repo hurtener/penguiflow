@@ -346,7 +346,7 @@ templates = await node.list_resource_templates()
 result = await node.read_resource("file:///data/config.json", ctx)
 
 # Check if resources are supported
-if node._resources_supported:
+if node.resources_supported:
     print("Server supports resources!")
 ```
 
@@ -422,7 +422,7 @@ result = await cache.get_or_fetch(uri=uri, read_fn=read_fn, ctx=ctx)
 
 ```python
 # Check before using resource features
-if node._resources_supported:
+if node.resources_supported:
     resources = await node.list_resources()
 else:
     logger.info("Server doesn't support MCP resources")

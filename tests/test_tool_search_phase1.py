@@ -1,56 +1,82 @@
+"""Tests for tool search phase1."""
+
+from __future__ import annotations
+
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel
+from typing_extensions import override
 
-from penguiflow.catalog import ToolLoadingMode, build_catalog, tool
+from penguiflow.catalog import NodeSpec, ToolLoadingMode, build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner, ToolSearchConfig, ToolVisibilityPolicy
-from penguiflow.planner.models import PlannerEvent
+from penguiflow.planner import (
+    ReactPlanner,
+    ToolSearchConfig,
+    ToolVisibilityPolicy,
+)
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from pathlib import Path
+
+    from penguiflow.planner.context import ToolContext
+    from penguiflow.planner.models import PlannerEvent
 
 
 class EchoArgs(BaseModel):
+    """Arguments of the echo tool."""
+
     text: str
 
 
 class EchoOut(BaseModel):
+    """Output of the echo tool."""
+
     text: str
 
 
 @tool(desc="Always-loaded echo tool.", loading_mode=ToolLoadingMode.ALWAYS)
-async def always_tool(args: EchoArgs, ctx: Any) -> EchoOut:
-    _ = ctx
+async def always_tool(args: EchoArgs, _ctx: ToolContext) -> EchoOut:
+    """Echo the input; always loaded."""
     return EchoOut(text=args.text)
 
 
 @tool(desc="Deferred echo tool for testing.")
-async def deferred_tool(args: EchoArgs, ctx: Any) -> EchoOut:
-    _ = ctx
+async def deferred_tool(args: EchoArgs, _ctx: ToolContext) -> EchoOut:
+    """Echo the input; loaded on demand."""
     return EchoOut(text=args.text)
 
 
-class StubClient:
-    def __init__(self, responses: list[Mapping[str, object]]) -> None:
+class StubClient(JSONLLMClient):
+    """LLM client that replays scripted responses."""
+
+    def __init__(self, responses: Sequence[object]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del messages, response_format, stream, on_stream_chunk
         if not self._responses:
-            raise AssertionError("No stub responses left")
+            msg = "No stub responses left"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.0
 
 
-def _build_catalog(*, default_loading_mode: ToolLoadingMode | None = None) -> list[Any]:
+def _build_catalog(
+    *, default_loading_mode: ToolLoadingMode | None = None
+) -> list[Any]:
     registry = ModelRegistry()
     registry.register("always_tool", EchoArgs, EchoOut)
     registry.register("deferred_tool", EchoArgs, EchoOut)
@@ -58,11 +84,14 @@ def _build_catalog(*, default_loading_mode: ToolLoadingMode | None = None) -> li
         Node(always_tool, name="always_tool"),
         Node(deferred_tool, name="deferred_tool"),
     ]
-    return build_catalog(nodes, registry, default_loading_mode=default_loading_mode)
+    return build_catalog(
+        nodes, registry, default_loading_mode=default_loading_mode
+    )
 
 
 @pytest.mark.asyncio
-async def test_tool_search_returns_deferred_by_default(tmp_path: Any) -> None:
+async def test_tool_search_returns_deferred_by_default(tmp_path: Path) -> None:
+    """Tool search returns deferred by default."""
     responses = [
         {
             "next_node": "tool_search",
@@ -88,7 +117,8 @@ async def test_tool_search_returns_deferred_by_default(tmp_path: Any) -> None:
     results = [
         event
         for event in events
-        if event.event_type == "tool_call_result" and event.extra.get("tool_name") == "tool_search"
+        if event.event_type == "tool_call_result"
+        and event.extra.get("tool_name") == "tool_search"
     ]
     assert results
     payload = json.loads(results[-1].extra.get("result_json", "{}"))
@@ -98,7 +128,8 @@ async def test_tool_search_returns_deferred_by_default(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_deferred_tool_activates_on_first_use(tmp_path: Any) -> None:
+async def test_deferred_tool_activates_on_first_use(tmp_path: Path) -> None:
+    """Deferred tool activates on first use."""
     responses = [
         {"next_node": "deferred_tool", "args": {"text": "hello"}},
         {"next_node": "final_response", "args": {"answer": "ok"}},
@@ -121,23 +152,31 @@ async def test_deferred_tool_activates_on_first_use(tmp_path: Any) -> None:
     activated = [
         event
         for event in events
-        if event.event_type == "tool_activated" and event.extra.get("tool_name") == "deferred_tool"
+        if event.event_type == "tool_activated"
+        and event.extra.get("tool_name") == "deferred_tool"
     ]
     assert activated
 
 
 class _HideDeferredTool(ToolVisibilityPolicy):
-    def visible_tools(self, specs, tool_context):  # type: ignore[no-untyped-def]
-        del tool_context
+    @override
+    def visible_tools(
+        self, specs: Sequence[NodeSpec], tool_context: Mapping[str, Any]
+    ) -> Sequence[NodeSpec]:
         return [spec for spec in specs if spec.name != "deferred_tool"]
 
 
 @pytest.mark.asyncio
-async def test_parallel_deferred_tool_activates_on_first_use(tmp_path: Any) -> None:
+async def test_parallel_deferred_tool_activates_on_first_use(
+    tmp_path: Path,
+) -> None:
+    """Parallel deferred tool activates on first use."""
     responses = [
         {
             "next_node": "parallel",
-            "args": {"steps": [{"node": "deferred_tool", "args": {"text": "hello"}}]},
+            "args": {
+                "steps": [{"node": "deferred_tool", "args": {"text": "hello"}}]
+            },
         },
         {"next_node": "final_response", "args": {"answer": "ok"}},
     ]
@@ -154,28 +193,37 @@ async def test_parallel_deferred_tool_activates_on_first_use(tmp_path: Any) -> N
         event_callback=events.append,
     )
 
-    await planner.run("call the deferred tool in parallel", tool_context={"session_id": "s1"})
+    await planner.run(
+        "call the deferred tool in parallel", tool_context={"session_id": "s1"}
+    )
 
     activated = [
         event
         for event in events
-        if event.event_type == "tool_activated" and event.extra.get("tool_name") == "deferred_tool"
+        if event.event_type == "tool_activated"
+        and event.extra.get("tool_name") == "deferred_tool"
     ]
     tool_results = [
         event
         for event in events
-        if event.event_type == "tool_call_result" and event.extra.get("tool_name") == "deferred_tool"
+        if event.event_type == "tool_call_result"
+        and event.extra.get("tool_name") == "deferred_tool"
     ]
     assert activated
     assert tool_results
 
 
 @pytest.mark.asyncio
-async def test_parallel_deferred_tool_activation_respects_visibility_policy(tmp_path: Any) -> None:
+async def test_parallel_deferred_tool_activation_respects_visibility_policy(
+    tmp_path: Path,
+) -> None:
+    """Parallel deferred tool activation respects visibility policy."""
     responses = [
         {
             "next_node": "parallel",
-            "args": {"steps": [{"node": "deferred_tool", "args": {"text": "hello"}}]},
+            "args": {
+                "steps": [{"node": "deferred_tool", "args": {"text": "hello"}}]
+            },
         },
         {"next_node": "final_response", "args": {"answer": "ok"}},
     ]
@@ -201,12 +249,14 @@ async def test_parallel_deferred_tool_activation_respects_visibility_policy(tmp_
     denied = [
         event
         for event in events
-        if event.event_type == "tool_activation_denied" and event.extra.get("reason") == "visibility_policy"
+        if event.event_type == "tool_activation_denied"
+        and event.extra.get("reason") == "visibility_policy"
     ]
     tool_starts = [
         event
         for event in events
-        if event.event_type == "tool_call_start" and event.extra.get("tool_name") == "deferred_tool"
+        if event.event_type == "tool_call_start"
+        and event.extra.get("tool_name") == "deferred_tool"
     ]
     assert denied
     assert tool_starts == []

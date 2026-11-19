@@ -1,7 +1,13 @@
 """Rich output components for PenguiFlow."""
 
 from .prompting import generate_component_system_prompt
-from .registry import ComponentDefinition, ComponentRegistry, RegistryError, get_registry, load_registry
+from .registry import (
+    ComponentDefinition,
+    ComponentRegistry,
+    RegistryError,
+    get_registry,
+    load_registry,
+)
 from .runtime import (
     DEFAULT_ALLOWLIST,
     RichOutputConfig,
@@ -17,21 +23,21 @@ from .runtime import (
 )
 
 __all__ = [
+    "DEFAULT_ALLOWLIST",
     "ComponentDefinition",
     "ComponentRegistry",
     "RegistryError",
-    "get_registry",
-    "load_registry",
-    "DEFAULT_ALLOWLIST",
     "RichOutputConfig",
     "RichOutputExtension",
     "RichOutputRuntime",
     "attach_rich_output_nodes",
     "clear_rich_output_extensions",
     "configure_rich_output",
+    "generate_component_system_prompt",
+    "get_registry",
     "get_runtime",
     "list_rich_output_extensions",
+    "load_registry",
     "register_rich_output_extension",
     "reset_runtime",
-    "generate_component_system_prompt",
 ]

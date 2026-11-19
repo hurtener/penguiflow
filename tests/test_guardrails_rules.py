@@ -1,3 +1,5 @@
+"""Tests for guardrails rules."""
+
 from __future__ import annotations
 
 import pytest
@@ -14,9 +16,12 @@ from penguiflow.planner.guardrails import (
 
 @pytest.mark.asyncio
 async def test_tool_allowlist_blocks_denied_tool() -> None:
+    """Tool allowlist blocks denied tool."""
     rule = ToolAllowlistRule(denied_tools=frozenset({"danger"}))
     decision = await rule.evaluate(
-        GuardrailEvent(event_type="tool_call_start", run_id="run", tool_name="danger"),
+        GuardrailEvent(
+            event_type="tool_call_start", run_id="run", tool_name="danger"
+        ),
         ContextSnapshotV1(),
     )
     assert decision is not None
@@ -25,9 +30,14 @@ async def test_tool_allowlist_blocks_denied_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_secret_redaction_rule_detects_keys() -> None:
+    """Secret redaction rule detects keys."""
     rule = SecretRedactionRule()
     decision = await rule.evaluate(
-        GuardrailEvent(event_type="llm_stream_chunk", run_id="run", text_content="sk-abc12345678901234567890"),
+        GuardrailEvent(
+            event_type="llm_stream_chunk",
+            run_id="run",
+            text_content="sk-abc12345678901234567890",
+        ),
         ContextSnapshotV1(),
     )
     assert decision is not None
@@ -37,6 +47,7 @@ async def test_secret_redaction_rule_detects_keys() -> None:
 
 @pytest.mark.asyncio
 async def test_injection_pattern_rule_blocks_override() -> None:
+    """Injection pattern rule blocks override."""
     rule = InjectionPatternRule()
     decision = await rule.evaluate(
         GuardrailEvent(

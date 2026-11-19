@@ -14,10 +14,17 @@ from .models import (
     TaskType,
     UpdateType,
 )
-from .persistence import InMemorySessionStateStore, SessionStateStore, StateStoreSessionAdapter
-from .planner import PlannerTaskPipeline
+from .persistence import (
+    InMemorySessionStateStore,
+    SessionStateStore,
+    StateStoreSessionAdapter,
+)
+from .planner import PlannerTaskPipeline, TaskPlanner
 from .policy import ControlPolicy
-from .proactive import create_default_proactive_generator, setup_proactive_reporting
+from .proactive import (
+    create_default_proactive_generator,
+    setup_proactive_reporting,
+)
 from .registry import TaskRegistry
 from .scheduler import (
     InMemoryJobStore,
@@ -49,57 +56,62 @@ from .task_service import (
     TaskSummary,
 )
 from .task_tools import build_task_tool_specs
-from .telemetry import NoOpTaskTelemetrySink, TaskTelemetryEvent, TaskTelemetrySink
+from .telemetry import (
+    NoOpTaskTelemetrySink,
+    TaskTelemetryEvent,
+    TaskTelemetrySink,
+)
 from .transport import SessionConnection, Transport
 
 __all__ = [
+    "ContextDepth",
     "ContextPatch",
     "ControlPolicy",
     "InMemoryJobStore",
+    "InMemorySessionStateStore",
+    "InProcessTaskService",
     "JobDefinition",
     "JobScheduler",
     "JobSchedulerRunner",
     "JobStore",
     "MergeStrategy",
+    "NoOpSpawnGuard",
+    "NoOpTaskTelemetrySink",
     "NotificationAction",
     "NotificationPayload",
-    "PlannerTaskPipeline",
     "PendingContextPatch",
+    "PlannerTaskPipeline",
     "ScheduleConfig",
     "SessionConnection",
     "SessionLimits",
-    "setup_proactive_reporting",
     "SessionManager",
     "SessionStateStore",
+    "SpawnDecision",
+    "SpawnGuard",
+    "SpawnRequest",
     "StateStoreSessionAdapter",
     "StateUpdate",
     "StreamingSession",
     "TaskContextSnapshot",
+    "TaskDetails",
     "TaskPipeline",
+    "TaskPlanner",
     "TaskRegistry",
     "TaskResult",
     "TaskRuntime",
+    "TaskService",
+    "TaskSpawnResult",
     "TaskState",
     "TaskStateModel",
     "TaskStatus",
-    "TaskType",
-    "TaskDetails",
-    "TaskService",
-    "TaskSpawnResult",
     "TaskSummary",
-    "InProcessTaskService",
-    "ContextDepth",
-    "SpawnDecision",
-    "SpawnGuard",
-    "SpawnRequest",
-    "NoOpSpawnGuard",
     "TaskTelemetryEvent",
     "TaskTelemetrySink",
-    "NoOpTaskTelemetrySink",
-    "build_task_tool_specs",
-    "create_default_proactive_generator",
+    "TaskType",
+    "Transport",
     "UpdateBroker",
     "UpdateType",
-    "InMemorySessionStateStore",
-    "Transport",
+    "build_task_tool_specs",
+    "create_default_proactive_generator",
+    "setup_proactive_reporting",
 ]

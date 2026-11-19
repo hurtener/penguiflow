@@ -4,19 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+from typing_extensions import override
 
-from penguiflow.llm.providers.base import OpenAICompatibleProvider
+from penguiflow.llm.providers.base import (
+    OpenAICompatibleProvider,
+    _from_openai_response,
+    _to_openai_messages,
+    _to_openai_response_format,
+    _to_openai_tools,
+)
 from penguiflow.llm.types import (
+    CancelToken,
+    CompletionResponse,
     ImagePart,
     LLMMessage,
+    StreamCallback,
     TextPart,
     ToolCallPart,
     ToolResultPart,
 )
+
+if TYPE_CHECKING:
+    from penguiflow.llm.profiles import ModelProfile
+    from penguiflow.llm.types import LLMRequest
 
 
 # Create a concrete implementation of OpenAICompatibleProvider for testing
@@ -24,51 +38,55 @@ class MockOpenAIProvider(OpenAICompatibleProvider):
     """Mock provider for testing base class methods."""
 
     def __init__(self, model: str = "test-model") -> None:
+        """Store ``model``."""
         self._model = model
 
     @property
+    @override
     def provider_name(self) -> str:
         return "mock"
 
     @property
-    def profile(self) -> Any:
+    @override
+    def profile(self) -> ModelProfile:
         from penguiflow.llm.profiles import get_profile
 
         return get_profile(self._model)
 
     @property
+    @override
     def model(self) -> str:
         return self._model
 
+    @override
     async def complete(
         self,
-        request: Any,
+        request: LLMRequest,
         *,
         timeout_s: float | None = None,
-        cancel: Any | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_event: Any | None = None,
-    ) -> Any:
-        raise NotImplementedError("Use mocked SDK")
+        on_stream_event: StreamCallback | None = None,
+    ) -> CompletionResponse:
+        msg = "Use mocked SDK"
+        raise NotImplementedError(msg)
 
 
 class TestOpenAICompatibleProviderConversions:
     """Test OpenAI-compatible provider message conversions."""
 
     def test_to_openai_messages_simple_text(self) -> None:
-        provider = MockOpenAIProvider()
-        messages = [
-            LLMMessage(role="user", parts=[TextPart(text="Hello")])
-        ]
+        """To OpenAI messages simple text."""
+        messages = [LLMMessage(role="user", parts=[TextPart(text="Hello")])]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         assert len(result) == 1
         assert result[0]["role"] == "user"
         assert result[0]["content"] == "Hello"
 
     def test_to_openai_messages_multipart(self) -> None:
-        provider = MockOpenAIProvider()
+        """To OpenAI messages multipart."""
         messages = [
             LLMMessage(
                 role="user",
@@ -79,7 +97,7 @@ class TestOpenAICompatibleProviderConversions:
             )
         ]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         assert len(result) == 1
         assert result[0]["role"] == "user"
@@ -87,10 +105,13 @@ class TestOpenAICompatibleProviderConversions:
         assert len(result[0]["content"]) == 2
         assert result[0]["content"][0]["type"] == "text"
         assert result[0]["content"][1]["type"] == "image_url"
-        assert "data:image/png;base64," in result[0]["content"][1]["image_url"]["url"]
+        assert (
+            "data:image/png;base64,"
+            in result[0]["content"][1]["image_url"]["url"]
+        )
 
     def test_to_openai_messages_with_tool_calls(self) -> None:
-        provider = MockOpenAIProvider()
+        """To OpenAI messages with tool calls."""
         messages = [
             LLMMessage(
                 role="assistant",
@@ -105,7 +126,7 @@ class TestOpenAICompatibleProviderConversions:
             )
         ]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
@@ -115,7 +136,7 @@ class TestOpenAICompatibleProviderConversions:
         assert result[0]["tool_calls"][0]["function"]["name"] == "get_weather"
 
     def test_to_openai_messages_tool_result(self) -> None:
-        provider = MockOpenAIProvider()
+        """To OpenAI messages tool result."""
         messages = [
             LLMMessage(
                 role="tool",
@@ -129,7 +150,7 @@ class TestOpenAICompatibleProviderConversions:
             )
         ]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         # Multiple tool results may create multiple messages
         assert len(result) >= 1
@@ -138,18 +159,21 @@ class TestOpenAICompatibleProviderConversions:
         assert result[0]["content"] == '{"temperature": 72}'
 
     def test_to_openai_tools(self) -> None:
+        """To OpenAI tools."""
         from penguiflow.llm.types import ToolSpec
 
-        provider = MockOpenAIProvider()
         tools = [
             ToolSpec(
                 name="get_weather",
                 description="Get weather for a city",
-                json_schema={"type": "object", "properties": {"city": {"type": "string"}}},
+                json_schema={
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
             )
         ]
 
-        result = provider._to_openai_tools(tools)
+        result = _to_openai_tools(tools)
 
         assert result is not None
         assert len(result) == 1
@@ -158,23 +182,22 @@ class TestOpenAICompatibleProviderConversions:
         assert result[0]["function"]["description"] == "Get weather for a city"
 
     def test_to_openai_tools_none(self) -> None:
-        provider = MockOpenAIProvider()
-
-        result = provider._to_openai_tools(None)
+        """To OpenAI tools none."""
+        result = _to_openai_tools(None)
 
         assert result is None
 
     def test_to_openai_response_format(self) -> None:
+        """To OpenAI response format."""
         from penguiflow.llm.types import StructuredOutputSpec
 
-        provider = MockOpenAIProvider()
         structured_output = StructuredOutputSpec(
             name="my_schema",
             json_schema={"type": "object"},
             strict=True,
         )
 
-        result = provider._to_openai_response_format(structured_output)
+        result = _to_openai_response_format(structured_output)
 
         assert result is not None
         assert result["type"] == "json_schema"
@@ -182,16 +205,14 @@ class TestOpenAICompatibleProviderConversions:
         assert result["json_schema"]["strict"] is True
 
     def test_to_openai_response_format_none(self) -> None:
-        provider = MockOpenAIProvider()
-
-        result = provider._to_openai_response_format(None)
+        """To OpenAI response format none."""
+        result = _to_openai_response_format(None)
 
         assert result is None
 
     def test_from_openai_response(self) -> None:
-        provider = MockOpenAIProvider()
-
         # Create mock response
+        """From OpenAI response."""
         mock_msg = MagicMock()
         mock_msg.content = "Hello back!"
         mock_msg.tool_calls = None
@@ -208,7 +229,7 @@ class TestOpenAICompatibleProviderConversions:
         mock_response.choices = [mock_choice]
         mock_response.usage = mock_usage
 
-        message, usage = provider._from_openai_response(mock_response)
+        message, usage = _from_openai_response(mock_response)
 
         assert message.role == "assistant"
         assert len(message.parts) == 1
@@ -219,9 +240,8 @@ class TestOpenAICompatibleProviderConversions:
         assert usage.total_tokens == 15
 
     def test_from_openai_response_with_tool_calls(self) -> None:
-        provider = MockOpenAIProvider()
-
         # Create mock tool call
+        """From OpenAI response with tool calls."""
         mock_func = MagicMock()
         mock_func.name = "get_weather"
         mock_func.arguments = '{"city": "NYC"}'
@@ -246,7 +266,7 @@ class TestOpenAICompatibleProviderConversions:
         mock_response.choices = [mock_choice]
         mock_response.usage = mock_usage
 
-        message, usage = provider._from_openai_response(mock_response)
+        message, _usage = _from_openai_response(mock_response)
 
         assert len(message.parts) == 1
         assert isinstance(message.parts[0], ToolCallPart)
@@ -281,7 +301,9 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
             from penguiflow.llm.providers import create_provider
 
-            provider = create_provider("claude-3-5-sonnet-20241022", api_key="test-key")
+            provider = create_provider(
+                "claude-3-5-sonnet-20241022", api_key="test-key"
+            )
 
             assert provider.model == "claude-3-5-sonnet-20241022"
             assert provider.provider_name == "anthropic"
@@ -292,7 +314,9 @@ class TestProviderFactory:
         mock_client = MagicMock()
         mock_genai.Client.return_value = mock_client
 
-        with patch.dict(sys.modules, {"google.genai": mock_genai, "google": MagicMock()}):
+        with patch.dict(
+            sys.modules, {"google.genai": mock_genai, "google": MagicMock()}
+        ):
             from penguiflow.llm.providers import create_provider
 
             provider = create_provider("gemini-2.0-flash", api_key="test-key")
@@ -309,7 +333,9 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"openai": mock_openai}):
             from penguiflow.llm.providers import create_provider
 
-            provider = create_provider("nim/qwen/qwen3.5-397b-a17b", api_key="test-key")
+            provider = create_provider(
+                "nim/qwen/qwen3.5-397b-a17b", api_key="test-key"
+            )
 
             assert provider.model == "qwen/qwen3.5-397b-a17b"
             assert provider.provider_name == "nim"
@@ -323,7 +349,9 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"openai": mock_openai}):
             from penguiflow.llm.providers import create_provider
 
-            provider = create_provider("nvidia/qwen/qwen3.5-397b-a17b", api_key="test-key")
+            provider = create_provider(
+                "nvidia/qwen/qwen3.5-397b-a17b", api_key="test-key"
+            )
 
             assert provider.model == "qwen/qwen3.5-397b-a17b"
             assert provider.provider_name == "nim"
@@ -337,7 +365,9 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"openai": mock_openai}):
             from penguiflow.llm.providers import create_provider
 
-            provider = create_provider("nvidia/nemotron-3-nano-30b-a3b", api_key="test-key")
+            provider = create_provider(
+                "nvidia/nemotron-3-nano-30b-a3b", api_key="test-key"
+            )
 
             assert provider.model == "nvidia/nemotron-3-nano-30b-a3b"
             assert provider.provider_name == "nim"
@@ -351,7 +381,9 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"openai": mock_openai}):
             from penguiflow.llm.providers import create_provider
 
-            provider = create_provider("openrouter/openai/gpt-4o", api_key="test-key")
+            provider = create_provider(
+                "openrouter/openai/gpt-4o", api_key="test-key"
+            )
 
             assert "gpt-4o" in provider.model
             assert provider.provider_name == "openrouter"
@@ -365,7 +397,8 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"openai": mock_openai}):
             from penguiflow.llm.providers.databricks import DatabricksProvider
 
-            # Test direct instantiation with explicit args (factory uses env vars)
+            # Test direct instantiation with explicit args (factory uses env
+            # vars)
             provider = DatabricksProvider(
                 model="databricks-meta-llama-3-1-405b-instruct",
                 token="test-token",
@@ -417,8 +450,10 @@ class TestProviderFactory:
             call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
             assert call_kwargs["api_key"] == "factory-api-key"
 
-    def test_create_databricks_provider_does_not_override_token_provider(self) -> None:
-        """Test factory api_key does not shadow explicit dynamic Databricks auth."""
+    def test_create_databricks_provider_does_not_override_token_provider(
+        self,
+    ) -> None:
+        """A factory api_key does not override dynamic Databricks auth."""
         mock_openai = MagicMock()
         mock_client = MagicMock()
         mock_openai.AsyncOpenAI.return_value = mock_client
@@ -435,17 +470,21 @@ class TestProviderFactory:
 
             assert provider.provider_name == "databricks"
             call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
-            assert call_kwargs["api_key"] != "static-key-that-should-not-be-used"
+            assert (
+                call_kwargs["api_key"] != "static-key-that-should-not-be-used"
+            )
             assert asyncio.run(call_kwargs["api_key"]()) == "dynamic-token"
 
-    def test_create_databricks_provider_does_not_override_service_principal(self) -> None:
-        """Test factory api_key does not shadow explicit service-principal auth."""
+    def test_create_databricks_provider_does_not_override_service_principal(
+        self,
+    ) -> None:
+        """A factory api_key does not override service-principal auth."""
         mock_openai = MagicMock()
         mock_client = MagicMock()
         mock_openai.AsyncOpenAI.return_value = mock_client
 
         class FakeConfig:
-            def __init__(self, **_: Any) -> None:
+            def __init__(self, **_: str) -> None:
                 pass
 
             def authenticate(self) -> dict[str, str]:
@@ -467,41 +506,65 @@ class TestProviderFactory:
 
             assert provider.provider_name == "databricks"
             call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
-            assert call_kwargs["api_key"] != "static-key-that-should-not-be-used"
-            assert asyncio.run(call_kwargs["api_key"]()) == "service-principal-token"
+            assert (
+                call_kwargs["api_key"] != "static-key-that-should-not-be-used"
+            )
+            assert (
+                asyncio.run(call_kwargs["api_key"]())
+                == "service-principal-token"
+            )
 
     def test_create_provider_bedrock_prefix_and_heuristic(self) -> None:
+        """Create provider Bedrock prefix and heuristic."""
         from penguiflow.llm.providers import create_provider
 
-        with patch("penguiflow.llm.providers.bedrock.BedrockProvider") as mock_bedrock:
+        with patch(
+            "penguiflow.llm.providers.bedrock.BedrockProvider"
+        ) as mock_bedrock:
             prefixed = create_provider("bedrock/anthropic.claude-sonnet-4")
             heuristic = create_provider("amazon.nova-pro")
 
             assert prefixed is mock_bedrock.return_value
             assert heuristic is mock_bedrock.return_value
-            assert mock_bedrock.call_args_list[0].args[0] == "anthropic.claude-sonnet-4"
+            assert (
+                mock_bedrock.call_args_list[0].args[0]
+                == "anthropic.claude-sonnet-4"
+            )
             assert mock_bedrock.call_args_list[1].args[0] == "amazon.nova-pro"
 
     def test_create_provider_prefixed_openai_anthropic_google(self) -> None:
+        """Create provider prefixed OpenAI Anthropic Google."""
         mock_openai = MagicMock()
         mock_anthropic = MagicMock()
         mock_google = MagicMock()
 
         with patch.dict(
             sys.modules,
-            {"openai": mock_openai, "anthropic": mock_anthropic, "google.genai": mock_google, "google": MagicMock()},
+            {
+                "openai": mock_openai,
+                "anthropic": mock_anthropic,
+                "google.genai": mock_google,
+                "google": MagicMock(),
+            },
         ):
             from penguiflow.llm.providers import create_provider
 
             openai_provider = create_provider("openai/gpt-4o", api_key="k")
-            anthropic_provider = create_provider("anthropic/claude-sonnet-4-5", api_key="k")
-            google_provider = create_provider("google/gemini-2.5-flash", api_key="k")
+            anthropic_provider = create_provider(
+                "anthropic/claude-sonnet-4-5", api_key="k"
+            )
+            google_provider = create_provider(
+                "google/gemini-2.5-flash", api_key="k"
+            )
 
             assert openai_provider.provider_name == "openai"
             assert anthropic_provider.provider_name == "anthropic"
             assert google_provider.provider_name == "google"
 
-    def test_create_provider_defaults_to_openai_for_unknown_model(self) -> None:
+    def test_create_provider_defaults_to_openai_for_unknown_model(
+        self,
+    ) -> None:
+        """Create provider defaults to OpenAI for unknown model."""
         mock_openai = MagicMock()
         mock_client = MagicMock()
         mock_openai.AsyncOpenAI.return_value = mock_client
@@ -509,7 +572,9 @@ class TestProviderFactory:
         with patch.dict(sys.modules, {"openai": mock_openai}):
             from penguiflow.llm.providers import create_provider
 
-            provider = create_provider("custom-local-model", api_key="test-key")
+            provider = create_provider(
+                "custom-local-model", api_key="test-key"
+            )
             assert provider.provider_name == "openai"
 
 
@@ -517,6 +582,7 @@ class TestProviderRouting:
     """Test that model names route to correct providers."""
 
     def test_routing_openai_models(self) -> None:
+        """Routing OpenAI models."""
         from penguiflow.llm.routing import get_provider_for_model
 
         assert get_provider_for_model("gpt-4o") == "openai"
@@ -526,13 +592,17 @@ class TestProviderRouting:
         assert get_provider_for_model("o3-mini") == "openai"
 
     def test_routing_anthropic_models(self) -> None:
+        """Routing Anthropic models."""
         from penguiflow.llm.routing import get_provider_for_model
 
-        assert get_provider_for_model("claude-3-5-sonnet-20241022") == "anthropic"
+        assert (
+            get_provider_for_model("claude-3-5-sonnet-20241022") == "anthropic"
+        )
         assert get_provider_for_model("claude-3-opus-20240229") == "anthropic"
         assert get_provider_for_model("claude-4-sonnet") == "anthropic"
 
     def test_routing_google_models(self) -> None:
+        """Routing Google models."""
         from penguiflow.llm.routing import get_provider_for_model
 
         assert get_provider_for_model("gemini-2.0-flash") == "google"
@@ -540,24 +610,44 @@ class TestProviderRouting:
         assert get_provider_for_model("gemini-2.5-pro") == "google"
 
     def test_routing_openrouter_models(self) -> None:
+        """Routing OpenRouter models."""
         from penguiflow.llm.routing import get_provider_for_model
 
-        assert get_provider_for_model("openrouter/openai/gpt-4o") == "openrouter"
-        assert get_provider_for_model("openrouter/anthropic/claude-3") == "openrouter"
+        assert (
+            get_provider_for_model("openrouter/openai/gpt-4o") == "openrouter"
+        )
+        assert (
+            get_provider_for_model("openrouter/anthropic/claude-3")
+            == "openrouter"
+        )
 
     def test_routing_databricks_models(self) -> None:
+        """Routing Databricks models."""
         from penguiflow.llm.routing import get_provider_for_model
 
-        assert get_provider_for_model("databricks/databricks-meta-llama-3-1-405b-instruct") == "databricks"
-        assert get_provider_for_model("databricks/my-custom-model") == "databricks"
+        assert (
+            get_provider_for_model(
+                "databricks/databricks-meta-llama-3-1-405b-instruct"
+            )
+            == "databricks"
+        )
+        assert (
+            get_provider_for_model("databricks/my-custom-model")
+            == "databricks"
+        )
 
     def test_routing_bedrock_models(self) -> None:
+        """Routing Bedrock models."""
         from penguiflow.llm.routing import get_provider_for_model
 
-        assert get_provider_for_model("bedrock/anthropic.claude-3-sonnet") == "bedrock"
+        assert (
+            get_provider_for_model("bedrock/anthropic.claude-3-sonnet")
+            == "bedrock"
+        )
         assert get_provider_for_model("bedrock/amazon.titan-text") == "bedrock"
 
     def test_routing_nim_models(self) -> None:
+        """Routing NIM models."""
         from penguiflow.llm.routing import get_provider_for_model
 
         assert get_provider_for_model("nim/qwen/qwen3.5-397b-a17b") == "nim"
@@ -568,6 +658,7 @@ class TestProviderProfiles:
     """Test that providers use correct model profiles."""
 
     def test_openai_profile(self) -> None:
+        """OpenAI profile."""
         from penguiflow.llm.profiles import get_profile
 
         profile = get_profile("gpt-4o")
@@ -575,6 +666,7 @@ class TestProviderProfiles:
         assert profile.supports_tools is True
 
     def test_anthropic_profile(self) -> None:
+        """Anthropic profile."""
         from penguiflow.llm.profiles import get_profile
 
         profile = get_profile("claude-3-5-sonnet-20241022")
@@ -582,12 +674,14 @@ class TestProviderProfiles:
         assert profile.supports_tools is True
 
     def test_google_profile(self) -> None:
+        """Google profile."""
         from penguiflow.llm.profiles import get_profile
 
         profile = get_profile("gemini-2.0-flash")
         assert profile is not None
 
     def test_nim_profile(self) -> None:
+        """NIM profile."""
         from penguiflow.llm.profiles import get_profile
 
         profile = get_profile("nim/qwen/qwen3.5-397b-a17b")
@@ -595,6 +689,7 @@ class TestProviderProfiles:
         assert profile.default_output_mode == "tools"
 
     def test_default_profile_for_unknown(self) -> None:
+        """Default profile for unknown."""
         from penguiflow.llm.profiles import get_profile
 
         profile = get_profile("unknown-model-xyz")
@@ -621,7 +716,12 @@ class TestProviderValidation:
             )
 
             # Create request with too many tools
-            from penguiflow.llm.types import LLMMessage, LLMRequest, TextPart, ToolSpec
+            from penguiflow.llm.types import (
+                LLMMessage,
+                LLMRequest,
+                TextPart,
+                ToolSpec,
+            )
 
             # Databricks MAX_TOOLS is 32, so we need > 32
             tools = tuple(
@@ -635,13 +735,17 @@ class TestProviderValidation:
 
             request = LLMRequest(
                 model="test",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="test")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="test")]),
+                ),
                 tools=tools,
             )
 
             from penguiflow.llm.errors import LLMInvalidRequestError
 
-            with pytest.raises(LLMInvalidRequestError, match="max.*32.*tools"):
+            with pytest.raises(
+                LLMInvalidRequestError, match=r"max.*32.*tools"
+            ):
                 provider.validate_request(request)
 
 
@@ -649,22 +753,24 @@ class TestImagePartConversion:
     """Test image part handling in message conversion."""
 
     def test_image_with_detail_setting(self) -> None:
-        provider = MockOpenAIProvider()
+        """Image with detail setting."""
         messages = [
             LLMMessage(
                 role="user",
                 parts=[
-                    ImagePart(data=b"test", media_type="image/jpeg", detail="high"),
+                    ImagePart(
+                        data=b"test", media_type="image/jpeg", detail="high"
+                    ),
                 ],
             )
         ]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         assert result[0]["content"][0]["image_url"]["detail"] == "high"
 
     def test_image_default_detail(self) -> None:
-        provider = MockOpenAIProvider()
+        """Image default detail."""
         messages = [
             LLMMessage(
                 role="user",
@@ -674,7 +780,7 @@ class TestImagePartConversion:
             )
         ]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         assert result[0]["content"][0]["image_url"]["detail"] == "auto"
 
@@ -683,7 +789,7 @@ class TestToolCallIdGeneration:
     """Test automatic tool call ID generation."""
 
     def test_tool_call_without_id(self) -> None:
-        provider = MockOpenAIProvider()
+        """Tool call without ID."""
         messages = [
             LLMMessage(
                 role="assistant",
@@ -697,7 +803,7 @@ class TestToolCallIdGeneration:
             )
         ]
 
-        result = provider._to_openai_messages(messages)
+        result = _to_openai_messages(messages)
 
         # Should generate a unique ID (UUID-based)
         assert "id" in result[0]["tool_calls"][0]
@@ -708,6 +814,7 @@ class TestToolCallIdGeneration:
 
 
 def test_providers_module_unknown_attribute_raises() -> None:
+    """Providers module unknown attribute raises."""
     import penguiflow.llm.providers as providers
 
     with pytest.raises(AttributeError):

@@ -16,7 +16,9 @@ class TokenStore(Protocol):
     :class:`InMemoryTokenStore`. Tokens are keyed by ``(user_id, provider)``.
     """
 
-    async def store(self, user_id: str, provider: str, token: str, expires_at: float | None) -> None:
+    async def store(
+        self, user_id: str, provider: str, token: str, expires_at: float | None
+    ) -> None:
         """Persist an access token for a user/provider pair.
 
         Args:
@@ -54,15 +56,22 @@ class TokenStore(Protocol):
 class InMemoryTokenStore:
     """Simple in-memory :class:`TokenStore` for development and tests.
 
-    Tokens are held only in process memory (a plain dict keyed by
-    ``(user_id, provider)``) and are lost on process restart. Not suitable
-    for production multi-worker deployments.
+    Tokens are held only in process memory (a plain dict keyed by ``(user_id,
+    provider)``) and are lost on process restart. Not suitable for production
+    multi-worker deployments.
     """
 
     def __init__(self) -> None:
+        """Create an empty in-memory token store."""
         self._tokens: dict[tuple[str, str], tuple[str, float | None]] = {}
 
-    async def store(self, user_id: str, provider: str, token: str, expires_at: float | None) -> None:
+    def __len__(self) -> int:
+        """Return the number of stored tokens, expired ones included."""
+        return len(self._tokens)
+
+    async def store(
+        self, user_id: str, provider: str, token: str, expires_at: float | None
+    ) -> None:
         """Store a token in memory, overwriting any existing entry.
 
         Args:
@@ -105,10 +114,10 @@ class InMemoryTokenStore:
 
 @dataclass
 class OAuthProviderConfig:
-    """Static configuration describing a single OAuth 2.0 authorization-code provider.
+    """Static configuration for one OAuth 2.0 authorization-code provider.
 
-    One instance is registered per provider in ``OAuthManager.providers``, keyed
-    by ``name``.
+    One instance is registered per provider in ``OAuthManager.providers``,
+    keyed by ``name``.
 
     Attributes:
         name: Unique provider key (matches the key used in
@@ -124,8 +133,8 @@ class OAuthProviderConfig:
         client_secret: OAuth client secret registered with the provider.
         redirect_uri: Redirect URI registered with the provider that the
             authorization server will send the user back to.
-        scopes: OAuth scopes to request during authorization. Defaults to
-            an empty list (no scopes requested).
+        scopes: OAuth scopes to request during authorization. Defaults to an
+            empty list (no scopes requested).
     """
 
     name: str
@@ -159,7 +168,14 @@ class OAuthManager:
     providers: dict[str, OAuthProviderConfig]
     token_store: TokenStore = field(default_factory=InMemoryTokenStore)
 
-    _pending: dict[str, dict[str, float | str]] = field(default_factory=dict, repr=False)
+    _pending: dict[str, dict[str, float | str]] = field(
+        default_factory=dict, repr=False
+    )
+
+    @property
+    def pending_states(self) -> frozenset[str]:
+        """The ``state`` values of authorization requests awaiting callback."""
+        return frozenset(self._pending)
 
     async def get_token(self, user_id: str, provider: str) -> str | None:
         """Look up a cached access token for a user/provider pair.
@@ -201,7 +217,8 @@ class OAuthManager:
         """
         config = self.providers.get(provider)
         if not config:
-            raise ValueError(f"Unknown OAuth provider: {provider}")
+            msg = f"Unknown OAuth provider: {provider}"
+            raise ValueError(msg)
 
         self._cleanup_pending()
         state = secrets.token_urlsafe(32)
@@ -246,29 +263,38 @@ class OAuthManager:
             initiated the flow, so the caller can resume the paused run.
 
         Raises:
-            ValueError: If ``state`` is unknown/already consumed, the
-                pending request has expired (older than 10 minutes), or the
-                provider's token response contains an ``error``.
+            ValueError: If ``state`` is unknown/already consumed, the pending
+                request has expired (older than 10 minutes), or the provider's
+                token response contains an ``error``.
             RuntimeError: If ``aiohttp`` is not installed.
         """
         pending = self._pending.pop(state, None)
         if not pending:
-            raise ValueError("Invalid or expired OAuth state")
+            msg = "Invalid or expired OAuth state"
+            raise ValueError(msg)
 
         created_at = float(pending["created_at"])
         if time.time() - created_at > 600:
-            raise ValueError("OAuth request expired")
+            msg = "OAuth request expired"
+            raise ValueError(msg)
 
         provider = str(pending["provider"])
         config = self.providers[provider]
 
         try:
             import aiohttp
-        except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-            raise RuntimeError("aiohttp is required for OAuth handling. Install penguiflow-lite[planner].") from exc
+        except (
+            ModuleNotFoundError
+        ) as exc:  # pragma: no cover - dependency guard
+            msg = (
+                "aiohttp is required for OAuth handling. Install "
+                "penguiflow-lite[planner]."
+            )
+            raise RuntimeError(msg) from exc
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
                 config.token_url,
                 data={
                     "client_id": config.client_id,
@@ -278,11 +304,16 @@ class OAuthManager:
                     "grant_type": "authorization_code",
                 },
                 headers={"Accept": "application/json"},
-            ) as resp:
-                result = await resp.json()
+            ) as resp,
+        ):
+            result = await resp.json()
 
         if "error" in result:
-            raise ValueError(f"OAuth error: {result.get('error_description', result['error'])}")
+            msg = (
+                "OAuth error: "
+                f"{result.get('error_description', result['error'])}"
+            )
+            raise ValueError(msg)
 
         expires_at = None
         if "expires_in" in result:
@@ -305,7 +336,11 @@ class OAuthManager:
         if not self._pending:
             return
         now = time.time()
-        expired = [state for state, data in self._pending.items() if now - float(data.get("created_at", 0)) > 600]
+        expired = [
+            state
+            for state, data in self._pending.items()
+            if now - float(data.get("created_at", 0)) > 600
+        ]
         for state in expired:
             self._pending.pop(state, None)
 

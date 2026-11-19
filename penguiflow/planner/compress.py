@@ -10,9 +10,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
 
-from penguiflow.planner.trajectory import Trajectory
+from .trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from .models import JSONLLMClient
+    from .react import ReactPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +24,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMPRESSION_THRESHOLD = 2000
 
 _OBSERVATION_SUMMARIZER_SYSTEM_PROMPT = """\
-You are a concise summarizer. Given a tool observation (output from a function/tool call),
-produce a brief summary that preserves the essential information needed for reasoning.
+You are a concise summarizer. Given a tool observation (output from a \
+function/tool call),
+produce a brief summary that preserves the essential information needed for \
+reasoning.
 
 Focus on:
 - Key data points and values
@@ -29,15 +35,18 @@ Focus on:
 - Any errors or warnings
 - Structure of the response (if relevant)
 
-Be extremely concise. The summary should be much shorter than the original while
-retaining the critical information needed to continue reasoning about the task."""
+Be extremely concise. The summary should be much shorter than the original \
+while
+retaining the critical information needed to continue reasoning about the \
+task."""
 
 _OBSERVATION_SUMMARIZER_USER_TEMPLATE = """\
 Tool: {tool_name}
 Observation to summarize:
 {observation}
 
-Provide a concise summary (max 500 chars) that preserves the essential information."""
+Provide a concise summary (max 500 chars) that preserves the essential \
+information."""
 
 
 @dataclass
@@ -50,7 +59,9 @@ class CompressionResult:
     compressed_size_chars: int
 
 
-def _is_large_observation(obs: Any, threshold: int = DEFAULT_COMPRESSION_THRESHOLD) -> bool:
+def _is_large_observation(
+    obs: object, threshold: int = DEFAULT_COMPRESSION_THRESHOLD
+) -> bool:
     """Check if an observation exceeds the compression threshold.
 
     Args:
@@ -88,9 +99,9 @@ def _estimate_trajectory_size(trajectory: Trajectory) -> int:
 
 
 async def _summarise_single_observation(
-    client: Any,
+    client: JSONLLMClient,
     tool_name: str,
-    observation: Any,
+    observation: object,
 ) -> str:
     """Summarize a single tool observation using an LLM.
 
@@ -111,7 +122,9 @@ async def _summarise_single_observation(
     # Truncate very large observations to avoid overwhelming the summarizer
     max_input_chars = 8000
     if len(obs_str) > max_input_chars:
-        obs_str = obs_str[:max_input_chars] + "\n... [truncated for summarization]"
+        obs_str = (
+            obs_str[:max_input_chars] + "\n... [truncated for summarization]"
+        )
 
     messages = [
         {"role": "system", "content": _OBSERVATION_SUMMARIZER_SYSTEM_PROMPT},
@@ -125,12 +138,10 @@ async def _summarise_single_observation(
     ]
 
     try:
-        result = await client.complete(messages=messages)
-        # Handle both tuple (response, cost) and direct response formats
-        if isinstance(result, tuple):
-            response = result[0]
-        else:
-            response = result
+        # Custom clients may return any shape: accept (response, cost)
+        # tuples, objects with ``content``, mappings and plain text.
+        result: object = await client.complete(messages=messages)
+        response = result[0] if isinstance(result, tuple) else result
 
         # Extract content from response
         if hasattr(response, "content"):
@@ -149,15 +160,15 @@ async def _summarise_single_observation(
 
 
 async def compress_trajectory(
-    planner: Any,
+    planner: ReactPlanner,
     trajectory: Trajectory,
     threshold: int = DEFAULT_COMPRESSION_THRESHOLD,
 ) -> tuple[Trajectory, CompressionResult]:
     """Compress a trajectory by summarizing large observations.
 
-    This creates a deep copy of the trajectory and replaces large `llm_observation`
-    fields with compressed summaries. The original `observation` field is preserved
-    for record-keeping.
+    This creates a deep copy of the trajectory and replaces large
+    `llm_observation` fields with compressed summaries. The original
+    `observation` field is preserved for record-keeping.
 
     Args:
         planner: The ReactPlanner instance (used to access summarizer client)
@@ -168,9 +179,12 @@ async def compress_trajectory(
         A tuple of (compressed_trajectory, compression_result)
     """
     # Use summarizer client if available, otherwise fall back to main client
-    client = getattr(planner, "_summarizer_client", None) or getattr(planner, "_client", None)
+    client = getattr(planner, "summarizer_client", None) or getattr(
+        planner, "client", None
+    )
     if client is None:
-        raise ValueError("No LLM client available for compression")
+        msg = "No LLM client available for compression"
+        raise ValueError(msg)
 
     # Deep copy the trajectory using serialization round-trip
     compressed = Trajectory.from_serialised(trajectory.serialise())
@@ -181,8 +195,14 @@ async def compress_trajectory(
         if step.llm_observation is not None and _is_large_observation(
             step.llm_observation, threshold
         ):
-            tool_name = step.action.next_node if step.action.is_tool_call() else "unknown_tool"
-            summary = await _summarise_single_observation(client, tool_name, step.llm_observation)
+            tool_name = (
+                step.action.next_node
+                if step.action.is_tool_call()
+                else "unknown_tool"
+            )
+            summary = await _summarise_single_observation(
+                client, tool_name, step.llm_observation
+            )
 
             # Replace with compressed marker
             step.llm_observation = {"_compressed": True, "summary": summary}
@@ -190,7 +210,10 @@ async def compress_trajectory(
 
             logger.debug(
                 "observation_compressed",
-                extra={"tool": tool_name, "step": compressed.steps.index(step)},
+                extra={
+                    "tool": tool_name,
+                    "step": compressed.steps.index(step),
+                },
             )
 
     compressed_size = _estimate_trajectory_size(compressed)
@@ -208,7 +231,9 @@ async def compress_trajectory(
             "steps_compressed": steps_compressed,
             "original_size": original_size,
             "compressed_size": compressed_size,
-            "reduction_pct": round((1 - compressed_size / original_size) * 100, 1)
+            "reduction_pct": round(
+                (1 - compressed_size / original_size) * 100, 1
+            )
             if original_size > 0
             else 0,
         },
@@ -218,7 +243,7 @@ async def compress_trajectory(
 
 
 __all__ = [
-    "compress_trajectory",
-    "CompressionResult",
     "DEFAULT_COMPRESSION_THRESHOLD",
+    "CompressionResult",
+    "compress_trajectory",
 ]

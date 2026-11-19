@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from _collections_abc import Awaitable, Mapping, MutableMapping
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Mapping, MutableMapping
+
     from penguiflow.artifacts import ArtifactStore, ScopedArtifacts
 
 PlannerPauseReason = Literal[
@@ -19,17 +20,29 @@ KVScope = Literal["session", "task"]
 
 
 class SessionKV(Protocol):
-    async def get(self, key: str, *, scope: KVScope = "session", namespace: str | None = None) -> Any | None: ...
+    """Durable key/value storage scoped to a session or a task."""
+
+    async def get(
+        self,
+        key: str,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+    ) -> object:
+        """Return the value stored under ``key``, or ``None``."""
+        ...
 
     async def set(
         self,
         key: str,
-        value: Any,
+        value: object,
         *,
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> Any: ...
+    ) -> object:
+        """Store ``value`` under ``key`` and return it."""
+        ...
 
     async def patch(
         self,
@@ -39,17 +52,21 @@ class SessionKV(Protocol):
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> Any: ...
+    ) -> object:
+        """Merge ``patch`` into the mapping under ``key`` and return it."""
+        ...
 
     async def get_or_init(
         self,
         key: str,
-        default: Any,
+        default: object,
         *,
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> Any: ...
+    ) -> object:
+        """Return the value under ``key``, storing ``default`` if unset."""
+        ...
 
     async def delete(
         self,
@@ -58,7 +75,9 @@ class SessionKV(Protocol):
         scope: KVScope = "session",
         namespace: str | None = None,
         emit_update: bool = True,
-    ) -> bool: ...
+    ) -> bool:
+        """Delete ``key`` and return whether it existed."""
+        ...
 
 
 class ToolContext(Protocol):
@@ -123,7 +142,7 @@ class ToolContext(Protocol):
     def emit_artifact(
         self,
         stream_id: str,
-        chunk: Any,
+        chunk: object,
         *,
         done: bool = False,
         artifact_type: str | None = None,

@@ -6,15 +6,17 @@ import json
 import logging
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
 from ..artifacts import ArtifactRef, ArtifactScope, ArtifactStore
-from .artifact_registry import ArtifactRegistry
 from .llm import _unwrap_model
 from .models import PlannerEvent, Source
-from .trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from .artifact_registry import ArtifactRegistry
+    from .trajectory import Trajectory
 
 logger = logging.getLogger("penguiflow.planner")
 
@@ -26,7 +28,14 @@ class _EventEmittingArtifactStoreProxy:
     are stored (e.g., PDFs from MCP tools).
     """
 
-    __slots__ = ("_store", "_emit_event", "_time_source", "_trajectory", "_namespace", "_registry")
+    __slots__ = (
+        "_emit_event",
+        "_namespace",
+        "_registry",
+        "_store",
+        "_time_source",
+        "_trajectory",
+    )
 
     def __init__(
         self,
@@ -44,7 +53,9 @@ class _EventEmittingArtifactStoreProxy:
         self._namespace = namespace
         self._registry = registry
 
-    def _resolve_scope(self, scope: ArtifactScope | None) -> ArtifactScope | None:
+    def resolve_scope(
+        self, scope: ArtifactScope | None
+    ) -> ArtifactScope | None:
         """Inject scope fields from trajectory if scope is missing."""
         if scope is not None:
             return scope
@@ -71,7 +82,7 @@ class _EventEmittingArtifactStoreProxy:
         meta: dict[str, Any] | None = None,
     ) -> ArtifactRef:
         """Store binary data and emit artifact_stored event."""
-        resolved_scope = self._resolve_scope(scope)
+        resolved_scope = self.resolve_scope(scope)
         ref = await self._store.put_bytes(
             data,
             mime_type=mime_type,
@@ -94,7 +105,7 @@ class _EventEmittingArtifactStoreProxy:
         meta: dict[str, Any] | None = None,
     ) -> ArtifactRef:
         """Store large text and emit artifact_stored event."""
-        resolved_scope = self._resolve_scope(scope)
+        resolved_scope = self.resolve_scope(scope)
         ref = await self._store.put_text(
             text,
             mime_type=mime_type,
@@ -103,7 +114,9 @@ class _EventEmittingArtifactStoreProxy:
             scope=resolved_scope,
             meta=meta,
         )
-        self._emit_artifact_stored_event(ref, len(text.encode("utf-8")), namespace)
+        self._emit_artifact_stored_event(
+            ref, len(text.encode("utf-8")), namespace
+        )
         return ref
 
     def _emit_artifact_stored_event(
@@ -131,7 +144,8 @@ class _EventEmittingArtifactStoreProxy:
                     "artifact_id": ref.id,
                     "mime_type": ref.mime_type,
                     "size_bytes": size_bytes,
-                    "artifact_filename": ref.filename,  # Use artifact_filename to avoid LogRecord conflict
+                    # Use artifact_filename to avoid LogRecord conflict
+                    "artifact_filename": ref.filename,
                     "source": {"namespace": namespace or self._namespace},
                 },
             )
@@ -150,7 +164,9 @@ class _EventEmittingArtifactStoreProxy:
     async def exists(self, artifact_id: str) -> bool:
         return await self._store.exists(artifact_id)
 
-    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+    async def list(
+        self, *, scope: ArtifactScope | None = None
+    ) -> list[ArtifactRef]:
         """Delegate list to underlying store (no event for reads)."""
         return await self._store.list(scope=scope)
 
@@ -167,9 +183,6 @@ class _ArtifactCollector:
         out_model: type[BaseModel],
         observation: Mapping[str, Any],
     ) -> None:
-        if not isinstance(observation, Mapping):
-            return
-
         collected: dict[str, Any] = {}
         for field_name, field_info in out_model.model_fields.items():
             extra = field_info.json_schema_extra
@@ -191,8 +204,7 @@ class _ArtifactCollector:
 
 
 def _model_json_schema_extra(model: type[BaseModel]) -> Mapping[str, Any]:
-    """Return json_schema_extra from model config (ConfigDict or legacy Config)."""
-
+    """Return the model config's json_schema_extra (ConfigDict or Config)."""
     config_extra: Mapping[str, Any] | None = None
     config = getattr(model, "model_config", None)
     if isinstance(config, Mapping):
@@ -211,14 +223,12 @@ def _model_json_schema_extra(model: type[BaseModel]) -> Mapping[str, Any]:
 
 def _produces_sources(model: type[BaseModel]) -> bool:
     """Check whether the model declares that it produces sources."""
-
     extra = _model_json_schema_extra(model)
     return bool(extra.get("produces_sources"))
 
 
 def _source_field_map(model: type[BaseModel]) -> dict[str, str]:
     """Build mapping of model field names to Source fields."""
-
     mapping: dict[str, str] = {}
     for field_name, field_info in model.model_fields.items():
         extra = field_info.json_schema_extra
@@ -234,10 +244,9 @@ def _source_field_map(model: type[BaseModel]) -> dict[str, str]:
 
 def _extract_source_payloads(
     out_model: type[BaseModel],
-    observation: Any,
+    observation: object,
 ) -> list[Mapping[str, Any]]:
     """Extract potential Source payloads from an observation."""
-
     if observation is None:
         return []
     if isinstance(observation, BaseModel):
@@ -246,39 +255,60 @@ def _extract_source_payloads(
         return []
 
     payloads: list[Mapping[str, Any]] = []
-
-    if _produces_sources(out_model):
-        mapping = _source_field_map(out_model)
-        if mapping:
-            payload = {
-                target: observation.get(field_name)
-                for field_name, target in mapping.items()
-                if field_name in observation
-            }
-            if payload:
-                payloads.append(payload)
-
+    own_payload = _own_source_payload(out_model, observation)
+    if own_payload:
+        payloads.append(own_payload)
     for field_name, field_info in out_model.model_fields.items():
         nested_model = _unwrap_model(field_info.annotation)
         if nested_model is None:
             continue
         nested_value = observation.get(field_name)
-        if nested_value is None:
-            continue
-
-        if isinstance(nested_value, Sequence) and not isinstance(nested_value, (str, bytes, bytearray, Mapping)):
-            for item in nested_value:
-                payloads.extend(_extract_source_payloads(nested_model, item))
-        elif isinstance(nested_value, Mapping) or isinstance(nested_value, BaseModel):
-            payloads.extend(_extract_source_payloads(nested_model, nested_value))
-
+        if nested_value is not None:
+            payloads.extend(
+                _nested_source_payloads(nested_model, nested_value)
+            )
     return payloads
+
+
+def _own_source_payload(
+    out_model: type[BaseModel], observation: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Map the model's source fields of ``observation`` to a Source."""
+    if not _produces_sources(out_model):
+        return None
+    mapping = _source_field_map(out_model)
+    if not mapping:
+        return None
+    return {
+        target: observation.get(field_name)
+        for field_name, target in mapping.items()
+        if field_name in observation
+    }
+
+
+def _nested_source_payloads(
+    nested_model: type[BaseModel], nested_value: object
+) -> list[Mapping[str, Any]]:
+    """Extract the sources of a nested model field (or list of them)."""
+    if isinstance(nested_value, Sequence) and not isinstance(
+        nested_value, (str, bytes, bytearray, Mapping)
+    ):
+        return [
+            payload
+            for item in nested_value
+            for payload in _extract_source_payloads(nested_model, item)
+        ]
+    if isinstance(nested_value, (Mapping, BaseModel)):
+        return _extract_source_payloads(nested_model, nested_value)
+    return []
 
 
 class _SourceCollector:
     """Collect Source objects emitted by tools during execution."""
 
-    def __init__(self, existing: Sequence[Mapping[str, Any]] | None = None) -> None:
+    def __init__(
+        self, existing: Sequence[Mapping[str, Any]] | None = None
+    ) -> None:
         self._sources: list[Source] = []
         self._seen: set[tuple[str, str | None, str | None]] = set()
         for src in existing or []:
@@ -286,7 +316,11 @@ class _SourceCollector:
 
     def _add(self, payload: Mapping[str, Any] | Source) -> None:
         try:
-            model = payload if isinstance(payload, Source) else Source.model_validate(payload)
+            model = (
+                payload
+                if isinstance(payload, Source)
+                else Source.model_validate(payload)
+            )
         except ValidationError as exc:
             logger.debug("source_validation_failed", extra={"error": str(exc)})
             return
@@ -297,9 +331,9 @@ class _SourceCollector:
         self._seen.add(key)
         self._sources.append(model)
 
-    def collect(self, out_model: type[BaseModel], observation: Mapping[str, Any]) -> None:
-        if not isinstance(observation, Mapping):
-            return
+    def collect(
+        self, out_model: type[BaseModel], observation: Mapping[str, Any]
+    ) -> None:
         for payload in _extract_source_payloads(out_model, observation):
             self._add(payload)
 
@@ -307,16 +341,17 @@ class _SourceCollector:
         return [src.model_dump(mode="json") for src in self._sources]
 
 
-def _normalise_artifact_value(value: Any) -> Any:
-    """Best-effort conversion of artifact chunks to JSON-serialisable payloads."""
-
+def _normalise_artifact_value(value: object) -> object:
+    """Best-effort conversion of artifact chunks to JSON-safe payloads."""
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     try:
         json.dumps(value, ensure_ascii=False)
-        return value
     except Exception:
         try:
-            return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+            return json.loads(
+                json.dumps(value, default=str, ensure_ascii=False)
+            )
         except Exception:
             return repr(value)
+    return value

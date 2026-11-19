@@ -9,8 +9,7 @@ from typing import Any
 
 
 class StructuredFormatter(logging.Formatter):
-    """
-    A formatter that outputs JSON lines with all extra fields included.
+    """A formatter that outputs JSON lines with all extra fields included.
 
     This is useful for debugging and log aggregation systems that expect
     structured JSON output.
@@ -18,20 +17,43 @@ class StructuredFormatter(logging.Formatter):
 
     # Fields that are part of the standard LogRecord and should be excluded
     # from the 'extra' output to avoid duplication
-    STANDARD_FIELDS = frozenset({
-        "name", "msg", "args", "created", "filename", "funcName",
-        "levelname", "levelno", "lineno", "module", "msecs",
-        "pathname", "process", "processName", "relativeCreated",
-        "stack_info", "exc_info", "exc_text", "thread", "threadName",
-        "taskName", "message",
-    })
+    STANDARD_FIELDS = frozenset(
+        {
+            "name",
+            "msg",
+            "args",
+            "created",
+            "filename",
+            "funcName",
+            "levelname",
+            "levelno",
+            "lineno",
+            "module",
+            "msecs",
+            "pathname",
+            "process",
+            "processName",
+            "relativeCreated",
+            "stack_info",
+            "exc_info",
+            "exc_text",
+            "thread",
+            "threadName",
+            "taskName",
+            "message",
+        }
+    )
 
-    def __init__(self, include_timestamp: bool = True, indent: int | None = None) -> None:
+    def __init__(
+        self, include_timestamp: bool = True, indent: int | None = None
+    ) -> None:
+        """Configure timestamps and JSON indentation."""
         super().__init__()
         self._include_timestamp = include_timestamp
         self._indent = indent
 
     def format(self, record: logging.LogRecord) -> str:
+        """Render ``record`` as a JSON log line, including extra fields."""
         # Build the base log entry
         entry: dict[str, Any] = {
             "level": record.levelname,
@@ -62,23 +84,29 @@ class StructuredFormatter(logging.Formatter):
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
 
-        return json.dumps(entry, ensure_ascii=False, default=str, indent=self._indent)
+        return json.dumps(
+            entry, ensure_ascii=False, default=str, indent=self._indent
+        )
 
 
 class ExtraFormatter(logging.Formatter):
-    """
-    A formatter that appends extra fields to the standard log format.
+    """A formatter that appends extra fields to the standard log format.
 
     Output example:
-        INFO:penguiflow.planner:planner_action [step=1, thought="...", next_node="search"]
+        INFO:penguiflow.planner:planner_action [step=1, thought="...",
+        next_node="search"]
     """
 
     STANDARD_FIELDS = StructuredFormatter.STANDARD_FIELDS
 
-    def __init__(self, fmt: str | None = None, datefmt: str | None = None) -> None:
+    def __init__(
+        self, fmt: str | None = None, datefmt: str | None = None
+    ) -> None:
+        """Configure the base log format and date format."""
         super().__init__(fmt, datefmt)
 
     def format(self, record: logging.LogRecord) -> str:
+        """Render ``record`` with its extra fields appended."""
         # Get the base formatted message
         base = super().format(record)
 
@@ -106,12 +134,9 @@ def configure_logging(
     include_extras: bool = True,
     logger_name: str = "penguiflow",
 ) -> None:
-    """
-    Configure penguiflow logging with optional structured output.
+    """Configure penguiflow logging with optional structured output.
 
-    Parameters
-    ----------
-    level : int | str
+    Parameters ---------- level : int | str
         Log level (e.g., logging.DEBUG, "DEBUG", logging.INFO)
     structured : bool
         If True, output JSON lines. If False, use human-readable format.
@@ -120,7 +145,7 @@ def configure_logging(
     logger_name : str
         Logger name to configure. Default: "penguiflow"
 
-    Examples
+    Examples:
     --------
     >>> from penguiflow.logging import configure_logging
     >>> configure_logging(level="DEBUG", structured=True)
@@ -144,7 +169,9 @@ def configure_logging(
     elif include_extras:
         handler.setFormatter(ExtraFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        handler.setFormatter(
+            logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+        )
 
     logger.addHandler(handler)
 

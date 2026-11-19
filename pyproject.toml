@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "penguiflow-lite"
-version = "6.0.0"
+version = "6.1.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 requires-python = ">=3.11"
 license = "MIT"
@@ -18,6 +18,7 @@ dependencies = [
     "fastapi>=0.118",
     "databricks-mcp>=0.6.0",
     "mcp>=1.26,<2",
+    "typing-extensions>=4.15",
 ]
 
 [project.optional-dependencies]
@@ -143,31 +144,63 @@ dev = [
     # pydantic-ai transport tests
     "pydantic-ai-slim[openai,openrouter]>=1.107.0,<2",
     "genai-prices>=0.0.66,<1",
+    "mypy-protobuf>=5.1.0",
+    "types-grpcio>=1.85.0.20261028",
+    "types-pyyaml>=6.0.12.20261113",
 ]
 
 [tool.ruff]
-line-length = 120
 target-version = "py311"
+line-length = 79
+src = [".", "tests"]
+# Generated protobuf/gRPC modules and their stubs.
 extend-exclude = [
-    "penguiflow_a2a/grpc/a2a_pb2.py",
-    "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
+    "penguiflow_a2a/grpc/a2a_pb2*.py",
+    "penguiflow_a2a/grpc/a2a_pb2*.pyi",
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "W"]
-ignore = ["UP042"]
+select = ["E", "F", "I", "UP", "B", "D", "W", "N", "C4", "SIM", "RUF", "ANN", "TC", "A", "ARG", "RET", "PTH", "DTZ", "ASYNC", "TRY", "EM", "SLF", "T20", "ERA", "INP", "C90"]
+ignore = []
 
-[tool.ruff.lint.isort]
-known-first-party = ["penguiflow"]
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# Public exception names kept as they are for API stability.
+[tool.ruff.lint.pep8-naming]
+ignore-names = [
+    "ModelRetry",
+    "ValidationRetry",
+    "MemoryBudgetExceeded",
+    "RemoteTaskInputRequired",
+    "RemoteTaskAuthRequired",
+    "SteeringCancelled",
+]
+
+# Pydantic evaluates annotations at runtime, so their imports stay at runtime.
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 
 [tool.mypy]
 python_version = "3.11"
-plugins = []
-files = ["penguiflow", "penguiflow_a2a"]
-disallow_untyped_defs = false
-ignore_missing_imports = true
-warn_unused_ignores = true
+files = ["penguiflow", "penguiflow_a2a", "examples", "tests"]
+strict = true
+pretty = true
 show_error_codes = true
+warn_redundant_casts = true
+warn_unreachable = true
+warn_unused_ignores = true
+no_implicit_optional = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+mypy_path = ["."]
+explicit_package_bases = true
+# Generated protobuf modules; mypy reads their .pyi stubs instead.
+exclude = ['penguiflow_a2a/grpc/a2a_pb2(_grpc)?\.py$']
 
 # numpy is a transitive-only dependency. Newer numpy releases ship .pyi stubs
 # that use PEP 695 `type` statements, which mypy rejects under our 3.11 target

@@ -3,24 +3,45 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
 from penguiflow.planner import ReactPlanner
-from penguiflow.planner.guardrails import AsyncRuleEvaluator, GuardrailGateway, RuleRegistry
+from penguiflow.planner.guardrails import (
+    AsyncRuleEvaluator,
+    GuardrailGateway,
+    RuleRegistry,
+)
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
 from penguiflow.steering import InMemoryGuardInbox
 
 from .rule import ScopeClassifierRule
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
-class _StubClient:
-    async def complete(self, *, messages, response_format=None, stream=False, on_stream_chunk=None):
-        _ = messages, response_format, stream, on_stream_chunk
-        return '{"thought":"done","next_node":"final_response","args":{"answer":"ok"}}', 0.0
+
+class _StubClient(JSONLLMClient):
+    @override
+    async def complete(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
+    ) -> str | tuple[str, float]:
+        return (
+            '{"thought":"done","next_node":"final_response","args":{"answer":"ok"}}',
+            0.0,
+        )
 
 
 class _Args(BaseModel):
@@ -31,19 +52,23 @@ class _Result(BaseModel):
     ok: bool
 
 
-async def _noop_tool(args: _Args, ctx: object) -> _Result:
-    _ = ctx
+async def _noop_tool(args: _Args, _ctx: object) -> _Result:
     return _Result(ok=args.ok)
 
 
 async def main() -> None:
+    """Run the example."""
     registry = ModelRegistry()
     registry.register("noop", _Args, _Result)
     catalog = build_catalog([Node(_noop_tool, name="noop")], registry)
 
     rule_registry = RuleRegistry()
     rule_registry.register(
-        ScopeClassifierRule(model_path=Path("examples/guardrails/scope_classifier/scope_model.joblib"))
+        ScopeClassifierRule(
+            model_path=Path(
+                "examples/guardrails/scope_classifier/scope_model.joblib"
+            )
+        )
     )
 
     gateway = GuardrailGateway(
@@ -59,7 +84,7 @@ async def main() -> None:
     )
 
     result = await planner.run("Show revenue by region")
-    print(result.reason)
+    sys.stdout.write(f"{result.reason}\n")
 
 
 if __name__ == "__main__":

@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
-from typing import Any, Literal, get_args, get_origin
+import re
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
-from ..catalog import NodeSpec
 from ..rich_output.tools import (
     RICH_OUTPUT_COMPONENT_TOOL_NAMES,
     build_render_tool_payload,
@@ -21,19 +27,26 @@ from .llm import _coerce_llm_response
 from .migration import try_normalize_action
 from .models import PlannerAction, PlannerEvent
 from .react_utils import _serialize_validation_errors
-from .trajectory import Trajectory
+
+if TYPE_CHECKING:
+    from ..catalog import NodeSpec
+    from .constraints import _CostTracker
+    from .models import JSONLLMClient
+    from .trajectory import Trajectory
 
 logger = logging.getLogger("penguiflow.planner")
 
 AUTO_STR_SENTINEL = "<auto>"
 _RICH_OUTPUT_SCHEMA_ERROR_KEY = "rich_output_schema_error"
-_RICH_OUTPUT_SCHEMA_ARG_FILL_ATTEMPTED_KEY = "rich_output_schema_arg_fill_attempted"
+_RICH_OUTPUT_SCHEMA_ARG_FILL_ATTEMPTED_KEY = (
+    "rich_output_schema_arg_fill_attempted"
+)
 
 
-def _get_rich_output_schema_error(trajectory: Trajectory) -> Mapping[str, Any] | None:
+def _get_rich_output_schema_error(
+    trajectory: Trajectory,
+) -> Mapping[str, Any] | None:
     metadata = trajectory.metadata
-    if not isinstance(metadata, Mapping):
-        return None
     error = metadata.get(_RICH_OUTPUT_SCHEMA_ERROR_KEY)
     if isinstance(error, Mapping):
         return error
@@ -43,10 +56,10 @@ def _get_rich_output_schema_error(trajectory: Trajectory) -> Mapping[str, Any] |
     return None
 
 
-def _set_rich_output_schema_error(trajectory: Trajectory, payload: Mapping[str, Any]) -> None:
+def _set_rich_output_schema_error(
+    trajectory: Trajectory, payload: Mapping[str, Any]
+) -> None:
     metadata = trajectory.metadata
-    if not isinstance(metadata, MutableMapping):
-        return
     stored = dict(payload)
     metadata[_RICH_OUTPUT_SCHEMA_ERROR_KEY] = stored
     if stored.get("tool_name") == "render_component":
@@ -57,72 +70,66 @@ def _set_rich_output_schema_error(trajectory: Trajectory, payload: Mapping[str, 
 
 def _rich_output_schema_arg_fill_attempted(trajectory: Trajectory) -> bool:
     metadata = trajectory.metadata
-    if not isinstance(metadata, Mapping):
-        return False
     return bool(
         metadata.get(_RICH_OUTPUT_SCHEMA_ARG_FILL_ATTEMPTED_KEY)
         or metadata.get("render_component_props_arg_fill_attempted")
     )
 
 
-def _mark_rich_output_schema_arg_fill_attempted(trajectory: Trajectory) -> None:
+def _mark_rich_output_schema_arg_fill_attempted(
+    trajectory: Trajectory,
+) -> None:
     metadata = trajectory.metadata
-    if not isinstance(metadata, MutableMapping):
-        return
     metadata[_RICH_OUTPUT_SCHEMA_ARG_FILL_ATTEMPTED_KEY] = True
     metadata["render_component_props_arg_fill_attempted"] = True
 
 
 def _clear_rich_output_schema_repair_state(trajectory: Trajectory) -> None:
     metadata = trajectory.metadata
-    if not isinstance(metadata, MutableMapping):
-        return
     metadata.pop(_RICH_OUTPUT_SCHEMA_ERROR_KEY, None)
     metadata.pop(_RICH_OUTPUT_SCHEMA_ARG_FILL_ATTEMPTED_KEY, None)
     metadata.pop("render_component_schema_error", None)
     metadata.pop("render_component_props_arg_fill_attempted", None)
 
 
-def _validate_llm_context(
-    llm_context: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
+def _validate_llm_context(llm_context: object) -> dict[str, Any] | None:
     """Ensure llm_context is JSON-serialisable."""
-
     if llm_context is None:
         return None
     if not isinstance(llm_context, Mapping):
-        raise TypeError("llm_context must be a mapping of JSON-serializable data")
+        msg = "llm_context must be a mapping of JSON-serializable data"
+        raise TypeError(msg)
     try:
         json.dumps(llm_context, ensure_ascii=False)
     except (TypeError, ValueError) as exc:
-        raise TypeError(f"llm_context must be JSON-serializable: {exc}") from exc
+        msg = f"llm_context must be JSON-serializable: {exc}"
+        raise TypeError(msg) from exc
     return dict(llm_context)
 
 
-def _coerce_tool_context(
-    tool_context: Mapping[str, Any] | None,
-) -> dict[str, Any]:
+def _coerce_tool_context(tool_context: object) -> dict[str, Any]:
     """Normalise tool_context to a mutable dict."""
-
     if tool_context is None:
         return {}
     if not isinstance(tool_context, Mapping):
-        raise TypeError("tool_context must be a mapping")
+        msg = "tool_context must be a mapping"
+        raise TypeError(msg)
     return dict(tool_context)
 
 
 def _salvage_action_payload(raw: str) -> PlannerAction | None:
     """Attempt to coerce loosely-structured JSON into a PlannerAction.
 
-    This is a best-effort salvage path used when strict parsing fails. It accepts
-    legacy, unified, and hybrid shapes and normalizes them into the current
-    PlannerAction model.
+    This is a best-effort salvage path used when strict parsing fails. It
+    accepts legacy, unified, and hybrid shapes and normalizes them into the
+    current PlannerAction model.
     """
-
     return try_normalize_action(raw)
 
 
-def _summarize_validation_error(exc: ValidationError, *, limit: int = 240) -> str:
+def _summarize_validation_error(
+    exc: ValidationError, *, limit: int = 240
+) -> str:
     """Build a compact, human-readable validation summary."""
     summary = str(exc)
     try:
@@ -139,41 +146,45 @@ def _summarize_validation_error(exc: ValidationError, *, limit: int = 240) -> st
     return summary
 
 
-def _default_for_annotation(annotation: Any) -> Any:
-    """Generate a lightweight placeholder for a required field."""
+_SCALAR_DEFAULTS: tuple[tuple[type, object], ...] = (
+    (str, AUTO_STR_SENTINEL),
+    (bool, False),
+    (int, 0),
+    (float, 0.0),
+)
 
+
+def _default_for_generic(annotation: object, origin: object) -> object:
+    """Generate a placeholder for a parametrized (generic) annotation."""
+    if origin in (list, set, tuple, Sequence):
+        return []
+    if origin in (dict, Mapping):
+        return {}
+    if origin is type(None):
+        return None
+    for arg in get_args(annotation):
+        if arg is type(None):
+            continue
+        candidate = _default_for_annotation(arg)
+        if candidate is not None:
+            return candidate
+    return "<auto>"
+
+
+def _default_for_annotation(annotation: object) -> object:
+    """Generate a lightweight placeholder for a required field."""
     origin = get_origin(annotation)
     if origin is Literal:
         values = get_args(annotation)
         if values:
             return values[0]
-
-    if origin is None:
-        if annotation is str:
-            return AUTO_STR_SENTINEL
-        if annotation is bool:
-            return False
-        if annotation is int:
-            return 0
-        if annotation is float:
-            return 0.0
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            return {}
-    else:
-        if origin in (list, set, tuple, Sequence):
-            return []
-        if origin in (dict, Mapping):
-            return {}
-        if origin is type(None):
-            return None
-
-        for arg in get_args(annotation):
-            if arg is type(None):
-                continue
-            candidate = _default_for_annotation(arg)
-            if candidate is not None:
-                return candidate
-
+    if origin is not None:
+        return _default_for_generic(annotation, origin)
+    for scalar, default in _SCALAR_DEFAULTS:
+        if annotation is scalar:
+            return default
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return {}
     return "<auto>"
 
 
@@ -181,8 +192,7 @@ def _autofill_missing_args(
     spec: NodeSpec,
     args: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
-    """Fill required args with safe defaults to avoid repeated validation loops."""
-
+    """Fill required args with safe defaults to avoid validation loops."""
     provided: dict[str, Any] = dict(args or {})
     filled: dict[str, Any] = {}
 
@@ -203,7 +213,7 @@ def _autofill_missing_args(
 
 
 def _scan_placeholder_paths(
-    value: Any,
+    value: object,
     placeholders: Sequence[str],
     path: str = "",
 ) -> list[str]:
@@ -212,16 +222,82 @@ def _scan_placeholder_paths(
         for key, item in value.items():
             key_str = str(key)
             child_path = f"{path}.{key_str}" if path else key_str
-            matches.extend(_scan_placeholder_paths(item, placeholders, child_path))
+            matches.extend(
+                _scan_placeholder_paths(item, placeholders, child_path)
+            )
         return matches
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
         for idx, item in enumerate(value):
             child_path = f"{path}[{idx}]" if path else f"[{idx}]"
-            matches.extend(_scan_placeholder_paths(item, placeholders, child_path))
+            matches.extend(
+                _scan_placeholder_paths(item, placeholders, child_path)
+            )
         return matches
     if isinstance(value, str) and value in placeholders:
         matches.append(path or "<root>")
     return matches
+
+
+def _enum_hints(field_info: dict[str, Any], defs: dict[str, Any]) -> list[str]:
+    """Return the "Valid options" hints of optional (``anyOf``) enums."""
+    hints: list[str] = []
+    for option in field_info.get("anyOf", []):
+        if not isinstance(option, dict):
+            continue
+        if "$ref" in option:
+            ref_schema = defs.get(option["$ref"].split("/")[-1], {})
+            if "enum" in ref_schema:
+                hints.append(f"Valid options: {ref_schema['enum']}")
+        elif "enum" in option:
+            hints.append(f"Valid options: {option['enum']}")
+    return hints
+
+
+def _ref_hints(
+    field_info: dict[str, Any], defs: dict[str, Any], hints: list[str]
+) -> None:
+    """Add the enum and description hints of a ``$ref`` definition."""
+    ref = field_info.get("$ref")
+    if not ref or not ref.startswith("#/$defs/"):
+        return
+    ref_schema = defs.get(ref.split("/")[-1], {})
+    # Check for enum in referenced schema
+    if "enum" in ref_schema:
+        hints.append(f"Valid options: {ref_schema['enum']}")
+    # Check for description in referenced schema
+    if not field_info.get("description") and "description" in ref_schema:
+        hints.insert(0, ref_schema["description"])
+
+
+def _constraint_hints(field_info: dict[str, Any]) -> list[str]:
+    """Return the enum, example, type, pattern and default hints."""
+    hints: list[str] = []
+    # Direct enum values
+    if "enum" in field_info:
+        hints.append(f"Valid options: {field_info['enum']}")
+    examples = field_info.get("examples")
+    if examples:
+        hints.append(f"Examples: {examples}")
+    # Type hint (useful for complex types)
+    field_type = field_info.get("type")
+    if field_type and field_type not in {
+        "string",
+        "integer",
+        "number",
+        "boolean",
+    }:
+        hints.append(f"Type: {field_type}")
+    # Pattern (regex constraint)
+    pattern = field_info.get("pattern")
+    if pattern:
+        hints.append(f"Must match pattern: {pattern}")
+    # Default value (if not null)
+    default = field_info.get("default")
+    if default is not None:
+        hints.append(f"Default: {default}")
+    return hints
 
 
 def _extract_field_descriptions(spec: NodeSpec) -> dict[str, str]:
@@ -239,63 +315,14 @@ def _extract_field_descriptions(spec: NodeSpec) -> dict[str, str]:
     for field_name, field_info in properties.items():
         if not isinstance(field_info, dict):
             continue
-
-        hints: list[str] = []
-
         # Start with description if available
         desc = field_info.get("description")
-        if desc:
-            hints.append(desc)
-
+        hints: list[str] = [desc] if desc else []
         # Handle $ref to definitions (common for enums)
-        ref = field_info.get("$ref")
-        if ref and ref.startswith("#/$defs/"):
-            ref_name = ref.split("/")[-1]
-            ref_schema = defs.get(ref_name, {})
-            # Check for enum in referenced schema
-            if "enum" in ref_schema:
-                enum_values = ref_schema["enum"]
-                hints.append(f"Valid options: {enum_values}")
-            # Check for description in referenced schema
-            if not desc and "description" in ref_schema:
-                hints.insert(0, ref_schema["description"])
-
+        _ref_hints(field_info, defs, hints)
         # Handle anyOf (common for Optional fields with enums)
-        any_of = field_info.get("anyOf", [])
-        for option in any_of:
-            if isinstance(option, dict):
-                if "$ref" in option:
-                    ref_name = option["$ref"].split("/")[-1]
-                    ref_schema = defs.get(ref_name, {})
-                    if "enum" in ref_schema:
-                        hints.append(f"Valid options: {ref_schema['enum']}")
-                elif "enum" in option:
-                    hints.append(f"Valid options: {option['enum']}")
-
-        # Direct enum values
-        if "enum" in field_info:
-            hints.append(f"Valid options: {field_info['enum']}")
-
-        # Examples
-        examples = field_info.get("examples")
-        if examples:
-            hints.append(f"Examples: {examples}")
-
-        # Type hint (useful for complex types)
-        field_type = field_info.get("type")
-        if field_type and field_type not in {"string", "integer", "number", "boolean"}:
-            hints.append(f"Type: {field_type}")
-
-        # Pattern (regex constraint)
-        pattern = field_info.get("pattern")
-        if pattern:
-            hints.append(f"Must match pattern: {pattern}")
-
-        # Default value (if not null)
-        default = field_info.get("default")
-        if default is not None:
-            hints.append(f"Default: {default}")
-
+        hints.extend(_enum_hints(field_info, defs))
+        hints.extend(_constraint_hints(field_info))
         if hints:
             descriptions[field_name] = " | ".join(hints)
 
@@ -309,8 +336,7 @@ def _is_arg_fill_eligible(
     *,
     arg_fill_enabled: bool,
 ) -> bool:
-    """
-    Check if arg-fill should be attempted for this tool call.
+    """Check if arg-fill should be attempted for this tool call.
 
     Arg-fill is eligible when:
     1. arg_fill_enabled is True
@@ -326,12 +352,14 @@ def _is_arg_fill_eligible(
     if trajectory.metadata.get(f"arg_fill_attempted_{spec.name}"):
         return False
 
-    # Rich-output render tools can have complex payload fields (`props`, `sections`, `items`,
-    # etc.) that are still safe to repair because the runtime validates them against the
-    # component registry before execution.
+    # Rich-output render tools can have complex payload fields (`props`,
+    # `sections`, `items`, etc.) that are still safe to repair because the
+    # runtime validates them against the component registry before execution.
     allowed_complex = get_render_tool_complex_fields(spec.name)
     if allowed_complex:
-        remaining = [field for field in missing_fields if field not in allowed_complex]
+        remaining = [
+            field for field in missing_fields if field not in allowed_complex
+        ]
         if not remaining:
             return True
     else:
@@ -353,124 +381,135 @@ def _is_arg_fill_eligible(
             # Check if it's a union/anyOf with allowed types
             any_of = field_info.get("anyOf", [])
             if not any_of or not all(
-                isinstance(t, dict) and t.get("type") in allowed_types | {"null"}
+                isinstance(t, dict)
+                and t.get("type") in allowed_types | {"null"}
                 for t in any_of
             ):
                 logger.debug(
                     "arg_fill_ineligible_complex_type",
-                    extra={"field": field, "type": field_type, "any_of": any_of},
+                    extra={
+                        "field": field,
+                        "type": field_type,
+                        "any_of": any_of,
+                    },
                 )
                 return False
 
     return True
 
 
+_ARG_FILL_PLACEHOLDERS = frozenset(
+    {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}
+)
+
+
+def _fields_from_dict(
+    source: dict[str, Any], expected_fields: Sequence[str]
+) -> dict[str, Any] | None:
+    """Extract expected fields from a dict, rejecting placeholders."""
+    result: dict[str, Any] = {}
+    for field in expected_fields:
+        if field not in source:
+            continue
+        value = source[field]
+        # Reject placeholder values
+        if (
+            isinstance(value, str)
+            and value.lower().strip() in _ARG_FILL_PLACEHOLDERS
+        ):
+            logger.debug(
+                "arg_fill_placeholder_detected",
+                extra={"field": field, "value": value},
+            )
+            return None
+        result[field] = value
+    return result or None
+
+
+def _fields_from_json(
+    text: str, expected_fields: Sequence[str]
+) -> dict[str, Any] | None:
+    """Extract the fields from a JSON object or a full action's args."""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    # First, try direct field extraction (simple format)
+    result = _fields_from_dict(parsed, expected_fields)
+    if result:
+        return result
+    # If that failed, check if model returned a full action with args. This
+    # handles cases where the model returns {"next_node": "...", "args":
+    # {...}}
+    args = parsed.get("args")
+    if not isinstance(args, dict):
+        return None
+    result = _fields_from_dict(args, expected_fields)
+    if result:
+        logger.debug(
+            "arg_fill_extracted_from_action_args",
+            extra={"fields": list(result.keys())},
+        )
+    return result
+
+
+def _fields_from_tags(
+    text: str, expected_fields: Sequence[str]
+) -> dict[str, Any] | None:
+    """Extract the fields from the tagged format ``<field>value</field>``."""
+    result: dict[str, Any] = {}
+    for field in expected_fields:
+        pattern = rf"<{re.escape(field)}>(.*?)</{re.escape(field)}>"
+        match = re.search(pattern, text, re.DOTALL)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        # Reject placeholder values
+        if value.lower() in _ARG_FILL_PLACEHOLDERS:
+            logger.debug(
+                "arg_fill_placeholder_detected_tagged",
+                extra={"field": field, "value": value},
+            )
+            return None
+        result[field] = value
+    return result or None
+
+
 def _parse_arg_fill_response(
     raw: str,
     expected_fields: Sequence[str],
 ) -> dict[str, Any] | None:
-    """
-    Parse an arg-fill response, trying JSON first then tagged format.
+    """Parse an arg-fill response, trying JSON first then tagged format.
 
     Handles multiple response formats:
     1. Simple field values: {"component": "report"}
-    2. Full action with args: {"next_node": "...", "args": {"component": "report"}}
+    2. Full action with args: {"next_node": "...", "args": {"component":
+       "report"}}
     3. Tagged format: <component>report</component>
 
     Returns:
         Parsed field values dict, or None if parsing failed.
     """
-    # Strip any markdown fences
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Remove first and last lines if they're fences
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    def _extract_fields_from_dict(source: dict[str, Any]) -> dict[str, Any] | None:
-        """Extract expected fields from a dict, rejecting placeholders."""
-        result: dict[str, Any] = {}
-        for field in expected_fields:
-            if field in source:
-                value = source[field]
-                # Reject placeholder values
-                if isinstance(value, str):
-                    lower = value.lower().strip()
-                    if lower in {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}:
-                        logger.debug(
-                            "arg_fill_placeholder_detected",
-                            extra={"field": field, "value": value},
-                        )
-                        return None
-                result[field] = value
-        return result if result else None
-
-    # Try JSON parsing first
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            # First, try direct field extraction (simple format)
-            result = _extract_fields_from_dict(parsed)
-            if result:
-                return result
-
-            # If that failed, check if model returned a full action with args
-            # This handles cases where the model returns {"next_node": "...", "args": {...}}
-            args = parsed.get("args")
-            if isinstance(args, dict):
-                result = _extract_fields_from_dict(args)
-                if result:
-                    logger.debug(
-                        "arg_fill_extracted_from_action_args",
-                        extra={"fields": list(result.keys())},
-                    )
-                    return result
-    except json.JSONDecodeError:
-        pass
-
-    # Try tagged format as fallback: <field>value</field>
-    import re
-
-    result = {}
-    for field in expected_fields:
-        pattern = rf"<{re.escape(field)}>(.*?)</{re.escape(field)}>"
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            value = match.group(1).strip()
-            # Reject placeholder values
-            lower = value.lower()
-            if lower in {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}:
-                logger.debug(
-                    "arg_fill_placeholder_detected_tagged",
-                    extra={"field": field, "value": value},
-                )
-                return None
-            result[field] = value
-
-    if result:
-        return result
-
-    return None
+    text = _strip_markdown_fence(raw)
+    return _fields_from_json(text, expected_fields) or _fields_from_tags(
+        text, expected_fields
+    )
 
 
 async def _attempt_arg_fill(
     *,
     trajectory: Trajectory,
     spec: NodeSpec,
-    action: PlannerAction,
     missing_fields: list[str],
     build_messages: Callable[[Trajectory], Awaitable[list[dict[str, str]]]],
-    client: Any,
-    cost_tracker: Any,
+    client: JSONLLMClient,
+    cost_tracker: _CostTracker,
     emit_event: Callable[[PlannerEvent], None],
     time_source: Callable[[], float],
 ) -> dict[str, Any] | None:
-    """
-    Attempt to fill missing args with a simplified LLM call.
+    """Attempt to fill missing args with a simplified LLM call.
 
     This uses a minimal prompt asking only for the missing field values,
     which is easier for small models than re-emitting the full action JSON.
@@ -481,21 +520,37 @@ async def _attempt_arg_fill(
     # Get field descriptions for context
     field_descriptions = _extract_field_descriptions(spec)
 
-    # Improve guidance for rich-output payload fields when we already know which
-    # component/schema failed (e.g. report requires sections, nested markdown requires content).
+    # Improve guidance for rich-output payload fields when we already know
+    # which component/schema failed (e.g. report requires sections, nested
+    # markdown requires content).
     repair_field = get_render_tool_repair_field(spec.name)
     schema_error = _get_rich_output_schema_error(trajectory)
-    if repair_field and repair_field in missing_fields and isinstance(schema_error, Mapping):
-        failing_component = schema_error.get("failing_component") or schema_error.get("component")
+    if (
+        repair_field
+        and repair_field in missing_fields
+        and isinstance(schema_error, Mapping)
+    ):
+        failing_component = schema_error.get(
+            "failing_component"
+        ) or schema_error.get("component")
         missing_required = schema_error.get("missing_required")
-        if isinstance(failing_component, str) and isinstance(missing_required, list):
-            required_keys = [key for key in missing_required if isinstance(key, str) and key]
+        if isinstance(failing_component, str) and isinstance(
+            missing_required, list
+        ):
+            required_keys = [
+                key for key in missing_required if isinstance(key, str) and key
+            ]
             if required_keys:
-                existing = field_descriptions.get(repair_field) or f"{repair_field} payload"
+                existing = (
+                    field_descriptions.get(repair_field)
+                    or f"{repair_field} payload"
+                )
                 required_list = ", ".join(required_keys)
                 field_descriptions[repair_field] = (
-                    f"{existing} | REQUIRED keys for '{failing_component}': {required_list} "
-                    "| Provide a complete value that satisfies the component schema."
+                    f"{existing} | REQUIRED keys for "
+                    f"'{failing_component}': {required_list} "
+                    "| Provide a complete value that satisfies the "
+                    "component schema."
                 )
 
     # Get user query for context
@@ -509,13 +564,11 @@ async def _attempt_arg_fill(
         user_query=user_query,
     )
 
-    # Build messages: use existing conversation context + arg-fill prompt
-    # Use "user" role so it's a follow-up request within the conversation
-    # (the system prompt with full instructions is already in base_messages)
+    # Build messages: use existing conversation context + arg-fill prompt Use
+    # "user" role so it's a follow-up request within the conversation (the
+    # system prompt with full instructions is already in base_messages)
     base_messages = await build_messages(trajectory)
-    messages = list(base_messages) + [
-        {"role": "user", "content": fill_prompt},
-    ]
+    messages = [*list(base_messages), {"role": "user", "content": fill_prompt}]
 
     # Emit event for observability
     emit_event(
@@ -538,15 +591,19 @@ async def _attempt_arg_fill(
         "DEBUG_arg_fill_messages",
         extra={
             "message_count": len(messages),
-            "last_message_role": messages[-1].get("role") if messages else "none",
-            "last_message_preview": messages[-1].get("content", "")[:500] if messages else "none",
+            "last_message_role": messages[-1].get("role")
+            if messages
+            else "none",
+            "last_message_preview": messages[-1].get("content", "")[:500]
+            if messages
+            else "none",
             "fill_prompt_preview": fill_prompt[:500],
         },
     )
 
     try:
-        # Make the LLM call with a simple JSON response format
-        # Use a minimal schema for just the expected fields
+        # Make the LLM call with a simple JSON response format Use a minimal
+        # schema for just the expected fields
         llm_result = await client.complete(
             messages=messages,
             response_format={"type": "json_object"},
@@ -569,8 +626,9 @@ async def _attempt_arg_fill(
 
         # Parse the response
         expected_fields = list(missing_fields)
-        # Rich-output render tools often need multiple coupled fields. Preserve full top-level
-        # payloads when the model returns more than the requested field subset.
+        # Rich-output render tools often need multiple coupled fields. Preserve
+        # full top-level payloads when the model returns more than the
+        # requested field subset.
         if spec.name in RICH_OUTPUT_COMPONENT_TOOL_NAMES:
             schema = spec.args_model.model_json_schema()
             for extra_field in schema.get("properties", {}):
@@ -580,8 +638,12 @@ async def _attempt_arg_fill(
 
         if filled is not None:
             # Success! Record metrics
-            arg_fill_success_count = int(trajectory.metadata.get("arg_fill_success_count", 0))
-            trajectory.metadata["arg_fill_success_count"] = arg_fill_success_count + 1
+            arg_fill_success_count = int(
+                trajectory.metadata.get("arg_fill_success_count", 0)
+            )
+            trajectory.metadata["arg_fill_success_count"] = (
+                arg_fill_success_count + 1
+            )
 
             emit_event(
                 PlannerEvent(
@@ -610,8 +672,12 @@ async def _attempt_arg_fill(
             return filled
 
         # Parsing failed
-        arg_fill_failure_count = int(trajectory.metadata.get("arg_fill_failure_count", 0))
-        trajectory.metadata["arg_fill_failure_count"] = arg_fill_failure_count + 1
+        arg_fill_failure_count = int(
+            trajectory.metadata.get("arg_fill_failure_count", 0)
+        )
+        trajectory.metadata["arg_fill_failure_count"] = (
+            arg_fill_failure_count + 1
+        )
 
         emit_event(
             PlannerEvent(
@@ -637,13 +703,15 @@ async def _attempt_arg_fill(
             },
         )
 
-        return None
-
     except Exception as exc:
         latency_ms = (time_source() - start_time) * 1000
 
-        arg_fill_failure_count = int(trajectory.metadata.get("arg_fill_failure_count", 0))
-        trajectory.metadata["arg_fill_failure_count"] = arg_fill_failure_count + 1
+        arg_fill_failure_count = int(
+            trajectory.metadata.get("arg_fill_failure_count", 0)
+        )
+        trajectory.metadata["arg_fill_failure_count"] = (
+            arg_fill_failure_count + 1
+        )
 
         emit_event(
             PlannerEvent(
@@ -666,87 +734,116 @@ async def _attempt_arg_fill(
             },
         )
 
-        return None
+    return None
+
+
+_ANSWER_KEYS = ("raw_answer", "answer", "text", "response", "content")
+_PLACEHOLDER_ANSWERS = frozenset(
+    {"<auto>", "unknown", "n/a", "", "<fill_value>"}
+)
+
+
+def _strip_markdown_fence(raw: str) -> str:
+    """Return ``raw`` without a surrounding markdown code fence."""
+    text = raw.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.split("\n")
+    if lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _answer_value(payload: dict[str, Any]) -> str | None:
+    """Return the first real (non-placeholder) answer in ``payload``."""
+    for key in _ANSWER_KEYS:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if value.lower().strip() not in _PLACEHOLDER_ANSWERS:
+            return value
+        logger.info(
+            "finish_repair_parse_placeholder",
+            extra={"key": key, "value": value[:100] if value else None},
+        )
+    return None
+
+
+def _answer_from_json(parsed: dict[str, Any], text: str) -> str | None:
+    """Return the answer of a parsed finish repair response."""
+    answer = _answer_value(parsed)
+    if answer is not None:
+        return answer
+    # Check if LLM returned full action schema with args.raw_answer. This
+    # handles cases where model returns {"thought": ..., "next_node": ...,
+    # "args": {"raw_answer": ...}}
+    args_dict = parsed.get("args")
+    if isinstance(args_dict, dict):
+        for key in _ANSWER_KEYS:
+            value = args_dict.get(key)
+            if (
+                isinstance(value, str)
+                and value.strip()
+                and value.lower().strip() not in _PLACEHOLDER_ANSWERS
+            ):
+                logger.info(
+                    "finish_repair_parse_from_args",
+                    extra={"key": key, "answer_len": len(value)},
+                )
+                return value
+    # JSON parsed but no answer key found
+    logger.info(
+        "finish_repair_parse_no_answer_key",
+        extra={
+            "keys_found": list(parsed.keys())[:10],
+            "response_preview": text[:300],
+        },
+    )
+    return None
+
+
+def _plain_text_answer(text: str) -> str | None:
+    """Use a plain-text (non-JSON) response directly.
+
+    This handles cases where the model ignores the JSON instruction.
+    """
+    # Clean up common prefixes
+    for prefix in ("raw_answer:", "answer:", "response:"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix) :].strip()
+    if text and text.lower() not in _PLACEHOLDER_ANSWERS:
+        return text
+    logger.info(
+        "finish_repair_parse_plaintext_placeholder",
+        extra={"text_preview": text[:100] if text else None},
+    )
+    return None
 
 
 def _parse_finish_repair_response(raw: str) -> str | None:
-    """
-    Parse a finish repair response to extract raw_answer.
+    """Parse a finish repair response to extract raw_answer.
 
     Returns:
         The raw_answer string if found and valid, None otherwise.
     """
-    # Strip any markdown fences
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    # Try JSON parsing
+    text = _strip_markdown_fence(raw)
     try:
         parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            # Look for raw_answer or common answer keys at top level
-            for key in ("raw_answer", "answer", "text", "response", "content"):
-                if key in parsed:
-                    value = parsed[key]
-                    if isinstance(value, str) and value.strip():
-                        # Reject placeholder values
-                        lower = value.lower().strip()
-                        if lower not in {"<auto>", "unknown", "n/a", "", "<fill_value>"}:
-                            return value
-                        else:
-                            logger.info(
-                                "finish_repair_parse_placeholder",
-                                extra={"key": key, "value": value[:100] if value else None},
-                            )
-
-            # Check if LLM returned full action schema with args.raw_answer
-            # This handles cases where model returns {"thought": ..., "next_node": ..., "args": {"raw_answer": ...}}
-            if "args" in parsed and isinstance(parsed["args"], dict):
-                args_dict = parsed["args"]
-                for key in ("raw_answer", "answer", "text", "response", "content"):
-                    if key in args_dict:
-                        value = args_dict[key]
-                        if isinstance(value, str) and value.strip():
-                            lower = value.lower().strip()
-                            if lower not in {"<auto>", "unknown", "n/a", "", "<fill_value>"}:
-                                logger.info(
-                                    "finish_repair_parse_from_args",
-                                    extra={"key": key, "answer_len": len(value)},
-                                )
-                                return value
-
-            # JSON parsed but no answer key found
-            logger.info(
-                "finish_repair_parse_no_answer_key",
-                extra={"keys_found": list(parsed.keys())[:10], "response_preview": text[:300]},
-            )
     except json.JSONDecodeError as e:
         logger.info(
             "finish_repair_parse_json_error",
             extra={"error": str(e), "response_preview": text[:300]},
         )
+    else:
+        if isinstance(parsed, dict):
+            answer = _answer_from_json(parsed, text)
+            if answer is not None:
+                return answer
 
-    # If the response is just plain text (not JSON), use it directly
-    # This handles cases where the model ignores the JSON instruction
     if text and not text.startswith("{"):
-        # Clean up common prefixes
-        for prefix in ("raw_answer:", "answer:", "response:"):
-            if text.lower().startswith(prefix):
-                text = text[len(prefix) :].strip()
-        if text and text.lower() not in {"<auto>", "unknown", "n/a", "<fill_value>"}:
-            return text
-        else:
-            logger.info(
-                "finish_repair_parse_plaintext_placeholder",
-                extra={"text_preview": text[:100] if text else None},
-            )
-
+        return _plain_text_answer(text)
     return None
 
 
@@ -762,7 +859,7 @@ def _strip_json_fences(raw: str) -> str:
     return text
 
 
-def _parse_structured_repair_response(raw: str) -> Any:
+def _parse_structured_repair_response(raw: str) -> object:
     """Parse the corrective-turn reply into a candidate structured payload."""
     text = _strip_json_fences(raw)
     try:
@@ -790,13 +887,13 @@ async def _ensure_structured_final(
     final_response_schema: Mapping[str, Any],
     retries: int,
     build_messages: Callable[[Trajectory], Awaitable[list[dict[str, str]]]],
-    client: Any,
-    cost_tracker: Any,
+    client: JSONLLMClient,
+    cost_tracker: _CostTracker,
     emit_event: Callable[[PlannerEvent], None],
     time_source: Callable[[], float],
     action_seq: int,
 ) -> None:
-    """Validate (and, if needed, repair) the finish action's structured payload.
+    """Validate (and if needed repair) the finish action's structured payload.
 
     Mutates ``action.args`` in place:
     - On success: ``args["structured"]`` holds the schema-validated payload
@@ -807,7 +904,9 @@ async def _ensure_structured_final(
       and via the ``final_response_structured_degraded`` event.
     """
 
-    def _validate(candidate: Any) -> tuple[dict[str, Any] | None, str | None]:
+    def _validate(
+        candidate: object,
+    ) -> tuple[dict[str, Any] | None, str | None]:
         if candidate is None:
             return None, "structured payload missing from final_response args"
         try:
@@ -824,7 +923,11 @@ async def _ensure_structured_final(
                 event_type="final_response_structured_validated",
                 ts=time_source(),
                 trajectory_step=len(trajectory.steps),
-                extra={"model": final_response_model.__name__, "action_seq": action_seq, "repaired": False},
+                extra={
+                    "model": final_response_model.__name__,
+                    "action_seq": action_seq,
+                    "repaired": False,
+                },
             )
         )
         return
@@ -858,7 +961,7 @@ async def _ensure_structured_final(
                 stream=False,
                 on_stream_chunk=None,
             )
-        except Exception as exc:  # noqa: BLE001 - repair must never kill the run
+        except Exception as exc:
             logger.warning(
                 "structured_repair_llm_error",
                 extra={"attempt": attempt, "error": str(exc)[:300]},
@@ -890,7 +993,8 @@ async def _ensure_structured_final(
     action.args.pop("structured", None)
     warning = (
         f"Structured final response failed validation against "
-        f"{final_response_model.__name__} after {max(0, retries)} repair attempt(s); "
+        f"{final_response_model.__name__} after {max(0, retries)} repair "
+        f"attempt(s); "
         "payload.structured is omitted."
     )
     warnings = action.args.get("warnings")
@@ -900,7 +1004,10 @@ async def _ensure_structured_final(
         action.args["warnings"] = [warning]
     logger.warning(
         "final_response_structured_degraded",
-        extra={"model": final_response_model.__name__, "error": (error or "")[:300]},
+        extra={
+            "model": final_response_model.__name__,
+            "error": (error or "")[:300],
+        },
     )
     emit_event(
         PlannerEvent(
@@ -908,7 +1015,10 @@ async def _ensure_structured_final(
             ts=time_source(),
             trajectory_step=len(trajectory.steps),
             error=(error or "")[:500],
-            extra={"model": final_response_model.__name__, "action_seq": action_seq},
+            extra={
+                "model": final_response_model.__name__,
+                "action_seq": action_seq,
+            },
         )
     )
 
@@ -918,18 +1028,17 @@ async def _attempt_finish_repair(
     trajectory: Trajectory,
     action: PlannerAction,
     build_messages: Callable[[Trajectory], Awaitable[list[dict[str, str]]]],
-    client: Any,
-    cost_tracker: Any,
+    client: JSONLLMClient,
+    cost_tracker: _CostTracker,
     emit_event: Callable[[PlannerEvent], None],
     time_source: Callable[[], float],
     system_prompt_extra: str | None,
     action_seq: int,
 ) -> str | None:
-    """
-    Attempt to get the raw_answer when the model finishes without providing one.
+    """Get the raw_answer when the model finishes without providing one.
 
-    This uses a simplified prompt asking only for the answer text,
-    which is easier for small models than re-emitting the full action JSON.
+    This uses a simplified prompt asking only for the answer text, which is
+    easier for small models than re-emitting the full action JSON.
     """
     # Mark that we're attempting finish repair
     trajectory.metadata["finish_repair_attempted"] = True
@@ -944,11 +1053,12 @@ async def _attempt_finish_repair(
         voice_context=system_prompt_extra,
     )
 
-    # Build messages: use existing conversation context + repair prompt
-    # Use "user" role so it's a follow-up request within the conversation
-    # (the system prompt with full instructions is already in base_messages)
+    # Build messages: use existing conversation context + repair prompt Use
+    # "user" role so it's a follow-up request within the conversation (the
+    # system prompt with full instructions is already in base_messages)
     base_messages = await build_messages(trajectory)
-    messages = list(base_messages) + [
+    messages = [
+        *list(base_messages),
         {"role": "user", "content": repair_prompt},
     ]
 
@@ -969,8 +1079,12 @@ async def _attempt_finish_repair(
         "DEBUG_finish_repair_messages",
         extra={
             "message_count": len(messages),
-            "last_message_role": messages[-1].get("role") if messages else "none",
-            "last_message_preview": messages[-1].get("content", "")[:500] if messages else "none",
+            "last_message_role": messages[-1].get("role")
+            if messages
+            else "none",
+            "last_message_preview": messages[-1].get("content", "")[:500]
+            if messages
+            else "none",
             "repair_prompt_preview": repair_prompt[:500],
         },
     )
@@ -1011,11 +1125,16 @@ async def _attempt_finish_repair(
 
         if raw_answer is not None:
             # Success! Record metrics
-            finish_repair_success_count = int(trajectory.metadata.get("finish_repair_success_count", 0))
-            trajectory.metadata["finish_repair_success_count"] = finish_repair_success_count + 1
+            finish_repair_success_count = int(
+                trajectory.metadata.get("finish_repair_success_count", 0)
+            )
+            trajectory.metadata["finish_repair_success_count"] = (
+                finish_repair_success_count + 1
+            )
 
             # Stream the repaired answer to frontend as llm_stream_chunk events
-            # This ensures the answer shows up in the UI just like normal streamed responses
+            # This ensures the answer shows up in the UI just like normal
+            # streamed responses
             emit_event(
                 PlannerEvent(
                     event_type="llm_stream_chunk",
@@ -1066,8 +1185,12 @@ async def _attempt_finish_repair(
             },
         )
 
-        finish_repair_failure_count = int(trajectory.metadata.get("finish_repair_failure_count", 0))
-        trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
+        finish_repair_failure_count = int(
+            trajectory.metadata.get("finish_repair_failure_count", 0)
+        )
+        trajectory.metadata["finish_repair_failure_count"] = (
+            finish_repair_failure_count + 1
+        )
 
         emit_event(
             PlannerEvent(
@@ -1080,13 +1203,15 @@ async def _attempt_finish_repair(
             )
         )
 
-        return None
-
     except Exception as exc:
         latency_ms = (time_source() - start_time) * 1000
 
-        finish_repair_failure_count = int(trajectory.metadata.get("finish_repair_failure_count", 0))
-        trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
+        finish_repair_failure_count = int(
+            trajectory.metadata.get("finish_repair_failure_count", 0)
+        )
+        trajectory.metadata["finish_repair_failure_count"] = (
+            finish_repair_failure_count + 1
+        )
 
         emit_event(
             PlannerEvent(
@@ -1103,25 +1228,25 @@ async def _attempt_finish_repair(
             extra={"error": str(exc)},
         )
 
-        return None
+    return None
 
 
 async def _attempt_graceful_failure(
     *,
     trajectory: Trajectory,
     build_messages: Callable[[Trajectory], Awaitable[list[dict[str, str]]]],
-    client: Any,
-    cost_tracker: Any,
+    client: JSONLLMClient,
+    cost_tracker: _CostTracker,
     emit_event: Callable[[PlannerEvent], None],
     time_source: Callable[[], float],
     system_prompt_extra: str | None,
     action_seq: int,
 ) -> str | None:
-    """
-    Attempt to get a user-friendly message when the planner hits a failure threshold.
+    """Get a user-friendly message when the planner hits a failure threshold.
 
     Instead of returning a technical error, this prompts the model to generate
-    a graceful, non-technical response explaining it couldn't complete the action.
+    a graceful, non-technical response explaining it couldn't complete the
+    action.
     """
     # Get user query for context
     user_query = trajectory.resume_user_input or trajectory.query
@@ -1134,7 +1259,8 @@ async def _attempt_graceful_failure(
 
     # Build messages with the graceful failure prompt
     base_messages = await build_messages(trajectory)
-    messages = list(base_messages) + [
+    messages = [
+        *list(base_messages),
         {"role": "user", "content": graceful_prompt},
     ]
 
@@ -1206,7 +1332,10 @@ async def _attempt_graceful_failure(
 
             logger.info(
                 "graceful_failure_success",
-                extra={"answer_len": len(raw_answer), "latency_ms": latency_ms},
+                extra={
+                    "answer_len": len(raw_answer),
+                    "latency_ms": latency_ms,
+                },
             )
 
             return raw_answer
@@ -1215,14 +1344,13 @@ async def _attempt_graceful_failure(
             "graceful_failure_parse_failed",
             extra={"raw_len": len(raw), "raw_preview": raw[:300]},
         )
-        return None
 
     except Exception as exc:
         logger.warning(
             "graceful_failure_exception",
             extra={"error": str(exc)},
         )
-        return None
+    return None
 
 
 def _record_invalid_response(
@@ -1242,7 +1370,9 @@ def _record_invalid_response(
     response_len = len(raw)
     error_type = error.__class__.__name__
     error_summary = _summarize_validation_error(error)
-    next_node_detected = salvage_action.next_node if salvage_action is not None else None
+    next_node_detected = (
+        salvage_action.next_node if salvage_action is not None else None
+    )
 
     metadata = trajectory.metadata
     invalid_responses = metadata.get("invalid_responses")
@@ -1263,9 +1393,13 @@ def _record_invalid_response(
     }
     invalid_responses.append(entry)
 
-    metadata["validation_failures_count"] = int(metadata.get("validation_failures_count", 0)) + 1
+    metadata["validation_failures_count"] = (
+        int(metadata.get("validation_failures_count", 0)) + 1
+    )
     if will_retry:
-        metadata["repair_attempts"] = int(metadata.get("repair_attempts", 0)) + 1
+        metadata["repair_attempts"] = (
+            int(metadata.get("repair_attempts", 0)) + 1
+        )
     if salvage_action is not None:
         metadata["salvage_used"] = True
 
@@ -1287,6 +1421,205 @@ def _record_invalid_response(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ArgCheck:
+    """One tool call's arguments under validation, and how to report."""
+
+    trajectory: Trajectory
+    spec: NodeSpec
+    record_arg_event: Callable[..., None]
+    placeholders: list[str]
+    placeholder_paths: list[str]
+    autofilled_fields: Sequence[str]
+
+    def record(
+        self,
+        event_type: str,
+        *,
+        error_summary: str | None,
+        source: str,
+        placeholder_paths: Sequence[str] | None = None,
+    ) -> None:
+        """Record an args event for this tool call."""
+        self.record_arg_event(
+            self.trajectory,
+            event_type=event_type,
+            spec=self.spec,
+            error_summary=error_summary,
+            placeholders=self.placeholders,
+            placeholder_paths=self.placeholder_paths
+            if placeholder_paths is None
+            else placeholder_paths,
+            autofilled_fields=self.autofilled_fields,
+            source=source,
+        )
+
+    def reject(
+        self,
+        error_summary: str,
+        *,
+        source: str,
+        placeholder_paths: Sequence[str] | None = None,
+    ) -> str:
+        """Record the arguments as invalid; return the error summary."""
+        self.record(
+            "planner_args_invalid",
+            error_summary=error_summary,
+            source=source,
+            placeholder_paths=placeholder_paths,
+        )
+        return error_summary
+
+
+def _validation_config(raw_validation: object) -> dict[str, Any]:
+    """Parse the tool's ``arg_validation`` config (if provided)."""
+    if isinstance(raw_validation, Mapping):
+        return dict(raw_validation)
+    if raw_validation is True:
+        return {"reject_placeholders": True}
+    return {}
+
+
+def _placeholder_error(
+    check: _ArgCheck, validation: Mapping[str, Any]
+) -> str | None:
+    """Reject placeholder or autofilled arguments as configured.
+
+    Validation behavior:
+    - emit_suspect: default True (always emit suspect events for
+      observability)
+    - reject_placeholders: default True when the placeholders are in
+      autofilled fields (catching the <auto> sentinel that
+      _autofill_missing_args inserts), otherwise the config value (default
+      False for backwards compat)
+    - reject_autofill: config value (default False)
+    """
+    paths = check.placeholder_paths
+    autofilled = check.autofilled_fields
+    emit_suspect = validation.get("emit_suspect", True)
+    has_autofilled_placeholders = bool(
+        autofilled
+        and paths
+        and any(
+            path.split(".")[0].split("[")[0] in autofilled for path in paths
+        )
+    )
+    reject_placeholders = validation.get(
+        "reject_placeholders", has_autofilled_placeholders
+    )
+    reject_autofill = validation.get("reject_autofill", False)
+
+    if emit_suspect and (paths or autofilled):
+        check.record(
+            "planner_args_suspect", error_summary=None, source="placeholder"
+        )
+    if reject_placeholders and paths:
+        return check.reject(
+            "placeholder values detected in tool args", source="placeholder"
+        )
+    if reject_autofill and autofilled:
+        return check.reject(
+            "required tool args were autofilled", source="autofill"
+        )
+    return None
+
+
+def _record_schema_error(
+    check: _ArgCheck, component: str, exc: Exception, code: str
+) -> str:
+    """Store a component's schema error for repair; reject the args."""
+    missing_required: list[str] = []
+    match = re.search(r"'([^']+)' is a required property", str(exc))
+    if match:
+        missing_required.append(match.group(1))
+    component_match = re.search(r"Invalid props for '([^']+)'", str(exc))
+    failing_component = (
+        component_match.group(1) if component_match else component
+    )
+    spec_name = check.spec.name
+    _set_rich_output_schema_error(
+        check.trajectory,
+        {
+            "tool_name": spec_name,
+            "component": component,
+            "failing_component": failing_component,
+            "repair_field": get_render_tool_repair_field(spec_name),
+            "code": code,
+            "message": str(exc),
+            "missing_required": missing_required,
+        },
+    )
+    return check.reject(
+        str(exc), source="rich_output_schema", placeholder_paths=()
+    )
+
+
+def _rich_output_error(check: _ArgCheck, parsed_args: BaseModel) -> str | None:
+    """Validate the component payload of render tools.
+
+    Wrapper tools can still embed free-form nested component props inside
+    fields like `sections`, `items`, or `tabs`. Validating the emitted
+    component payload before tool execution makes schema issues trigger
+    repair/arg-fill instead of deterministic tool failures.
+    """
+    render_payload = build_render_tool_payload(check.spec.name, parsed_args)
+    if render_payload is None:
+        return None
+    component, props = render_payload
+    _clear_rich_output_schema_repair_state(check.trajectory)
+    try:
+        from ..rich_output.runtime import get_runtime
+        from ..rich_output.validate import (
+            RichOutputValidationError,
+            validate_component_payload,
+        )
+
+        runtime = get_runtime()
+        validate_component_payload(
+            component,
+            props,
+            runtime.registry,
+            allowlist=runtime.allowlist or None,
+            limits=runtime.limits,
+            tool_context=None,
+            count_bytes=False,
+        )
+    except RichOutputValidationError as exc:
+        if exc.code == "schema_invalid":
+            return _record_schema_error(check, component, exc, exc.code)
+    except Exception as exc:
+        logger.debug(
+            "rich_output_arg_validation_failed",
+            extra={"tool": check.spec.name, "error": str(exc)},
+        )
+    return None
+
+
+def _validator_error(
+    check: _ArgCheck,
+    validator: Callable[[BaseModel, PlannerAction], object],
+    parsed_args: BaseModel,
+    action: PlannerAction,
+) -> str | None:
+    """Run the tool's custom ``arg_validator``."""
+    try:
+        result = validator(parsed_args, action)
+    except Exception as exc:
+        return check.reject(
+            f"arg_validator raised {exc.__class__.__name__}: {exc}",
+            source="validator_error",
+        )
+    if result is None or result is True:
+        return None
+    if isinstance(result, str):
+        error_summary = result
+    elif isinstance(result, Mapping):
+        error_summary = str(result.get("error") or result)
+    else:
+        error_summary = "arg_validator rejected args"
+    return check.reject(error_summary, source="validator")
+
+
 def _apply_arg_validation(
     *,
     trajectory: Trajectory,
@@ -1297,185 +1630,36 @@ def _apply_arg_validation(
     record_arg_event: Callable[..., None],
 ) -> str | None:
     extra = spec.extra or {}
-    raw_validation = extra.get("arg_validation")
-    validator = extra.get("arg_validator")
+    validation = _validation_config(extra.get("arg_validation"))
 
-    # Parse validation config (if provided)
-    validation: dict[str, Any] = {}
-    if isinstance(raw_validation, Mapping):
-        validation = dict(raw_validation)
-    elif raw_validation is True:
-        validation = {"reject_placeholders": True}
-
-    # Always include <auto> in placeholder list - this is critical for detecting
-    # autofilled values that the model didn't properly fill
+    # Always include <auto> in placeholder list - this is critical for
+    # detecting autofilled values that the model didn't properly fill
     placeholders = list(validation.get("placeholders") or [])
     if AUTO_STR_SENTINEL not in placeholders:
         placeholders.append(AUTO_STR_SENTINEL)
 
-    # ALWAYS scan for placeholders - this is independent of arg_validation config
-    # The autofill mechanism inserts <auto> placeholders, and we need to detect them
-    # regardless of whether custom validation rules are configured
-    placeholder_paths: list[str] = []
-    if placeholders:
-        placeholder_paths = _scan_placeholder_paths(action.args or {}, placeholders)
-
-    # Determine validation behavior:
-    # - emit_suspect: default True (always emit suspect events for observability)
-    # - reject_placeholders: default True when autofilled_fields exist (catch autofill placeholders)
-    #                        otherwise use config value (default False for backwards compat)
-    # - reject_autofill: use config value (default False)
-    emit_suspect = validation.get("emit_suspect", True)
-
-    # Key change: reject placeholders by default when they exist in autofilled fields
-    # This catches the <auto> sentinel that _autofill_missing_args inserts
-    has_autofilled_placeholders = bool(
-        autofilled_fields and placeholder_paths and
-        any(path.split(".")[0].split("[")[0] in autofilled_fields for path in placeholder_paths)
+    # ALWAYS scan for placeholders - this is independent of arg_validation
+    # config. The autofill mechanism inserts <auto> placeholders, and we need
+    # to detect them regardless of whether custom validation rules are
+    # configured.
+    check = _ArgCheck(
+        trajectory=trajectory,
+        spec=spec,
+        record_arg_event=record_arg_event,
+        placeholders=placeholders,
+        placeholder_paths=_scan_placeholder_paths(
+            action.args or {}, placeholders
+        ),
+        autofilled_fields=autofilled_fields,
     )
-    reject_placeholders = validation.get("reject_placeholders", has_autofilled_placeholders)
-    reject_autofill = validation.get("reject_autofill", False)
-
-    if emit_suspect and (placeholder_paths or autofilled_fields):
-        record_arg_event(
-            trajectory,
-            event_type="planner_args_suspect",
-            spec=spec,
-            error_summary=None,
-            placeholders=placeholders,
-            placeholder_paths=placeholder_paths,
-            autofilled_fields=autofilled_fields,
-            source="placeholder",
-        )
-
-    if reject_placeholders and placeholder_paths:
-        error_summary = "placeholder values detected in tool args"
-        record_arg_event(
-            trajectory,
-            event_type="planner_args_invalid",
-            spec=spec,
-            error_summary=error_summary,
-            placeholders=placeholders,
-            placeholder_paths=placeholder_paths,
-            autofilled_fields=autofilled_fields,
-            source="placeholder",
-        )
-        return error_summary
-
-    if reject_autofill and autofilled_fields:
-        error_summary = "required tool args were autofilled"
-        record_arg_event(
-            trajectory,
-            event_type="planner_args_invalid",
-            spec=spec,
-            error_summary=error_summary,
-            placeholders=placeholders,
-            placeholder_paths=placeholder_paths,
-            autofilled_fields=autofilled_fields,
-            source="autofill",
-        )
-        return error_summary
-
-    # Rich output schema validation for all render tools.
-    #
-    # Wrapper tools can still embed free-form nested component props inside fields like
-    # `sections`, `items`, or `tabs`. Validate the emitted component payload before tool
-    # execution so schema issues trigger repair/arg-fill instead of deterministic tool failures.
-    render_payload = build_render_tool_payload(spec.name, parsed_args)
-    if render_payload is not None:
-        component, props = render_payload
-        _clear_rich_output_schema_repair_state(trajectory)
-        try:
-            import re
-
-            from ..rich_output.runtime import get_runtime
-            from ..rich_output.validate import RichOutputValidationError, validate_component_payload
-
-            runtime = get_runtime()
-            validate_component_payload(
-                component,
-                props,
-                runtime.registry,
-                allowlist=runtime.allowlist or None,
-                limits=runtime.limits,
-                tool_context=None,
-                count_bytes=False,
-            )
-        except RichOutputValidationError as exc:
-            if exc.code == "schema_invalid":
-                missing_required: list[str] = []
-                match = re.search(r"'([^']+)' is a required property", str(exc))
-                if match:
-                    missing_required.append(match.group(1))
-                component_match = re.search(r"Invalid props for '([^']+)'", str(exc))
-                failing_component = component_match.group(1) if component_match else component
-                schema_payload = {
-                    "tool_name": spec.name,
-                    "component": component,
-                    "failing_component": failing_component,
-                    "repair_field": get_render_tool_repair_field(spec.name),
-                    "code": exc.code,
-                    "message": str(exc),
-                    "missing_required": missing_required,
-                }
-                _set_rich_output_schema_error(trajectory, schema_payload)
-
-                error_summary = str(exc)
-                record_arg_event(
-                    trajectory,
-                    event_type="planner_args_invalid",
-                    spec=spec,
-                    error_summary=error_summary,
-                    placeholders=placeholders,
-                    placeholder_paths=(),
-                    autofilled_fields=autofilled_fields,
-                    source="rich_output_schema",
-                )
-                return error_summary
-        except Exception as exc:
-            logger.debug(
-                "rich_output_arg_validation_failed",
-                extra={"tool": spec.name, "error": str(exc)},
-            )
-
+    error = _placeholder_error(check, validation)
+    if error is not None:
+        return error
+    error = _rich_output_error(check, parsed_args)
+    if error is not None:
+        return error
     # Custom validator (only runs if configured)
+    validator = extra.get("arg_validator")
     if callable(validator):
-        try:
-            result = validator(parsed_args, action)
-        except Exception as exc:
-            error_summary = f"arg_validator raised {exc.__class__.__name__}: {exc}"
-            record_arg_event(
-                trajectory,
-                event_type="planner_args_invalid",
-                spec=spec,
-                error_summary=error_summary,
-                placeholders=placeholders,
-                placeholder_paths=placeholder_paths,
-                autofilled_fields=autofilled_fields,
-                source="validator_error",
-            )
-            return error_summary
-
-        if result is None or result is True:
-            return None
-
-        if isinstance(result, str):
-            error_summary = result
-        elif isinstance(result, Mapping):
-            error_summary = str(result.get("error") or result)
-        else:
-            error_summary = "arg_validator rejected args"
-
-        record_arg_event(
-            trajectory,
-            event_type="planner_args_invalid",
-            spec=spec,
-            error_summary=error_summary,
-            placeholders=placeholders,
-            placeholder_paths=placeholder_paths,
-            autofilled_fields=autofilled_fields,
-            source="validator",
-        )
-        return error_summary
-
+        return _validator_error(check, validator, parsed_args, action)
     return None

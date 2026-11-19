@@ -1,22 +1,37 @@
+"""Tests for task lifecycle."""
+
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import pytest
 
-from penguiflow.sessions import SessionLimits, StreamingSession, TaskResult, TaskStatus, TaskType
+from penguiflow.sessions import (
+    SessionLimits,
+    StreamingSession,
+    TaskResult,
+    TaskStatus,
+    TaskType,
+)
 from penguiflow.steering import SteeringEvent, SteeringEventType
+
+if TYPE_CHECKING:
+    from penguiflow.sessions.session import TaskRuntime
 
 
 @pytest.mark.asyncio
 async def test_session_pause_resume_updates_status() -> None:
+    """Session pause resume updates status."""
     session = StreamingSession("session-lifecycle")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.2)
         return TaskResult(payload={"answer": "ok"})
 
-    task_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="pause")
+    task_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="pause"
+    )
     await asyncio.sleep(0.05)
 
     await session.steer(
@@ -48,13 +63,16 @@ async def test_session_pause_resume_updates_status() -> None:
 
 @pytest.mark.asyncio
 async def test_session_cancel_task_updates_status() -> None:
+    """Session cancel task updates status."""
     session = StreamingSession("session-cancel")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(1.0)
         return TaskResult(payload={"answer": "late"})
 
-    task_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="cancel")
+    task_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="cancel"
+    )
     await asyncio.sleep(0.05)
     await session.cancel_task(task_id, reason="stop")
     await asyncio.sleep(0.05)
@@ -65,36 +83,45 @@ async def test_session_cancel_task_updates_status() -> None:
 
 @pytest.mark.asyncio
 async def test_session_limits_enforced() -> None:
+    """Session limits enforced."""
     limits = SessionLimits(max_tasks_per_session=1)
     session = StreamingSession("session-limits", limits=limits)
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.05)
         return TaskResult(payload={"answer": "ok"})
 
-    await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="a")
+    await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="a"
+    )
     with pytest.raises(RuntimeError):
-        await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="b")
+        await session.spawn_task(
+            pipeline, task_type=TaskType.BACKGROUND, query="b"
+        )
 
 
 @pytest.mark.asyncio
 async def test_session_timeout_enforced() -> None:
+    """Session timeout enforced."""
     limits = SessionLimits(max_task_runtime_s=0.05)
     session = StreamingSession("session-timeout", limits=limits)
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.2)
         return TaskResult(payload={"answer": "ok"})
 
     with pytest.raises(asyncio.TimeoutError):
-        await session.run_task(pipeline, task_type=TaskType.FOREGROUND, query="timeout")
+        await session.run_task(
+            pipeline, task_type=TaskType.FOREGROUND, query="timeout"
+        )
 
 
 @pytest.mark.asyncio
 async def test_steering_redirect_delivered_to_task() -> None:
+    """Steering redirect delivered to task."""
     session = StreamingSession("session-redirect")
 
-    async def pipeline(runtime):
+    async def pipeline(runtime: TaskRuntime) -> TaskResult:
         event = await runtime.steering.next()
         return TaskResult(
             payload={
@@ -117,21 +144,30 @@ async def test_steering_redirect_delivered_to_task() -> None:
 
     task_id = "task-redirect"
     sender = asyncio.create_task(send_redirect())
-    result = await session.run_task(pipeline, task_type=TaskType.FOREGROUND, query="original", task_id=task_id)
+    result = await session.run_task(
+        pipeline,
+        task_type=TaskType.FOREGROUND,
+        query="original",
+        task_id=task_id,
+    )
     await sender
+    assert result.payload is not None
     assert result.payload["event_type"] == SteeringEventType.REDIRECT.value
     assert result.payload["instruction"] == "new direction"
 
 
 @pytest.mark.asyncio
 async def test_steering_prioritize_updates_priority() -> None:
+    """Steering prioritize updates priority."""
     session = StreamingSession("session-priority")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.2)
         return TaskResult(payload={"answer": "ok"})
 
-    task_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="priority", priority=0)
+    task_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="priority", priority=0
+    )
     await asyncio.sleep(0.05)
     await session.steer(
         SteeringEvent(
@@ -149,15 +185,18 @@ async def test_steering_prioritize_updates_priority() -> None:
 
 @pytest.mark.asyncio
 async def test_background_context_snapshot_isolated() -> None:
+    """Background context snapshot isolated."""
     session = StreamingSession("session-isolation")
     nested = {"value": 1}
     session.update_context(llm_context={"nested": nested})
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.1)
         return TaskResult(payload={"answer": "ok"})
 
-    task_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="snapshot")
+    task_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="snapshot"
+    )
     nested["value"] = 2
     task = await session.get_task(task_id)
     assert task is not None
@@ -166,13 +205,16 @@ async def test_background_context_snapshot_isolated() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_cascades_to_child_tasks_by_default() -> None:
+    """Cancel cascades to child tasks by default."""
     session = StreamingSession("session-cascade")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(10.0)
         return TaskResult(payload={"answer": "late"})
 
-    parent_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="parent")
+    parent_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="parent"
+    )
     child_id = await session.spawn_task(
         pipeline,
         task_type=TaskType.BACKGROUND,
@@ -189,13 +231,16 @@ async def test_cancel_cascades_to_child_tasks_by_default() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_isolate_does_not_cancel_child() -> None:
+    """Cancel isolate does not cancel child."""
     session = StreamingSession("session-isolate")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(10.0)
         return TaskResult(payload={"answer": "late"})
 
-    parent_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="parent")
+    parent_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="parent"
+    )
     child_id = await session.spawn_task(
         pipeline,
         task_type=TaskType.BACKGROUND,
@@ -208,22 +253,33 @@ async def test_cancel_isolate_does_not_cancel_child() -> None:
     await asyncio.sleep(0.05)
     child = await session.get_task(child_id)
     assert child is not None
-    assert child.status in {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED}
+    assert child.status in {
+        TaskStatus.PENDING,
+        TaskStatus.RUNNING,
+        TaskStatus.PAUSED,
+    }
     await session.cancel_task(child_id, reason="cleanup")
 
 
 @pytest.mark.asyncio
 async def test_broadcast_steer_applies_to_active_tasks() -> None:
+    """Broadcast steer applies to active tasks."""
     session = StreamingSession("session-broadcast")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(10.0)
         return TaskResult(payload={"answer": "late"})
 
-    t1 = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="a")
-    t2 = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="b")
+    t1 = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="a"
+    )
+    t2 = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="b"
+    )
     await asyncio.sleep(0.05)
-    count = await session.broadcast_steer(event_type=SteeringEventType.PAUSE, payload={"reason": "pause"})
+    count = await session.broadcast_steer(
+        event_type=SteeringEventType.PAUSE, payload={"reason": "pause"}
+    )
     assert count == 2
     task1 = await session.get_task(t1)
     task2 = await session.get_task(t2)

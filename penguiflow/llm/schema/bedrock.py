@@ -6,7 +6,7 @@ Handles Bedrock's schema requirements for tool use via Converse API.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, ClassVar
 
 from .transformer import JsonSchemaTransformer
 
@@ -15,24 +15,28 @@ class BedrockJsonSchemaTransformer(JsonSchemaTransformer):
     """AWS Bedrock schema transformer.
 
     Uses inline definitions strategy - inlines all $defs except recursive ones.
-    Bedrock Converse API requires schemas to be self-contained without external refs.
+    Bedrock Converse API requires schemas to be self-contained without external
+    refs.
 
     Transformations:
     - Inline all $defs (except recursive)
     - Add additionalProperties: false for objects
     - Remove unsupported keywords
 
-    Reference: https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use.html
+    Reference:
+    https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use.html
     """
 
-    UNSUPPORTED_KEYWORDS = {
-        "$schema",
-        "title",
-        "examples",
-        "default",
-    }
+    UNSUPPORTED_KEYWORDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "$schema",
+            "title",
+            "examples",
+            "default",
+        }
+    )
 
-    def __init__(self, schema: dict[str, Any], *, strict: bool = True):
+    def __init__(self, schema: dict[str, Any], *, strict: bool = True) -> None:
         """Initialize with inline refs enabled."""
         super().__init__(schema, strict=strict)
         self._prefer_inline_refs = True
@@ -45,7 +49,9 @@ class BedrockJsonSchemaTransformer(JsonSchemaTransformer):
         if ref in self._refs_stack:
             self._recursive_refs.add(ref)
             self.is_strict_compatible = False
-            self._warnings.append(f"Recursive reference detected (kept as-is): {ref}")
+            self._warnings.append(
+                f"Recursive reference detected (kept as-is): {ref}"
+            )
             return node
 
         # Inline the reference

@@ -5,17 +5,24 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow import ModelRegistry, Node, build_catalog, tool
 from penguiflow.planner import PlannerFinish, ReactPlanner
-from penguiflow.state import RemoteBinding
-from penguiflow_a2a import A2AAgentToolset, A2AConfig, A2AHttpTransport, A2AService, create_a2a_http_app
+from penguiflow.planner.models import JSONLLMClient
+from penguiflow_a2a import (
+    A2AAgentToolset,
+    A2AConfig,
+    A2AHttpTransport,
+    A2AService,
+    create_a2a_http_app,
+)
 from penguiflow_a2a.models import (
     AgentCapabilities,
     AgentCard,
@@ -30,7 +37,16 @@ from penguiflow_a2a.models import (
     TaskState,
 )
 
+from ..state_store_doubles import RecordingStateStore
 from .planner_doubles import ScriptedPlanner, ScriptedRun
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from penguiflow.catalog import NodeSpec
+    from penguiflow.planner.context import ToolContext
+    from penguiflow.planner.models import PlannerPause
+    from penguiflow.state import RemoteBinding
 
 
 def _agent_card(*, streaming: bool = True) -> AgentCard:
@@ -38,7 +54,9 @@ def _agent_card(*, streaming: bool = True) -> AgentCard:
         protocol_versions=["0.3"],
         name="Planner Agent",
         description="Test",
-        supported_interfaces=[AgentInterface(url="http://test/a2a", protocol_binding="HTTP+JSON")],
+        supported_interfaces=[
+            AgentInterface(url="http://test/a2a", protocol_binding="HTTP+JSON")
+        ],
         version="1.0.0",
         capabilities=AgentCapabilities(
             streaming=streaming,
@@ -48,7 +66,11 @@ def _agent_card(*, streaming: bool = True) -> AgentCard:
         ),
         default_input_modes=["application/json"],
         default_output_modes=["application/json"],
-        skills=[AgentSkill(id="answer", name="Answer", description="Answer", tags=["test"])],
+        skills=[
+            AgentSkill(
+                id="answer", name="Answer", description="Answer", tags=["test"]
+            )
+        ],
     )
 
 
@@ -71,50 +93,63 @@ def _request(
     )
 
 
-class StubClient:
+class StubClient(JSONLLMClient):
     """JSON LLM stub that replays scripted planner actions."""
 
     def __init__(self, responses: list[Mapping[str, Any]]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, Any]],
+        messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del messages, response_format, stream, on_stream_chunk
         if not self._responses:
-            raise AssertionError("No stub responses left")
+            msg = "No stub responses left"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.0
 
 
-class ToolThenFinishClient:
-    """Stateless stub: call ``tool_name`` on the first step of a run, then finish."""
+class ToolThenFinishClient(JSONLLMClient):
+    """Stub that calls ``tool_name`` on a run's first step, then finishes."""
 
     def __init__(self, tool_name: str, answer: str) -> None:
+        """Store ``tool_name`` and ``answer``."""
         self._tool_name = tool_name
         self._answer = answer
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, Any]],
+        messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         if any(message.get("role") == "assistant" for message in messages):
-            action = {"thought": "done", "next_node": None, "args": {"raw_answer": self._answer}}
+            action = {
+                "thought": "done",
+                "next_node": None,
+                "args": {"raw_answer": self._answer},
+            }
         else:
-            action = {"thought": "work", "next_node": self._tool_name, "args": {"text": "x"}}
+            action = {
+                "thought": "work",
+                "next_node": self._tool_name,
+                "args": {"text": "x"},
+            }
         return json.dumps(action), 0.0
 
 
 class Text(BaseModel):
+    """Text payload."""
+
     text: str
 
 
@@ -123,32 +158,46 @@ RUN_WINDOWS: list[tuple[str, float, float]] = []
 
 
 @tool(desc="Record the tool context and echo the text")
-async def record_context(args: Text, ctx: Any) -> Text:
+async def record_context(args: Text, ctx: ToolContext) -> Text:
+    """Record the tool context the tool was called with."""
     TOOL_CONTEXTS.append(dict(ctx.tool_context))
     return args
 
 
 @tool(desc="Ask a human to approve before continuing")
-async def approval_gate(args: Text, ctx: Any) -> Text:
-    await ctx.pause("approval_required", {"prompt": "Approve sending the report?"})
+async def approval_gate(args: Text, ctx: ToolContext) -> Text:
+    """Pause until the user approves."""
+    await ctx.pause(
+        "approval_required", {"prompt": "Approve sending the report?"}
+    )
     return args
 
 
 @tool(desc="Slow work")
-async def slow_work(args: Text, ctx: Any) -> Text:
+async def slow_work(args: Text, _ctx: ToolContext) -> Text:
+    """Sleep before echoing the input."""
     await asyncio.sleep(5)
     return args
 
 
 @tool(desc="Timed work")
-async def timed_work(args: Text, ctx: Any) -> Text:
+async def timed_work(args: Text, ctx: ToolContext) -> Text:
+    """Sleep, then echo the input."""
     start = time.monotonic()
     await asyncio.sleep(0.2)
-    RUN_WINDOWS.append((str(ctx.tool_context["session_id"]), start, time.monotonic()))
+    RUN_WINDOWS.append(
+        (str(ctx.tool_context["session_id"]), start, time.monotonic())
+    )
     return args
 
 
-def _catalog(*funcs: Any):
+def _text_payload(args: BaseModel, _ctx: ToolContext) -> str:
+    """Send the ``text`` of the tool arguments as the A2A message."""
+    assert isinstance(args, Text)
+    return args.text
+
+
+def _catalog(*funcs: Callable[..., Awaitable[Text]]) -> list[NodeSpec]:
     registry = ModelRegistry()
     nodes = []
     for func in funcs:
@@ -157,17 +206,25 @@ def _catalog(*funcs: Any):
     return build_catalog(nodes, registry)
 
 
-async def _wait_for_state(service: A2AService, task_id: str, state: TaskState, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        task = await service.get_task(task_id, history_length=None)
-        if task.status.state == state:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"task {task_id} never reached {state}")
+async def _wait_for_state(
+    service: A2AService, task_id: str, state: TaskState
+) -> None:
+    """Poll until the task reaches ``state``; fail after two seconds."""
+    try:
+        async with asyncio.timeout(2.0):
+            while True:
+                task = await service.get_task(task_id, history_length=None)
+                if task.status.state == state:
+                    return
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        msg = f"task {task_id} never reached {state}"
+        raise AssertionError(msg) from None
 
 
-async def _collect(queue: asyncio.Queue[StreamResponse]) -> list[StreamResponse]:
+async def _collect(
+    queue: asyncio.Queue[StreamResponse],
+) -> list[StreamResponse]:
     events: list[StreamResponse] = []
     while True:
         event = await asyncio.wait_for(queue.get(), timeout=2)
@@ -177,13 +234,24 @@ async def _collect(queue: asyncio.Queue[StreamResponse]) -> list[StreamResponse]
 
 
 @pytest.mark.asyncio
-async def test_real_planner_completes_task_with_answer_and_tool_context() -> None:
+async def test_real_planner_completes_task_with_answer_and_tool_context() -> (
+    None
+):
+    """Real planner completes task with answer and tool context."""
     TOOL_CONTEXTS.clear()
     planner = ReactPlanner(
         llm_client=StubClient(
             [
-                {"thought": "record", "next_node": "record_context", "args": {"text": "hi"}},
-                {"thought": "done", "next_node": None, "args": {"raw_answer": "All done"}},
+                {
+                    "thought": "record",
+                    "next_node": "record_context",
+                    "args": {"text": "hi"},
+                },
+                {
+                    "thought": "done",
+                    "next_node": None,
+                    "args": {"raw_answer": "All done"},
+                },
             ]
         ),
         catalog=_catalog(record_context),
@@ -194,7 +262,9 @@ async def test_real_planner_completes_task_with_answer_and_tool_context() -> Non
         tool_context={"api_key_ref": "secret-ref"},
     )
     try:
-        response = await service.send_message(_request("do it", context_id="ctx-1"), tenant="acme")
+        response = await service.send_message(
+            _request("do it", context_id="ctx-1"), tenant="acme"
+        )
         task = response.task
         assert task is not None
         assert task.status.state == TaskState.COMPLETED
@@ -217,11 +287,20 @@ async def test_real_planner_completes_task_with_answer_and_tool_context() -> Non
 
 @pytest.mark.asyncio
 async def test_real_planner_pause_maps_to_input_required_and_resumes() -> None:
+    """Real planner pause maps to input required and resumes."""
     planner = ReactPlanner(
         llm_client=StubClient(
             [
-                {"thought": "approval", "next_node": "approval_gate", "args": {"text": "report"}},
-                {"thought": "done", "next_node": None, "args": {"raw_answer": "Report sent"}},
+                {
+                    "thought": "approval",
+                    "next_node": "approval_gate",
+                    "args": {"text": "report"},
+                },
+                {
+                    "thought": "done",
+                    "next_node": None,
+                    "args": {"raw_answer": "Report sent"},
+                },
             ]
         ),
         catalog=_catalog(approval_gate),
@@ -229,15 +308,22 @@ async def test_real_planner_pause_maps_to_input_required_and_resumes() -> None:
     )
     service = A2AService(planner, agent_card=_agent_card())
     try:
-        first = await service.send_message(_request("send the report"), tenant=None)
+        first = await service.send_message(
+            _request("send the report"), tenant=None
+        )
         assert first.task is not None
         paused = first.task
         assert paused.status.state == TaskState.INPUT_REQUIRED
         assert paused.status.message is not None
-        assert paused.status.message.parts[0].text == "Approve sending the report?"
+        assert (
+            paused.status.message.parts[0].text
+            == "Approve sending the report?"
+        )
 
         second = await service.send_message(
-            _request("approved", task_id=paused.id, context_id=paused.context_id),
+            _request(
+                "approved", task_id=paused.id, context_id=paused.context_id
+            ),
             tenant=None,
         )
         assert second.task is not None
@@ -251,13 +337,16 @@ async def test_real_planner_pause_maps_to_input_required_and_resumes() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_task_cancels_running_planner() -> None:
+    """Cancel task cancels running planner."""
     planner = ReactPlanner(
         llm_client=ToolThenFinishClient("slow_work", "never"),
         catalog=_catalog(slow_work),
     )
     service = A2AService(planner, agent_card=_agent_card())
     try:
-        response = await service.send_message(_request("go", blocking=False), tenant=None)
+        response = await service.send_message(
+            _request("go", blocking=False), tenant=None
+        )
         assert response.task is not None
         task_id = response.task.id
         await _wait_for_state(service, task_id, TaskState.WORKING)
@@ -271,7 +360,9 @@ async def test_cancel_task_cancels_running_planner() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_paused_task_marks_it_cancelled() -> None:
-    async def ask(run: ScriptedRun):
+    """Cancel paused task marks it cancelled."""
+
+    async def ask(run: ScriptedRun) -> PlannerPause:
         return run.pause("await_input", prompt="More details?")
 
     service = A2AService(ScriptedPlanner(ask), agent_card=_agent_card())
@@ -287,12 +378,18 @@ async def test_cancel_paused_task_marks_it_cancelled() -> None:
 
 @pytest.mark.asyncio
 async def test_finish_without_answer_fails_task() -> None:
-    async def give_up(run: ScriptedRun) -> PlannerFinish:
-        return PlannerFinish(reason="no_path", payload=None, metadata={"error": "no tool fits"})
+    """Finish without answer fails task."""
+
+    async def give_up(_run: ScriptedRun) -> PlannerFinish:
+        return PlannerFinish(
+            reason="no_path", payload=None, metadata={"error": "no tool fits"}
+        )
 
     service = A2AService(ScriptedPlanner(give_up), agent_card=_agent_card())
     try:
-        response = await service.send_message(_request("impossible"), tenant=None)
+        response = await service.send_message(
+            _request("impossible"), tenant=None
+        )
         assert response.task is not None
         assert response.task.status.state == TaskState.FAILED
         assert response.task.status.message is not None
@@ -303,8 +400,11 @@ async def test_finish_without_answer_fails_task() -> None:
 
 @pytest.mark.asyncio
 async def test_planner_exception_fails_task() -> None:
-    async def boom(run: ScriptedRun) -> str:
-        raise RuntimeError("llm unavailable")
+    """Planner exception fails task."""
+
+    async def boom(_run: ScriptedRun) -> str:
+        msg = "llm unavailable"
+        raise RuntimeError(msg)
 
     service = A2AService(ScriptedPlanner(boom), agent_card=_agent_card())
     try:
@@ -318,7 +418,9 @@ async def test_planner_exception_fails_task() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_appends_answer_chunks_and_final_artifact_replaces_them() -> None:
+async def test_stream_final_artifact_replaces_answer_chunks() -> None:
+    """Stream appends answer chunks and final artifact replaces them."""
+
     async def streamer(run: ScriptedRun) -> str:
         run.emit_chunk("draft", action_seq=1)
         run.emit_chunk("Hel", action_seq=2)
@@ -327,13 +429,19 @@ async def test_stream_appends_answer_chunks_and_final_artifact_replaces_them() -
 
     service = A2AService(ScriptedPlanner(streamer), agent_card=_agent_card())
     try:
-        task, queue, unsubscribe = await service.stream_message(_request("hi"), tenant=None)
+        task, queue, unsubscribe = await service.stream_message(
+            _request("hi"), tenant=None
+        )
         try:
             events = await _collect(queue)
         finally:
             await unsubscribe()
-        updates = [event.artifact_update for event in events if event.artifact_update]
-        assert [(u.artifact.parts[0].text, u.append, u.last_chunk) for u in updates] == [
+        updates = [
+            event.artifact_update for event in events if event.artifact_update
+        ]
+        assert [
+            (u.artifact.parts[0].text, u.append, u.last_chunk) for u in updates
+        ] == [
             ("draft", False, False),
             ("Hel", False, False),
             ("lo", True, False),
@@ -349,6 +457,8 @@ async def test_stream_appends_answer_chunks_and_final_artifact_replaces_them() -
 
 @pytest.mark.asyncio
 async def test_send_message_does_not_forward_stream_chunks() -> None:
+    """Send message does not forward stream chunks."""
+
     async def streamer(run: ScriptedRun) -> str:
         run.emit_chunk("partial")
         return "full"
@@ -365,24 +475,30 @@ async def test_send_message_does_not_forward_stream_chunks() -> None:
 
 @pytest.mark.asyncio
 async def test_event_bridge_chains_and_restores_user_callback() -> None:
+    """Event bridge chains and restores user callback."""
     seen: list[str] = []
 
     async def streamer(run: ScriptedRun) -> str:
         run.emit_chunk("x")
         return "done"
 
-    planner = ScriptedPlanner(streamer, event_callback=lambda event: seen.append(event.event_type))
-    original = planner._event_callback
+    planner = ScriptedPlanner(
+        streamer, event_callback=lambda event: seen.append(event.event_type)
+    )
+    original = planner.event_callback
     service = A2AService(planner, agent_card=_agent_card())
     await service.send_message(_request("hi"), tenant=None)
     assert seen == ["llm_stream_chunk"]
-    assert planner._event_callback is not original
+    assert planner.event_callback is not original
     await service.stop()
-    assert planner._event_callback is original
+    assert planner.event_callback is original
 
 
 @pytest.mark.asyncio
-async def test_contexts_run_in_parallel_and_serialize_within_a_context() -> None:
+async def test_contexts_run_in_parallel_and_serialize_within_a_context() -> (
+    None
+):
+    """Contexts run in parallel and serialize within a context."""
     RUN_WINDOWS.clear()
     planner = ReactPlanner(
         llm_client=ToolThenFinishClient("timed_work", "ok"),
@@ -391,11 +507,19 @@ async def test_contexts_run_in_parallel_and_serialize_within_a_context() -> None
     service = A2AService(planner, agent_card=_agent_card())
     try:
         await asyncio.gather(
-            service.send_message(_request("a", context_id="ctx-a"), tenant=None),
-            service.send_message(_request("b", context_id="ctx-b"), tenant=None),
-            service.send_message(_request("a2", context_id="ctx-a"), tenant=None),
+            service.send_message(
+                _request("a", context_id="ctx-a"), tenant=None
+            ),
+            service.send_message(
+                _request("b", context_id="ctx-b"), tenant=None
+            ),
+            service.send_message(
+                _request("a2", context_id="ctx-a"), tenant=None
+            ),
         )
-        windows = {session: [] for session, _start, _end in RUN_WINDOWS}
+        windows: dict[str, list[tuple[float, float]]] = {
+            session: [] for session, _start, _end in RUN_WINDOWS
+        }
         for session, start, end in RUN_WINDOWS:
             windows[session].append((start, end))
 
@@ -404,49 +528,61 @@ async def test_contexts_run_in_parallel_and_serialize_within_a_context() -> None
 
         first_a, second_a = sorted(windows["ctx-a"])
         assert not _overlap(first_a, second_a)
-        assert _overlap(windows["ctx-b"][0], first_a) or _overlap(windows["ctx-b"][0], second_a)
+        assert _overlap(windows["ctx-b"][0], first_a) or _overlap(
+            windows["ctx-b"][0], second_a
+        )
     finally:
         await service.stop()
-
-
-class RecordingBindingStore:
-    def __init__(self) -> None:
-        self.bindings: list[RemoteBinding] = []
-
-    async def save_remote_binding(self, binding: RemoteBinding) -> None:
-        self.bindings.append(binding)
 
 
 @pytest.mark.asyncio
 async def test_remote_binding_saved_to_planner_state_store() -> None:
-    async def answer(run: ScriptedRun) -> str:
+    """Remote binding saved to planner state store."""
+
+    async def answer(_run: ScriptedRun) -> str:
         return "ok"
 
-    store = RecordingBindingStore()
+    store = RecordingStateStore()
     planner = ScriptedPlanner(answer, state_store=store)
-    service = A2AService(planner, agent_card=_agent_card(), config=A2AConfig(agent_url="http://agent"))
+    service = A2AService(
+        planner,
+        agent_card=_agent_card(),
+        config=A2AConfig(agent_url="http://agent"),
+    )
     try:
-        response = await service.send_message(_request("hi", context_id="ctx-bind"), tenant=None)
+        response = await service.send_message(
+            _request("hi", context_id="ctx-bind"), tenant=None
+        )
         assert response.task is not None
-        assert [(b.context_id, b.task_id, b.agent_url) for b in store.bindings] == [
-            ("ctx-bind", response.task.id, "http://agent")
-        ]
+        assert [
+            (b.context_id, b.task_id, b.agent_url) for b in store.bindings
+        ] == [("ctx-bind", response.task.id, "http://agent")]
     finally:
         await service.stop()
 
 
-class FailingBindingStore:
+class FailingBindingStore(RecordingStateStore):
+    """Binding store that is always down."""
+
+    @override
     async def save_remote_binding(self, binding: RemoteBinding) -> None:
-        raise RuntimeError("store down")
+        msg = "store down"
+        raise RuntimeError(msg)
 
 
 @pytest.mark.asyncio
 async def test_failing_binding_store_does_not_strand_task() -> None:
-    async def answer(run: ScriptedRun) -> str:
+    """Failing binding store does not strand task."""
+
+    async def answer(_run: ScriptedRun) -> str:
         return "ok"
 
     planner = ScriptedPlanner(answer, state_store=FailingBindingStore())
-    service = A2AService(planner, agent_card=_agent_card(), config=A2AConfig(agent_url="http://agent"))
+    service = A2AService(
+        planner,
+        agent_card=_agent_card(),
+        config=A2AConfig(agent_url="http://agent"),
+    )
     try:
         response = await service.send_message(_request("hi"), tenant=None)
         assert response.task is not None
@@ -457,28 +593,49 @@ async def test_failing_binding_store_does_not_strand_task() -> None:
 
 @pytest.mark.asyncio
 async def test_planner_manager_calls_planner_specialist_over_http() -> None:
+    """Planner manager calls planner specialist over HTTP."""
     specialist = ReactPlanner(
-        llm_client=StubClient([{"thought": "answer", "next_node": None, "args": {"raw_answer": "42"}}]),
+        llm_client=StubClient(
+            [
+                {
+                    "thought": "answer",
+                    "next_node": None,
+                    "args": {"raw_answer": "42"},
+                }
+            ]
+        ),
         catalog=[],
     )
     service = A2AService(specialist, agent_card=_agent_card(streaming=False))
     app = create_a2a_http_app(service, include_docs=False)
 
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        toolset = A2AAgentToolset(agent_url="http://test", transport=A2AHttpTransport(client=client))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        toolset = A2AAgentToolset(
+            agent_url="http://test", transport=A2AHttpTransport(client=client)
+        )
         spec = toolset.tool(
             name="ask_specialist",
             skill="answer",
             args_model=Text,
             out_model=Text,
             desc="Ask the specialist",
-            payload_builder=lambda args, _ctx: args.text,
+            payload_builder=_text_payload,
         )
         manager = ReactPlanner(
             llm_client=StubClient(
                 [
-                    {"thought": "delegate", "next_node": "ask_specialist", "args": {"text": "meaning of life?"}},
-                    {"thought": "done", "next_node": None, "args": {"raw_answer": "The specialist says 42"}},
+                    {
+                        "thought": "delegate",
+                        "next_node": "ask_specialist",
+                        "args": {"text": "meaning of life?"},
+                    },
+                    {
+                        "thought": "done",
+                        "next_node": None,
+                        "args": {"raw_answer": "The specialist says 42"},
+                    },
                 ]
             ),
             catalog=[spec],

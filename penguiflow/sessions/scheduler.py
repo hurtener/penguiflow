@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, Field
+from typing_extensions import override
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 def _utc_now() -> datetime:
@@ -18,28 +21,38 @@ def _utc_now() -> datetime:
 class ScheduleConfig(BaseModel):
     """Recurrence rule for a scheduled job.
 
-    A one-shot job sets only `next_run_at`; a recurring job also sets `interval_s`
-    so `next_after` can compute the following run time after each tick.
+    A one-shot job sets only `next_run_at`; a recurring job also sets
+    `interval_s` so `next_after` can compute the following run time after each
+    tick.
     """
 
     interval_s: int | None = Field(
-        default=None, description="Seconds between runs. None means the job does not repeat."
+        default=None,
+        description=(
+            "Seconds between runs. None means the job does not repeat."
+        ),
     )
     next_run_at: datetime | None = Field(
-        default=None, description="Next timestamp at which the job is due to run."
+        default=None,
+        description="Next timestamp at which the job is due to run.",
     )
     timezone: str | None = Field(
-        default=None, description="IANA timezone name used for interpreting schedule times, if any."
+        default=None,
+        description=(
+            "IANA timezone name used for interpreting schedule times, if any."
+        ),
     )
 
     def next_after(self, when: datetime) -> datetime | None:
         """Compute the next run time after a given timestamp.
 
         Args:
-            when: The reference timestamp (typically the current run time) to offset from.
+            when: The reference timestamp (typically the current run time) to
+                offset from.
 
         Returns:
-            The next run timestamp, or None if `interval_s` is not set (one-shot job).
+            The next run timestamp, or None if `interval_s` is not set
+            (one-shot job).
         """
         if self.interval_s is None:
             return None
@@ -50,37 +63,67 @@ class JobDefinition(BaseModel):
     """A scheduled background job: what to run, for which session, and when."""
 
     job_id: str = Field(
-        default_factory=lambda: secrets.token_hex(8), description="Unique identifier for this job."
+        default_factory=lambda: secrets.token_hex(8),
+        description="Unique identifier for this job.",
     )
     session_id: str = Field(description="Session this job belongs to.")
     task_payload: dict[str, Any] = Field(
-        default_factory=dict, description="Payload passed to the spawn callback when the job fires."
+        default_factory=dict,
+        description="Payload passed to the spawn callback when the job fires.",
     )
-    schedule: ScheduleConfig = Field(description="Recurrence rule controlling when the job is due.")
+    schedule: ScheduleConfig = Field(
+        description="Recurrence rule controlling when the job is due."
+    )
     delivery_policy: dict[str, Any] = Field(
-        default_factory=dict, description="Policy controlling how results from this job are delivered."
+        default_factory=dict,
+        description=(
+            "Policy controlling how results from this job are delivered."
+        ),
     )
-    enabled: bool = Field(default=True, description="Whether the job is eligible to run; disabled jobs are skipped.")
-    created_at: datetime = Field(default_factory=_utc_now, description="When the job was created.")
-    updated_at: datetime = Field(default_factory=_utc_now, description="When the job was last modified.")
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the job is eligible to run; disabled jobs are skipped."
+        ),
+    )
+    created_at: datetime = Field(
+        default_factory=_utc_now, description="When the job was created."
+    )
+    updated_at: datetime = Field(
+        default_factory=_utc_now, description="When the job was last modified."
+    )
 
 
 class JobRunRecord(BaseModel):
     """A record of a single execution of a scheduled job."""
 
-    job_id: str = Field(description="Identifier of the job this run belongs to.")
-    run_id: str = Field(default_factory=lambda: secrets.token_hex(8), description="Unique identifier for this run.")
-    started_at: datetime = Field(default_factory=_utc_now, description="When this run started.")
-    completed_at: datetime | None = Field(default=None, description="When this run completed, if it has finished.")
-    status: str | None = Field(default=None, description="Terminal status of the run, if known.")
-    result: dict[str, Any] | None = Field(default=None, description="Result payload produced by the run, if any.")
+    job_id: str = Field(
+        description="Identifier of the job this run belongs to."
+    )
+    run_id: str = Field(
+        default_factory=lambda: secrets.token_hex(8),
+        description="Unique identifier for this run.",
+    )
+    started_at: datetime = Field(
+        default_factory=_utc_now, description="When this run started."
+    )
+    completed_at: datetime | None = Field(
+        default=None,
+        description="When this run completed, if it has finished.",
+    )
+    status: str | None = Field(
+        default=None, description="Terminal status of the run, if known."
+    )
+    result: dict[str, Any] | None = Field(
+        default=None, description="Result payload produced by the run, if any."
+    )
 
 
 class JobStore(Protocol):
     """Persistence contract for scheduled jobs and their run history.
 
-    Implementations back `JobScheduler`'s polling loop; `InMemoryJobStore` is the
-    default in-process implementation.
+    Implementations back `JobScheduler`'s polling loop; `InMemoryJobStore` is
+    the default in-process implementation.
     """
 
     async def save_job(self, job: JobDefinition) -> None:
@@ -91,7 +134,9 @@ class JobStore(Protocol):
         """
         ...
 
-    async def list_jobs(self, session_id: str | None = None) -> list[JobDefinition]:
+    async def list_jobs(
+        self, session_id: str | None = None
+    ) -> list[JobDefinition]:
         """List known jobs, optionally filtered by session.
 
         Args:
@@ -123,18 +168,21 @@ class JobStore(Protocol):
 
 
 class InMemoryJobStore(JobStore):
-    """A process-local `JobStore` backed by in-memory dicts/lists, guarded by a lock.
+    """A process-local `JobStore` in in-memory dicts and lists, with a lock.
 
-    Intended for tests and single-process deployments; state is lost on restart.
+    Intended for tests and single-process deployments; state is lost on
+    restart.
     """
 
     def __init__(self) -> None:
+        """Create an empty job store."""
         self._jobs: dict[str, JobDefinition] = {}
         self._runs: list[JobRunRecord] = []
         self._lock = asyncio.Lock()
 
+    @override
     async def save_job(self, job: JobDefinition) -> None:
-        """Create or update a job definition, refreshing its `updated_at` timestamp.
+        """Create or update a job definition and refresh its `updated_at`.
 
         Args:
             job: The job definition to persist.
@@ -143,7 +191,10 @@ class InMemoryJobStore(JobStore):
             job.updated_at = _utc_now()
             self._jobs[job.job_id] = job
 
-    async def list_jobs(self, session_id: str | None = None) -> list[JobDefinition]:
+    @override
+    async def list_jobs(
+        self, session_id: str | None = None
+    ) -> list[JobDefinition]:
         """List known jobs, optionally filtered by session.
 
         Args:
@@ -158,6 +209,7 @@ class InMemoryJobStore(JobStore):
             return jobs
         return [job for job in jobs if job.session_id == session_id]
 
+    @override
     async def list_due(self, now: datetime) -> list[JobDefinition]:
         """List enabled jobs whose next run time has arrived.
 
@@ -178,6 +230,7 @@ class InMemoryJobStore(JobStore):
                 due.append(job)
         return due
 
+    @override
     async def record_run(self, run: JobRunRecord) -> None:
         """Append a run record to the in-memory history.
 
@@ -197,15 +250,16 @@ class JobScheduler:
         store: JobStore,
         spawn: Callable[[JobDefinition], Awaitable[str]],
     ) -> None:
+        """Spawn due jobs from ``store`` with ``spawn``."""
         self._store = store
         self._spawn = spawn
 
     async def tick(self) -> None:
-        """Run one scheduling pass: spawn all due jobs and advance recurring schedules.
+        """Run one scheduling pass: spawn due jobs, advance recurring ones.
 
-        For each job returned by `JobStore.list_due`, records a `JobRunRecord`, invokes
-        the `spawn` callback, and if the job repeats, computes and persists its next
-        run time.
+        For each job returned by `JobStore.list_due`, records a `JobRunRecord`,
+        invokes the `spawn` callback, and if the job repeats, computes and
+        persists its next run time.
         """
         now = _utc_now()
         due_jobs = await self._store.list_due(now)
@@ -222,7 +276,10 @@ class JobScheduler:
 class JobSchedulerRunner:
     """Background loop that ticks the scheduler on an interval."""
 
-    def __init__(self, scheduler: JobScheduler, *, poll_interval_s: float = 5.0) -> None:
+    def __init__(
+        self, scheduler: JobScheduler, *, poll_interval_s: float = 5.0
+    ) -> None:
+        """Run ``scheduler`` every ``poll_interval_s`` seconds once started."""
         self._scheduler = scheduler
         self._poll_interval_s = poll_interval_s
         self._task: asyncio.Task[None] | None = None
@@ -230,7 +287,8 @@ class JobSchedulerRunner:
     async def start(self) -> None:
         """Start the background polling loop, if not already running.
 
-        Idempotent: calling `start` while a loop task is already active is a no-op.
+        Idempotent: calling `start` while a loop task is already active is a
+            no-op.
         """
         if self._task is not None and not self._task.done():
             return

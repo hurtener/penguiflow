@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .trajectory import Trajectory
+if TYPE_CHECKING:
+    from .models import PlannerPause
+    from .trajectory import Trajectory
 
 
 @dataclass(slots=True)
@@ -17,10 +19,12 @@ class _PauseRecord:
     tool_context: dict[str, Any] | None = None
 
 
-class _PlannerPauseSignal(Exception):
-    def __init__(self, pause: Any) -> None:
-        super().__init__(getattr(pause, "reason", "pause"))
+class _PlannerPauseError(Exception):
+    """Unwinds a tool call so the planner can return a pause."""
+
+    def __init__(self, pause: PlannerPause) -> None:
+        super().__init__(pause.reason)
         self.pause = pause
 
 
-__all__ = ["_PauseRecord", "_PlannerPauseSignal"]
+__all__ = ["_PauseRecord", "_PlannerPauseError"]

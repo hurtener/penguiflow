@@ -11,18 +11,22 @@ from .models import ToolExamplesConfig
 
 
 def render_summary(summary: Mapping[str, Any]) -> str:
+    """Render the trajectory summary message."""
     return "Trajectory summary: " + _compact_json(summary)
 
 
 def render_resume_user_input(user_input: str) -> str:
+    """Render the user input that resumed a paused run."""
     return f"Resume input: {user_input}"
 
 
 def render_steering_input(payload: str) -> str:
+    """Render a steering input."""
     return f"Steering input: {payload}"
 
 
 def render_planning_hints(hints: Mapping[str, Any]) -> str:
+    """Render the planning hints as prompt lines."""
     lines: list[str] = []
     constraints = hints.get("constraints")
     if constraints:
@@ -48,39 +52,65 @@ def render_planning_hints(hints: Mapping[str, Any]) -> str:
 
 
 def render_disallowed_node(node_name: str) -> str:
-    return f"tool '{node_name}' is not permitted by constraints. Choose an allowed tool or revise the plan."
+    """Explain that a tool is disallowed by the constraints."""
+    return (
+        f"tool '{node_name}' is not permitted by constraints. Choose an "
+        "allowed tool or revise the plan."
+    )
 
 
-def render_ordering_hint_violation(expected: Sequence[str], proposed: str) -> str:
+def render_ordering_hint_violation(
+    expected: Sequence[str], proposed: str
+) -> str:
+    """Explain that a tool was proposed out of the hinted order."""
     order = ", ".join(expected)
-    return f"Ordering hint reminder: follow the preferred sequence [{order}]. Proposed: {proposed}. Revise the plan."
+    return (
+        "Ordering hint reminder: follow the preferred sequence "
+        f"[{order}]. Proposed: {proposed}. Revise the plan."
+    )
 
 
 def render_parallel_limit(max_parallel: int) -> str:
-    return f"Parallel action exceeds max_parallel={max_parallel}. Reduce parallel fan-out."
+    """Explain that a parallel plan has too many branches."""
+    return (
+        f"Parallel action exceeds max_parallel={max_parallel}. Reduce "
+        "parallel fan-out."
+    )
 
 
 def render_sequential_only(node_name: str) -> str:
-    return f"tool '{node_name}' must run sequentially. Do not include it in a parallel plan."
+    """Explain that a tool must not run in a parallel plan."""
+    return (
+        f"tool '{node_name}' must run sequentially. Do not include it in "
+        "a parallel plan."
+    )
 
 
 def render_parallel_setup_error(errors: Sequence[str]) -> str:
+    """Explain why a parallel plan is invalid."""
     detail = "; ".join(errors)
     return f"Parallel plan invalid: {detail}. Revise the plan and retry."
 
 
 def render_empty_parallel_plan() -> str:
+    """Explain that a parallel plan needs at least one branch."""
     return "Parallel action must include at least one branch in args.steps."
 
 
 def render_parallel_with_next_node(next_node: str) -> str:
+    """Explain that a parallel action must set next_node="parallel"."""
     return (
-        f"Parallel action must set next_node='parallel'. Received next_node='{next_node}'. Revise the action and retry."
+        "Parallel action must set next_node='parallel'. Received "
+        f"next_node='{next_node}'. Revise the action and retry."
     )
 
 
 def render_parallel_unknown_failure(node_name: str) -> str:
-    return f"tool '{node_name}' failed during parallel execution. Investigate the tool and adjust the plan."
+    """Explain that a parallel branch failed without details."""
+    return (
+        f"tool '{node_name}' failed during parallel execution. "
+        "Investigate the tool and adjust the plan."
+    )
 
 
 _READ_ONLY_CONVERSATION_MEMORY_PREAMBLE = """\
@@ -123,40 +153,52 @@ _READ_ONLY_EXTERNAL_MEMORY_EPILOGUE = """
 """
 
 
-def render_read_only_conversation_memory(conversation_memory: Any) -> str:
+def render_read_only_conversation_memory(conversation_memory: object) -> str:
     """Render short-term memory as a delimited, read-only system message."""
-
     payload = _compact_json(conversation_memory)
-    return _READ_ONLY_CONVERSATION_MEMORY_PREAMBLE + payload + _READ_ONLY_CONVERSATION_MEMORY_EPILOGUE
+    return (
+        _READ_ONLY_CONVERSATION_MEMORY_PREAMBLE
+        + payload
+        + _READ_ONLY_CONVERSATION_MEMORY_EPILOGUE
+    )
 
 
-def render_read_only_external_memory(external_memory: Any) -> str:
+def render_read_only_external_memory(external_memory: object) -> str:
     """Render external memory as a delimited, read-only system message."""
-
     payload = _compact_json(external_memory)
-    return _READ_ONLY_EXTERNAL_MEMORY_PREAMBLE + payload + _READ_ONLY_EXTERNAL_MEMORY_EPILOGUE
+    return (
+        _READ_ONLY_EXTERNAL_MEMORY_PREAMBLE
+        + payload
+        + _READ_ONLY_EXTERNAL_MEMORY_EPILOGUE
+    )
 
 
 _TRAJECTORY_SUMMARIZER_SYSTEM_PROMPT = """\
 You are a summariser compressing an agent's tool execution trajectory mid-run.
-The agent is partway through solving a task and needs a compact state to continue reasoning.
+The agent is partway through solving a task and needs a compact state to \
+continue reasoning.
 
 Output: Valid JSON matching the TrajectorySummary schema.
 
 Field guidance:
-- goals: The user's original request(s). Usually 1 item unless multi-part query.
+- goals: The user's original request(s). Usually 1 item unless multi-part \
+query.
 - facts: Key-value pairs of VERIFIED information from tool outputs.
-  - Use descriptive keys: {"user_email": "...", "order_total": 49.99, "selected_plan": "Pro"}
+  - Use descriptive keys: {"user_email": "...", "order_total": 49.99, \
+"selected_plan": "Pro"}
   - Only include facts that may be needed for remaining work.
-- pending: Actions still needed or explicitly deferred. Use action-oriented phrases.
+- pending: Actions still needed or explicitly deferred. Use action-oriented \
+phrases.
   - Good: ["confirm payment method", "send confirmation email"]
   - Bad: ["stuff to do later"]
-- last_output_digest: Truncated version of the most recent tool output (max ~100 chars).
+- last_output_digest: Truncated version of the most recent tool output (max \
+~100 chars).
   - Preserve the most actionable part if truncating.
 
 Guidelines:
 - Be aggressive about compression — this replaces verbose tool outputs.
-- Preserve exact values (IDs, numbers, names) in facts rather than paraphrasing.
+- Preserve exact values (IDs, numbers, names) in facts rather than \
+paraphrasing.
 - If a tool failed, note it in pending, not facts.
 """
 
@@ -166,6 +208,7 @@ def build_summarizer_messages(
     history: Sequence[Mapping[str, Any]],
     base_summary: Mapping[str, Any],
 ) -> list[dict[str, str]]:
+    """Build the messages asking the LLM to summarize the trajectory."""
     return [
         {
             "role": "system",
@@ -186,7 +229,8 @@ def build_summarizer_messages(
 
 _STM_SUMMARIZER_SYSTEM_PROMPT = """\
 You are a summariser for agent conversation short-term memory.
-Your task is to compress conversation turns into a structured summary that preserves \
+Your task is to compress conversation turns into a structured summary that \
+preserves \
 essential context for future interactions.
 
 The summary will be injected into the agent's context window, so it must be:
@@ -220,7 +264,8 @@ Guidelines:
 - Prioritize recent turns over older ones when space is limited
 - Preserve exact values (numbers, IDs, names) rather than paraphrasing
 - Omit sections that have no relevant content
-- If previous_summary exists, integrate it with new turns (do not repeat verbatim)
+- If previous_summary exists, integrate it with new turns (do not repeat \
+verbatim)
 """
 
 
@@ -231,7 +276,8 @@ def build_short_term_memory_summary_messages(
 ) -> list[dict[str, str]]:
     """Build messages for short-term memory summarization.
 
-    The model must respond with JSON: {"summary": "<session_summary>...</session_summary>"}.
+    The model must respond with JSON: {"summary":
+    "<session_summary>...</session_summary>"}.
     """
     return [
         {
@@ -250,7 +296,7 @@ def build_short_term_memory_summary_messages(
     ]
 
 
-def _compact_json(data: Any) -> str:
+def _compact_json(data: object) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
@@ -261,7 +307,9 @@ _EXAMPLE_TAG_PRIORITY = {
 }
 
 
-def _sorted_tool_examples(examples: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+def _sorted_tool_examples(
+    examples: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
     ranked: list[tuple[tuple[int, int], Mapping[str, Any]]] = []
     for idx, example in enumerate(examples):
         tags = example.get("tags")
@@ -286,10 +334,18 @@ def _render_tool_examples(
     limit = max(1, config.max_examples_per_tool)
     lines = ["  examples:"]
     for example in _sorted_tool_examples(examples)[:limit]:
-        args = example.get("args") if isinstance(example.get("args"), Mapping) else {}
+        args = (
+            example.get("args")
+            if isinstance(example.get("args"), Mapping)
+            else {}
+        )
         lines.append(f"    - args: {_compact_json(args)}")
         description = example.get("description")
-        if config.include_descriptions and isinstance(description, str) and description.strip():
+        if (
+            config.include_descriptions
+            and isinstance(description, str)
+            and description.strip()
+        ):
             lines.append(f"      description: {description.strip()}")
         tags = example.get("tags")
         if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes)):
@@ -323,7 +379,8 @@ steering input in your context:
 3. **Background Task Control**: If the user mentions a background task
    (e.g., "cancel the research", "check on the analysis"):
    - Use `tasks.list()` to see active background tasks
-   - If the reference is ambiguous (multiple matching tasks), use `select_option` to let the user choose:
+   - If the reference is ambiguous (multiple matching tasks), use \
+`select_option` to let the user choose:
      ```
      select_option(
        prompt="Which task would you like to cancel?",
@@ -333,11 +390,14 @@ steering input in your context:
        ]
      )
      ```
-   - Then use `tasks.cancel()`, `tasks.prioritize()`, or `tasks.get()` as appropriate
+   - Then use `tasks.cancel()`, `tasks.prioritize()`, or `tasks.get()` as \
+appropriate
 
-4. **Status Query**: If the user asks about progress, provide a brief summary of current and background work.
+4. **Status Query**: If the user asks about progress, provide a brief summary \
+of current and background work.
 
-Always acknowledge steering messages naturally to confirm you received and understood them.
+Always acknowledge steering messages naturally to confirm you received and \
+understood them.
 """
 
 
@@ -370,12 +430,15 @@ def render_background_task_guidance(*, include_steering: bool = True) -> str:
 
     return (
         """<background_tasks>
-You have access to background task orchestration. Background tasks are independent
-subagents that run asynchronously, allowing you to parallelize long-running work
+You have access to background task orchestration. Background tasks are \
+independent
+subagents that run asynchronously, allowing you to parallelize long-running \
+work
 while continuing to respond to the user.
 
 <async_tools>
-Some tools in your catalog may be marked as background tools. When you call these:
+Some tools in your catalog may be marked as background tools. When you call \
+these:
 - The tool spawns a background task and returns immediately with a task handle
 - Results arrive asynchronously - you will NOT receive them inline
 - Use task management tools to check status and retrieve results when ready
@@ -386,7 +449,8 @@ Some tools in your catalog may be marked as background tools. When you call thes
 If task management tools are available (tasks.*), use them as follows:
 
 Spawning:
-- tasks.spawn: Create a new background task for long-running or independent work
+- tasks.spawn: Create a new background task for long-running or independent \
+work
   - Use mode="subagent" for complex tasks requiring reasoning (default)
   - Use mode="job" for simple, single-tool executions
   - Returns immediately with task_id; execution is async
@@ -400,7 +464,8 @@ Control:
 - tasks.prioritize: Adjust execution priority of pending/running tasks
 
 Results:
-- tasks.apply_patch: Apply or reject background results to the conversation context
+- tasks.apply_patch: Apply or reject background results to the conversation \
+context
   - Required for HUMAN_GATED merge strategy (the default for safety)
   - User must approve before results are merged
 
@@ -415,17 +480,20 @@ When to spawn background tasks:
 Background tasks may produce artifacts (files, data, visualizations).
 
 Rules:
-- You receive artifact METADATA only (name, type, size, summary) - never raw content
+- You receive artifact METADATA only (name, type, size, summary) - never raw \
+content
 - Do NOT inline large or binary content in your answers
 - If you need full artifact content, fetch it explicitly using artifact tools
 - Reference artifacts by their ID or name when discussing them with the user
 </artifact_handling>
 
 <merge_rules>
-Background task results require explicit integration into the conversation context.
+Background task results require explicit integration into the conversation \
+context.
 
 Merge strategies:
-- HUMAN_GATED (default): Results are held until the user approves via tasks.apply_patch
+- HUMAN_GATED (default): Results are held until the user approves via \
+tasks.apply_patch
 - APPEND: Results are automatically appended to context (less common)
 - REPLACE: Results overwrite a specific context key (least common)
 
@@ -437,7 +505,8 @@ When a background task completes:
 </merge_rules>
 
 <steering_proxy>
-You can act as a steering proxy for background tasks. If the user requests task control
+You can act as a steering proxy for background tasks. If the user requests \
+task control
 through natural language, translate their intent into the appropriate action:
 
 User intent → Your action:
@@ -452,8 +521,10 @@ Always confirm the action taken and report the outcome to the user.
 </steering_proxy>
 
 <context_divergence>
-Background tasks run on a frozen snapshot of context from when they were spawned.
-If the foreground conversation advances significantly, background results may be stale.
+Background tasks run on a frozen snapshot of context from when they were \
+spawned.
+If the foreground conversation advances significantly, background results may \
+be stale.
 
 When applying results:
 - Check if context_diverged is flagged in the task or patch
@@ -468,12 +539,15 @@ You can spawn multiple related tasks as a group for coordinated reporting:
 Creating Groups:
 - First spawn creates the group: tasks.spawn(query="...", group="analysis")
 - Add more tasks: tasks.spawn(query="...", group="analysis")
-- Seal when done adding: tasks.spawn(query="...", group="analysis", group_sealed=True)
+- Seal when done adding: tasks.spawn(query="...", group="analysis", \
+group_sealed=True)
 
-When all tasks in a sealed group complete, you'll generate ONE synthesized report
+When all tasks in a sealed group complete, you'll generate ONE synthesized \
+report
 covering all findings together, rather than separate reports for each task.
 
-Groups auto-seal by default when you yield to the user, so you don't always need
+Groups auto-seal by default when you yield to the user, so you don't always \
+need
 to set group_sealed=True explicitly.
 
 Group Management Tools:
@@ -492,7 +566,8 @@ Example - Comprehensive Analysis:
 ```
 tasks.spawn(query="Analyze Q4 sales data", group="q4_analysis")
 tasks.spawn(query="Analyze Q4 marketing metrics", group="q4_analysis")
-tasks.spawn(query="Analyze Q4 operations efficiency", group="q4_analysis", group_sealed=True)
+tasks.spawn(query="Analyze Q4 operations efficiency", group="q4_analysis", \
+group_sealed=True)
 ```
 When all three complete, you'll receive a single combined report to synthesize.
 
@@ -511,44 +586,24 @@ without yielding to the user (requires APPEND or REPLACE merge strategy).
     )
 
 
-def render_tool(record: Mapping[str, Any], *, tool_examples: ToolExamplesConfig | None = None) -> str:
-    args_schema = _compact_json(record["args_schema"])
-    out_schema = _compact_json(record["out_schema"])
-    tags = ", ".join(record.get("tags", ()))
-    scopes = ", ".join(record.get("auth_scopes", ()))
-    desc = str(record.get("desc") or "")
-    extra = record.get("extra")
-    background_cfg = None
-    if isinstance(extra, Mapping):
-        background_cfg = extra.get("background")
-    if isinstance(background_cfg, Mapping) and background_cfg.get("enabled") is True:
-        from .models import BackgroundTaskHandle
+def _background_desc(desc: str, background_cfg: Mapping[str, Any]) -> str:
+    """Describe a tool that runs as a background task."""
+    details: list[str] = []
+    for key in ("mode", "default_merge_strategy", "notify_on_complete"):
+        value = background_cfg.get(key)
+        if value is not None:
+            details.append(f"{key}={value}")
+    suffix = f": {', '.join(details)}" if details else ""
+    return f"{desc} (runs in background{suffix}; returns task handle)"
 
-        mode = background_cfg.get("mode")
-        merge = background_cfg.get("default_merge_strategy")
-        notify = background_cfg.get("notify_on_complete")
-        details: list[str] = []
-        if mode is not None:
-            details.append(f"mode={mode}")
-        if merge is not None:
-            details.append(f"default_merge_strategy={merge}")
-        if notify is not None:
-            details.append(f"notify_on_complete={notify}")
-        suffix = f": {', '.join(details)}" if details else ""
-        desc = f"{desc} (runs in background{suffix}; returns task handle)"
-        out_schema = _compact_json(BackgroundTaskHandle.model_json_schema())
-    parts = [
-        f"- name: {record['name']}",
-        f"  desc: {desc}",
-        f"  side_effects: {record['side_effects']}",
-        f"  args_schema: {args_schema}",
-        f"  out_schema: {out_schema}",
-    ]
-    examples_config = tool_examples or ToolExamplesConfig()
-    if isinstance(record.get("examples"), Sequence):
-        parts.extend(_render_tool_examples(record.get("examples", ()), config=examples_config))
+
+def _optional_tool_lines(record: Mapping[str, Any]) -> list[str]:
+    """Render the tool record's optional hint lines."""
+    parts: list[str] = []
+    tags = ", ".join(record.get("tags", ()))
     if tags:
         parts.append(f"  tags: {tags}")
+    scopes = ", ".join(record.get("auth_scopes", ()))
     if scopes:
         parts.append(f"  auth_scopes: {scopes}")
     if record.get("cost_hint"):
@@ -559,10 +614,50 @@ def render_tool(record: Mapping[str, Any], *, tool_examples: ToolExamplesConfig 
         parts.append(f"  safety_notes: {record['safety_notes']}")
     if record.get("extra"):
         parts.append(f"  extra: {_compact_json(record['extra'])}")
+    return parts
+
+
+def render_tool(
+    record: Mapping[str, Any],
+    *,
+    tool_examples: ToolExamplesConfig | None = None,
+) -> str:
+    """Render a tool catalog entry for the system prompt."""
+    args_schema = _compact_json(record["args_schema"])
+    out_schema = _compact_json(record["out_schema"])
+    desc = str(record.get("desc") or "")
+    extra = record.get("extra")
+    background_cfg = (
+        extra.get("background") if isinstance(extra, Mapping) else None
+    )
+    if (
+        isinstance(background_cfg, Mapping)
+        and background_cfg.get("enabled") is True
+    ):
+        from .models import BackgroundTaskHandle
+
+        desc = _background_desc(desc, background_cfg)
+        out_schema = _compact_json(BackgroundTaskHandle.model_json_schema())
+    parts = [
+        f"- name: {record['name']}",
+        f"  desc: {desc}",
+        f"  side_effects: {record['side_effects']}",
+        f"  args_schema: {args_schema}",
+        f"  out_schema: {out_schema}",
+    ]
+    examples_config = tool_examples or ToolExamplesConfig()
+    if isinstance(record.get("examples"), Sequence):
+        parts.extend(
+            _render_tool_examples(
+                record.get("examples", ()), config=examples_config
+            )
+        )
+    parts.extend(_optional_tool_lines(record))
     return "\n".join(parts)
 
 
 def render_tool_discovery_guidance() -> str:
+    """Render the guidance on discovering tools with tool_search."""
     return """<tool_discovery>
 You can discover additional tools using `tool_search`.
 - Describe the capability you need.
@@ -570,13 +665,15 @@ You can discover additional tools using `tool_search`.
 - Use the tool name to call it.
 
 IMPORTANT (deferred tools):
-- Tools returned by `tool_search` are permitted to be called even if they are currently deferred/hidden
+- Tools returned by `tool_search` are permitted to be called even if they are \
+currently deferred/hidden
   in the visible catalog; the runtime will activate them on first call.
 Only tools permitted for this request will appear.
 </tool_discovery>"""
 
 
 def render_skill_discovery_guidance() -> str:
+    """Render the guidance on discovering skills."""
     return """<skill_discovery>
 You can discover and fetch skills:
 - Use `skill_search` to find skills by capability (returns skill names).
@@ -585,6 +682,7 @@ You can discover and fetch skills:
 
 
 def render_skill_proposal_guidance() -> str:
+    """Render the guidance on drafting skills with skill_propose."""
     return """<skill_proposal>
 You can draft a reusable skill playbook with `skill_propose`.
 - Use it when the user wants a new repeatable procedure or operating playbook.
@@ -593,35 +691,36 @@ You can draft a reusable skill playbook with `skill_propose`.
 </skill_proposal>"""
 
 
+def _skill_label(entry: Mapping[str, Any], fields: set[str]) -> str | None:
+    """Return the first included title, trigger or task type of a skill."""
+    for field in ("title", "trigger", "task_type"):
+        if field not in fields:
+            continue
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def render_skill_directory(
     entries: Sequence[Mapping[str, Any]],
     *,
     include_fields: Sequence[str],
 ) -> str | None:
+    """Render the skill directory, or ``None`` when there are no skills."""
     if not entries:
         return None
     fields = {field for field in include_fields if isinstance(field, str)}
     lines = [
         "<skill_directory>",
-        "Known skills (use skill_get by name; use skill_search for discovery):",
+        "Known skills (use skill_get by name; use skill_search for "
+        "discovery):",
     ]
     for entry in entries:
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
             continue
-        label = None
-        if "title" in fields:
-            title = entry.get("title")
-            if isinstance(title, str) and title.strip():
-                label = title.strip()
-        if label is None and "trigger" in fields:
-            trigger = entry.get("trigger")
-            if isinstance(trigger, str) and trigger.strip():
-                label = trigger.strip()
-        if label is None and "task_type" in fields:
-            task_type = entry.get("task_type")
-            if isinstance(task_type, str) and task_type.strip():
-                label = task_type.strip()
+        label = _skill_label(entry, fields)
         if label:
             lines.append(f"- {name} — {label}")
         else:
@@ -635,6 +734,7 @@ def render_tool_hints(
     *,
     query: str | None = None,
 ) -> str | None:
+    """Render the tool hints for the query, or ``None`` if there are none."""
     if not entries:
         return None
     lines: list[str] = ["<tool_hints>"]
@@ -661,11 +761,13 @@ def render_tool_hints(
 def render_tool_directory(
     groups: Sequence[Mapping[str, Any]],
 ) -> str | None:
+    """Render the tool directory, or ``None`` when it is empty."""
     if not groups:
         return None
     lines: list[str] = [
         "<tool_directory>",
-        "Known tool groups (use tool_search for discovery; tool_get for schemas/examples):",
+        "Known tool groups (use tool_search for discovery; tool_get "
+        "for schemas/examples):",
     ]
     for group in groups:
         name = group.get("name")
@@ -676,7 +778,11 @@ def render_tool_directory(
         tool_count = group.get("tool_count")
         tools = group.get("tools")
         label_parts: list[str] = []
-        if isinstance(title, str) and title.strip() and title.strip() != name.strip():
+        if (
+            isinstance(title, str)
+            and title.strip()
+            and title.strip() != name.strip()
+        ):
             label_parts.append(title.strip())
         if isinstance(trigger, str) and trigger.strip():
             label_parts.append(trigger.strip())
@@ -707,130 +813,317 @@ def build_system_prompt(
 ) -> str:
     """Build comprehensive system prompt for the planner.
 
-    The library provides baseline behavior: context (including memories) is injected
-    via the user prompt. Use `extra` to specify format-specific interpretation rules
-    that your application requires.
+    The library provides baseline behavior: context (including memories) is
+    injected via the user prompt. Use `extra` to specify format-specific
+    interpretation rules that your application requires.
 
     Args:
         catalog: Tool catalog (rendered tool specs)
-        extra: Optional instructions for interpreting custom context structures.
-               This is where you define how the planner should use memories or other
-               domain-specific data passed via llm_context.
+        extra: Optional instructions for interpreting custom context
+            structures. This is where you define how the planner should use
+            memories or other domain-specific data passed via llm_context.
+            Common patterns:
 
-               Common patterns:
-               - Memory as JSON object: "context.memories contains user preferences
-                 as {key: value}; prioritize them when selecting tools."
-               - Memory as text: "context.knowledge is free-form notes; extract
-                 relevant facts as needed."
-               - Historical context: "context.previous_failures lists failed attempts;
-                 avoid repeating the same tool sequence."
-
-        planning_hints: Optional planning constraints and preferences (ordering,
-                       disallowed nodes, parallel limits, etc.)
-
-        current_date: Optional date string (YYYY-MM-DD). If not provided, defaults
-                     to today's date. Date-only (no time) for better LLM cache hits.
+            - Memory as JSON object: "context.memories contains user
+              preferences as {key: value}; prioritize them when selecting
+              tools."
+            - Memory as text: "context.knowledge is free-form notes; extract
+              relevant facts as needed."
+            - Historical context: "context.previous_failures lists failed
+              attempts; avoid repeating the same tool sequence."
+        planning_hints: Optional planning constraints and preferences
+            (ordering, disallowed nodes, parallel limits, etc.)
+        current_date: Optional date string (YYYY-MM-DD). If not provided,
+            defaults to today's date. Date-only (no time) for better LLM cache
+            hits.
+        tool_examples: Configuration for the tool examples in the catalog.
+        structured_final_schema: JSON schema the final answer's
+            ``structured`` object must match, if any.
+        tool_call_mode: ``"prompted"`` (JSON actions) or ``"native"``
+            (provider-native tool calls).
 
     Returns:
-        Complete system prompt string combining baseline rules + tools + extra + hints
+        Complete system prompt string combining baseline rules + tools + extra
+        + hints
     """
-    rendered_tools = "\n".join(render_tool(item, tool_examples=tool_examples) for item in catalog)
+    rendered_tools = "\n".join(
+        render_tool(item, tool_examples=tool_examples) for item in catalog
+    )
 
     # Default to current date if not provided (date-only for better cache hits)
     if current_date is None:
-        from datetime import date
+        from datetime import datetime
 
-        current_date = date.today().isoformat()  # "YYYY-MM-DD"
+        # Local date, "YYYY-MM-DD"
+        current_date = datetime.now().astimezone().date().isoformat()
 
     prompt_sections: list[str] = []
 
-    # ─────────────────────────────────────────────────────────────
     # IDENTITY & ROLE
-    # ─────────────────────────────────────────────────────────────
     prompt_sections.append(f"""<identity>
-You are an autonomous reasoning agent that solves tasks by selecting and orchestrating tools.
-Your name and voice on how to answer will come at the end of the prompt in additional_guidance.
+You are an autonomous reasoning agent that solves tasks by selecting and \
+orchestrating tools.
+Your name and voice on how to answer will come at the end of the prompt in \
+additional_guidance.
 
 Your role is to:
 - Understand the user's intent and break complex queries into actionable steps
-- Select appropriate tools from your catalog to gather information or perform actions
+- Select appropriate tools from your catalog to gather information or perform \
+actions
 - Synthesize observations into clear, accurate answers
 - Know when you have enough information to answer and when you need more
 
 Current date: {current_date}
 </identity>""")
 
-    # ─────────────────────────────────────────────────────────────
     # OUTPUT FORMAT (NON-NEGOTIABLE)
-    # ─────────────────────────────────────────────────────────────
     native_mode = tool_call_mode == "native"
 
+    _add_output_format_section(
+        native_mode=native_mode,
+        prompt_sections=prompt_sections,
+        structured_final_schema=structured_final_schema,
+    )
+
+    # ACTION SCHEMA
+    _add_action_schema_section(
+        native_mode=native_mode, prompt_sections=prompt_sections
+    )
+
+    # Finishing section (critical)
+    _add_finishing_section(
+        native_mode=native_mode,
+        prompt_sections=prompt_sections,
+        structured_final_schema=structured_final_schema,
+    )
+
+    # STRUCTURED FINAL RESPONSE (opt-in via final_response_model)
+    _add_structured_final_section(
+        native_mode=native_mode,
+        prompt_sections=prompt_sections,
+        structured_final_schema=structured_final_schema,
+    )
+
+    # TOOL USAGE
+    prompt_sections.append("""<tool_usage>
+Rules for using tools:
+
+1. Only use tools listed in the catalog below - never invent tool names
+2. Match your args to the tool's args_schema exactly
+3. Consider side_effects before calling:
+   - "pure": Safe to call multiple times, no external changes
+   - "read": Reads external data but doesn't modify anything
+   - "write": Modifies external state - use carefully
+   - "external": Calls external services - may have rate limits or costs
+4. Use the tool's description to understand when it's appropriate
+5. If a tool fails, consider alternative approaches before giving up
+</tool_usage>""")
+
+    # PARALLEL EXECUTION
+    _add_parallel_section(
+        native_mode=native_mode, prompt_sections=prompt_sections
+    )
+
+    # REASONING GUIDANCE
+    answer_home = (
+        "your final plain-text reply" if native_mode else "args.answer"
+    )
+    prompt_sections.append(f"""<reasoning>
+Approach problems systematically:
+
+1. Understand first: Parse the query to identify what's actually being asked
+2. Plan before acting: Consider which tools will help and in what order
+3. Gather evidence: Use tools to collect relevant information
+4. Synthesize: Combine observations into a coherent answer ({answer_home} \
+when done)
+5. Verify: Check if your answer actually addresses the query
+
+When uncertain:
+- If you lack information to answer confidently, note it in your final answer
+- If multiple interpretations exist, address the most likely one and note \
+alternatives in the final answer
+- If a tool fails, try alternatives - explain in the final answer only when \
+finished
+- If you cannot complete the task, explain why in the final answer when \
+finished
+
+Avoid:
+- Making up information not supported by tool observations
+- Calling the same tool repeatedly with identical arguments
+- Ignoring errors or unexpected results
+- Writing user-facing text during intermediate steps (save it for \
+{answer_home})
+- Generating "preview" answers before you're done gathering information
+</reasoning>""")
+
+    # TONE & STYLE
+    tone_scope = (
+        "In your final answer (the plain-text reply with no tool calls):"
+        if native_mode
+        else 'In your answer (ONLY when next_node is "final_response"):'
+    )
+    tone_critical = (
+        "CRITICAL:\n"
+        "- During intermediate steps, emit ONLY tool calls. No commentary "
+        "text."
+        if native_mode
+        else "CRITICAL:\n"
+        "- During intermediate steps, produce ONLY the JSON action object. Do "
+        "not add commentary.\n"
+        '- Do not include a "thought" field in the JSON.'
+    )
+    prompt_sections.append(f"""<tone>
+{tone_scope}
+- Be direct and informative - get to the point
+- Use clear, professional language
+- Acknowledge limitations honestly rather than hedging excessively
+- Match the formality level to the query (technical queries get technical \
+answers)
+- Avoid unnecessary caveats, but do note important limitations
+- Don't apologize unless you've actually made an error
+- These are safe defaults. Your tone or voice can be changed in the \
+additional_guidance section.
+- You can use markdown formatting if suggested in additional_guidance.
+
+{tone_critical}
+</tone>""")
+
+    # ERROR HANDLING
+    gave_up_instruction = (
+        "Say so plainly in your final answer"
+        if native_mode
+        else "Set requires_followup: true in your finish args"
+    )
+    prompt_sections.append(f"""<error_handling>
+When things go wrong:
+
+Tool validation error: Fix your args to match the schema and retry
+Tool execution error: Note the error, try alternative tools or approaches
+No suitable tools: Explain what you cannot do and why
+Ambiguous query: Make reasonable assumptions and note them, or ask for \
+clarification
+Conflicting information: Acknowledge the conflict and explain your reasoning
+
+If you cannot complete the task after reasonable attempts:
+- {gave_up_instruction}
+- Explain what you tried and why it didn't work
+- Suggest what additional information or tools would help
+</error_handling>""")
+
+    # AVAILABLE TOOLS
+    no_tools_msg = (
+        "(No tools available - provide direct answers based on your knowledge)"
+    )
+    tools_section = f"""<available_tools>
+{rendered_tools if rendered_tools else no_tools_msg}
+</available_tools>"""
+    prompt_sections.append(tools_section)
+
+    # ADDITIONAL GUIDANCE (USER-PROVIDED)
+    _add_guidance_sections(
+        extra=extra,
+        planning_hints=planning_hints,
+        prompt_sections=prompt_sections,
+    )
+
+    return "\n\n".join(prompt_sections)
+
+
+def _add_output_format_section(
+    *,
+    native_mode: bool,
+    prompt_sections: list[str],
+    structured_final_schema: Mapping[str, Any] | None,
+) -> None:
+    """Append the output format rules."""
     if native_mode and structured_final_schema is not None:
-        # Structured finishing is the one case where text + a tool call belong in
-        # the same turn (answer streams as text, `final_response` carries the
-        # structured object), so the finish rule below differs from plain native.
+        # Structured finishing is the one case where text + a tool call belong
+        # in the same turn (answer streams as text, `final_response` carries
+        # the structured object), so the finish rule below differs from plain
+        # native.
         prompt_sections.append("""<output_format>
-You act through provider-native function calling: the tools in your catalog are declared
+You act through provider-native function calling: the tools in your catalog \
+are declared
 to you directly by the API.
 
-- To act, CALL one or more tools (native function calls). Do not describe tool calls in text.
+- To act, CALL one or more tools (native function calls). Do not describe \
+tool calls in text.
 - To run tools in parallel, emit MULTIPLE tool calls in a single turn.
-- For INTERMEDIATE steps, when you call tools emit ONLY the tool calls - NO accompanying
+- For INTERMEDIATE steps, when you call tools emit ONLY the tool calls - NO \
+accompanying
   text, no preamble, no narration.
-- When you have enough information, FINISH by writing your complete answer as PLAIN TEXT
-  AND calling the `final_response` tool in the same turn (see finishing). This is the only
+- When you have enough information, FINISH by writing your complete answer as \
+PLAIN TEXT
+  AND calling the `final_response` tool in the same turn (see finishing). \
+This is the only
   turn where plain text and a tool call go together.
-- Never emit a JSON action envelope (no next_node/args wrapper) - call tools natively instead.
+- Never emit a JSON action envelope (no next_node/args wrapper) - call tools \
+natively instead.
 </output_format>""")
     elif native_mode:
         prompt_sections.append("""<output_format>
-You act through provider-native function calling: the tools in your catalog are declared
+You act through provider-native function calling: the tools in your catalog \
+are declared
 to you directly by the API.
 
-- To act, CALL one or more tools (native function calls). Do not describe tool calls in text.
+- To act, CALL one or more tools (native function calls). Do not describe \
+tool calls in text.
 - To run tools in parallel, emit MULTIPLE tool calls in a single turn.
-- CRITICAL: when you call tools, emit ONLY the tool calls - NO accompanying text, no preamble,
+- CRITICAL: when you call tools, emit ONLY the tool calls - NO accompanying \
+text, no preamble,
   no narration. Plain text is reserved EXCLUSIVELY for your final answer.
-- When you have enough information, FINISH by replying with your complete answer as PLAIN TEXT
-  with NO tool calls. Plain text with no tool call IS the final answer shown to the user.
-- Never emit a JSON action envelope (no next_node/args wrapper) - call tools natively instead.
+- When you have enough information, FINISH by replying with your complete \
+answer as PLAIN TEXT
+  with NO tool calls. Plain text with no tool call IS the final answer shown \
+to the user.
+- Never emit a JSON action envelope (no next_node/args wrapper) - call tools \
+natively instead.
 </output_format>""")
     else:
         prompt_sections.append("""<output_format>
-Think briefly (internally), then respond with a single JSON object that matches the PlannerAction schema.
+Think briefly (internally), then respond with a single JSON object that \
+matches the PlannerAction schema.
 If a tool would help, set "next_node" to the tool name and provide "args".
 Write your JSON inside one markdown code block (```json ... ```).
 Do not emit multiple JSON objects or extra commentary after the code block.
 
 Important:
 - Emit keys in this order for stability: next_node, args.
-- User-facing answers go ONLY in args.answer when next_node is "final_response" (finished).
-- During intermediate steps (when calling tools), the user sees nothing; only tool outputs are recorded internally.
+- User-facing answers go ONLY in args.answer when next_node is \
+"final_response" (finished).
+- During intermediate steps (when calling tools), the user sees nothing; only \
+tool outputs are recorded internally.
 
 </output_format>""")
 
-    # ─────────────────────────────────────────────────────────────
-    # ACTION SCHEMA
-    # ─────────────────────────────────────────────────────────────
+
+def _add_action_schema_section(
+    *, native_mode: bool, prompt_sections: list[str]
+) -> None:
+    """Append the JSON action schema (prompted mode only)."""
     if not native_mode:
         prompt_sections.append("""<action_schema>
 Every response follows this structure:
 
 {
-  "next_node": "tool_name" | "parallel" | "task.subagent" | "task.tool" | "final_response",
+  "next_node": "tool_name" | "parallel" | "task.subagent" | "task.tool" | \
+"final_response",
   "args": { ... }
 }
 
 Field meanings:
 - next_node:
-  - Tool call: a tool name from the catalog. If a tool was returned by `tool_search` but is deferred/hidden,
+  - Tool call: a tool name from the catalog. If a tool was returned by \
+`tool_search` but is deferred/hidden,
     you may still call it by name; the runtime will activate it on first call.
   - Parallel: "parallel" (executes tools concurrently)
-  - Background tasks: "task.subagent" or "task.tool" (spawns a task; only use if task management is enabled)
+  - Background tasks: "task.subagent" or "task.tool" (spawns a task; only use \
+if task management is enabled)
   - Terminal: "final_response" (streams args.answer to the user)
 - args:
   - Tool call: tool arguments matching args_schema
-  - Parallel: {"steps": [{"node": "...", "args": {...}}, ...], "join": {...} | null}
+  - Parallel: {"steps": [{"node": "...", "args": {...}}, ...], "join": {...} \
+| null}
   - Task: see examples below
   - Final: {"answer": "..."} plus optional metadata fields
 
@@ -868,29 +1161,41 @@ Args schema for task actions:
 - group_sealed: true to seal the group (no more tasks can join)
 - retain_turn: true to wait for result (requires APPEND/REPLACE merge)
 
-Remember: The ONLY place for user-facing text is args.answer when next_node is "final_response".
+Remember: The ONLY place for user-facing text is args.answer when next_node \
+is "final_response".
 </action_schema>""")
 
-    # ─────────────────────────────────────────────────────────────
-    # FINISHING (CRITICAL)
-    # ─────────────────────────────────────────────────────────────
+
+def _add_finishing_section(
+    *,
+    native_mode: bool,
+    prompt_sections: list[str],
+    structured_final_schema: Mapping[str, Any] | None,
+) -> None:
+    """Append how to finish the run."""
     if native_mode and structured_final_schema is not None:
         prompt_sections.append("""<finishing>
-When you have gathered enough information to answer the query, FINISH in a SINGLE turn
+When you have gathered enough information to answer the query, FINISH in a \
+SINGLE turn
 by doing BOTH of these together:
 
-1. Write your complete, human-readable answer as plain text. This text streams to the
+1. Write your complete, human-readable answer as plain text. This text \
+streams to the
    user, so write the full response here - not a summary or fragment.
 2. In the SAME turn, call the `final_response` tool with the structured object
    (see structured_final_response below).
 
-This is the one and only time you emit plain text alongside a tool call. The plain
-text is the user-facing answer; the tool carries the machine-readable version. Do not
-put the answer only inside the tool, and do not call any other tool when finishing.
+This is the one and only time you emit plain text alongside a tool call. The \
+plain
+text is the user-facing answer; the tool carries the machine-readable \
+version. Do not
+put the answer only inside the tool, and do not call any other tool when \
+finishing.
 </finishing>""")
     elif native_mode:
         prompt_sections.append("""<finishing>
-When you have gathered enough information to answer the query, reply with your complete,
+When you have gathered enough information to answer the query, reply with \
+your complete,
 human-readable answer as plain text and make NO tool calls in that turn.
 
 - Write a full, helpful response - not a summary or fragment.
@@ -908,37 +1213,51 @@ When you have gathered enough information to answer the query:
   "answer": "Your complete, human-readable answer to the user's query"
 }
 
-The answer field is REQUIRED. Write a full, helpful response - not a summary or fragment.
-Focus on solving the user query, going to the point of answering what they asked.
+The answer field is REQUIRED. Write a full, helpful response - not a summary \
+or fragment.
+Focus on solving the user query, going to the point of answering what they \
+asked.
 
 Optional fields you may include in args:
 - "confidence": 0.0 to 1.0 (your confidence in the answer's correctness)
-- "route": category string like "knowledge_base", "calculation", "generation", "clarification"
+- "route": category string like "knowledge_base", "calculation", \
+"generation", "clarification"
 - "requires_followup": true if you need clarification from the user
-- "warnings": ["string", ...] for any caveats, limitations, or data quality concerns
+- "warnings": ["string", ...] for any caveats, limitations, or data quality \
+concerns
 
-Do NOT include heavy data (charts, files, large JSON) in args - artifacts from tool outputs are collected automatically.
+Do NOT include heavy data (charts, files, large JSON) in args - artifacts \
+from tool outputs are collected automatically.
 
 Example finish:
 {
   "next_node": "final_response",
   "args": {
-    "answer": "Q4 2024 revenue increased 15% YoY to $1.2M. December was strongest.",
+    "answer": "Q4 2024 revenue increased 15% YoY to $1.2M. December was \
+strongest.",
     "confidence": 0.92,
     "route": "analytics"
   }
 }
 </finishing>""")
 
-    # ─────────────────────────────────────────────────────────────
-    # STRUCTURED FINAL RESPONSE (opt-in via final_response_model)
-    # ─────────────────────────────────────────────────────────────
+
+def _add_structured_final_section(
+    *,
+    native_mode: bool,
+    prompt_sections: list[str],
+    structured_final_schema: Mapping[str, Any] | None,
+) -> None:
+    """Append the structured final response contract, when configured."""
     if structured_final_schema is not None and native_mode:
         schema_text = json.dumps(structured_final_schema, ensure_ascii=False)
         prompt_sections.append(f"""<structured_final_response>
-To finish, write your human-readable answer as plain text AND call the `final_response`
-tool in the same turn. The tool's "structured" argument must be a JSON object that
-validates against this JSON schema EXACTLY (all required fields, correct types, no extra
+To finish, write your human-readable answer as plain text AND call the \
+`final_response`
+tool in the same turn. The tool's "structured" argument must be a JSON object \
+that
+validates against this JSON schema EXACTLY (all required fields, correct \
+types, no extra
 keys unless the schema allows them):
 
 {schema_text}
@@ -953,15 +1272,19 @@ Rules:
     elif structured_final_schema is not None and not native_mode:
         schema_text = json.dumps(structured_final_schema, ensure_ascii=False)
         prompt_sections.append(f"""<structured_final_response>
-When finishing (next_node "final_response"), args MUST ALSO include a "structured" object that
-validates against this JSON schema EXACTLY (all required fields, correct types, no extra keys
+When finishing (next_node "final_response"), args MUST ALSO include a \
+"structured" object that
+validates against this JSON schema EXACTLY (all required fields, correct \
+types, no extra keys
 unless the schema allows them):
 
 {schema_text}
 
 Rules:
-- Emit "answer" FIRST inside args, then "structured" (the answer streams to the user).
-- "answer" remains the human-readable text; "structured" is the machine-readable version.
+- Emit "answer" FIRST inside args, then "structured" (the answer streams to \
+the user).
+- "answer" remains the human-readable text; "structured" is the \
+machine-readable version.
 - Do not wrap "structured" in markdown or strings - it is a plain JSON object.
 
 Example finish shape:
@@ -974,31 +1297,19 @@ Example finish shape:
 }}
 </structured_final_response>""")
 
-    # ─────────────────────────────────────────────────────────────
-    # TOOL USAGE
-    # ─────────────────────────────────────────────────────────────
-    prompt_sections.append("""<tool_usage>
-Rules for using tools:
 
-1. Only use tools listed in the catalog below - never invent tool names
-2. Match your args to the tool's args_schema exactly
-3. Consider side_effects before calling:
-   - "pure": Safe to call multiple times, no external changes
-   - "read": Reads external data but doesn't modify anything
-   - "write": Modifies external state - use carefully
-   - "external": Calls external services - may have rate limits or costs
-4. Use the tool's description to understand when it's appropriate
-5. If a tool fails, consider alternative approaches before giving up
-</tool_usage>""")
-
-    # ─────────────────────────────────────────────────────────────
-    # PARALLEL EXECUTION
-    # ─────────────────────────────────────────────────────────────
+def _add_parallel_section(
+    *, native_mode: bool, prompt_sections: list[str]
+) -> None:
+    """Append how to run tools in parallel."""
     if native_mode:
         prompt_sections.append("""<parallel_execution>
-To run independent tools concurrently, emit multiple native tool calls in ONE turn.
-Use this when multiple independent data sources or queries are needed and ordering
-does not matter. Do not emit dependent calls in the same turn - wait for results.
+To run independent tools concurrently, emit multiple native tool calls in ONE \
+turn.
+Use this when multiple independent data sources or queries are needed and \
+ordering
+does not matter. Do not emit dependent calls in the same turn - wait for \
+results.
 </parallel_execution>""")
     else:
         prompt_sections.append("""<parallel_execution>
@@ -1030,112 +1341,28 @@ Available injection sources for args.join.inject:
 Use parallel execution when:
 - Multiple independent data sources need to be queried
 - Multiple independent queries can be made to the same source in parallel
-- Breakdown of multiples independent queries is more efficient than sequential calls
-- A single query seems too difficult to answer directly and several simpler queries can help
+- Breakdown of multiples independent queries is more efficient than \
+sequential calls
+- A single query seems too difficult to answer directly and several simpler \
+queries can help
 - Tasks can be decomposed into non-dependent subtasks
 - Speed matters and tools don't have ordering dependencies
 </parallel_execution>""")
 
-    # ─────────────────────────────────────────────────────────────
-    # REASONING GUIDANCE
-    # ─────────────────────────────────────────────────────────────
-    answer_home = "your final plain-text reply" if native_mode else "args.answer"
-    prompt_sections.append(f"""<reasoning>
-Approach problems systematically:
 
-1. Understand first: Parse the query to identify what's actually being asked
-2. Plan before acting: Consider which tools will help and in what order
-3. Gather evidence: Use tools to collect relevant information
-4. Synthesize: Combine observations into a coherent answer ({answer_home} when done)
-5. Verify: Check if your answer actually addresses the query
-
-When uncertain:
-- If you lack information to answer confidently, note it in your final answer
-- If multiple interpretations exist, address the most likely one and note alternatives in the final answer
-- If a tool fails, try alternatives - explain in the final answer only when finished
-- If you cannot complete the task, explain why in the final answer when finished
-
-Avoid:
-- Making up information not supported by tool observations
-- Calling the same tool repeatedly with identical arguments
-- Ignoring errors or unexpected results
-- Writing user-facing text during intermediate steps (save it for {answer_home})
-- Generating "preview" answers before you're done gathering information
-</reasoning>""")
-
-    # ─────────────────────────────────────────────────────────────
-    # TONE & STYLE
-    # ─────────────────────────────────────────────────────────────
-    tone_scope = (
-        "In your final answer (the plain-text reply with no tool calls):"
-        if native_mode
-        else 'In your answer (ONLY when next_node is "final_response"):'
-    )
-    tone_critical = (
-        "CRITICAL:\n"
-        "- During intermediate steps, emit ONLY tool calls. No commentary text."
-        if native_mode
-        else "CRITICAL:\n"
-        '- During intermediate steps, produce ONLY the JSON action object. Do not add commentary.\n'
-        '- Do not include a "thought" field in the JSON.'
-    )
-    prompt_sections.append(f"""<tone>
-{tone_scope}
-- Be direct and informative - get to the point
-- Use clear, professional language
-- Acknowledge limitations honestly rather than hedging excessively
-- Match the formality level to the query (technical queries get technical answers)
-- Avoid unnecessary caveats, but do note important limitations
-- Don't apologize unless you've actually made an error
-- These are safe defaults. Your tone or voice can be changed in the additional_guidance section.
-- You can use markdown formatting if suggested in additional_guidance.
-
-{tone_critical}
-</tone>""")
-
-    # ─────────────────────────────────────────────────────────────
-    # ERROR HANDLING
-    # ─────────────────────────────────────────────────────────────
-    gave_up_instruction = (
-        "Say so plainly in your final answer"
-        if native_mode
-        else "Set requires_followup: true in your finish args"
-    )
-    prompt_sections.append(f"""<error_handling>
-When things go wrong:
-
-Tool validation error: Fix your args to match the schema and retry
-Tool execution error: Note the error, try alternative tools or approaches
-No suitable tools: Explain what you cannot do and why
-Ambiguous query: Make reasonable assumptions and note them, or ask for clarification
-Conflicting information: Acknowledge the conflict and explain your reasoning
-
-If you cannot complete the task after reasonable attempts:
-- {gave_up_instruction}
-- Explain what you tried and why it didn't work
-- Suggest what additional information or tools would help
-</error_handling>""")
-
-    # ─────────────────────────────────────────────────────────────
-    # AVAILABLE TOOLS
-    # ─────────────────────────────────────────────────────────────
-    no_tools_msg = "(No tools available - provide direct answers based on your knowledge)"
-    tools_section = f"""<available_tools>
-{rendered_tools if rendered_tools else no_tools_msg}
-</available_tools>"""
-    prompt_sections.append(tools_section)
-
-    # ─────────────────────────────────────────────────────────────
-    # ADDITIONAL GUIDANCE (USER-PROVIDED)
-    # ─────────────────────────────────────────────────────────────
+def _add_guidance_sections(
+    *,
+    extra: str | None,
+    planning_hints: Mapping[str, Any] | None,
+    prompt_sections: list[str],
+) -> None:
+    """Append the user-provided guidance and the planning constraints."""
     if extra:
         prompt_sections.append(f"""<additional_guidance>
 {extra}
 </additional_guidance>""")
 
-    # ─────────────────────────────────────────────────────────────
     # PLANNING HINTS
-    # ─────────────────────────────────────────────────────────────
     if planning_hints:
         rendered_hints = render_planning_hints(planning_hints)
         if rendered_hints:
@@ -1143,26 +1370,28 @@ If you cannot complete the task after reasonable attempts:
 {rendered_hints}
 </planning_constraints>""")
 
-    return "\n\n".join(prompt_sections)
 
-
-def build_user_prompt(query: str, llm_context: Mapping[str, Any] | None = None) -> str:
+def build_user_prompt(
+    query: str, llm_context: Mapping[str, Any] | None = None
+) -> str:
     """Build user prompt with query and optional LLM context.
 
-    This is the baseline mechanism for injecting memories and other context into
-    the planner. The structure/format is developer-defined; use system_prompt_extra
-    to document interpretation semantics if needed.
+    This is the baseline mechanism for injecting memories and other context
+    into the planner. The structure/format is developer-defined; use
+    system_prompt_extra to document interpretation semantics if needed.
 
     Args:
         query: The user's question or request
         llm_context: Optional context visible to LLM. Can contain memories,
                     status_history, knowledge bases, or any custom structure.
-                    Should NOT include internal metadata like tenant_id or trace_id.
+                    Should NOT include internal metadata like tenant_id or
+                    trace_id.
 
-                    Examples:
+    Examples:
                     - {"memories": {"user_pref_lang": "python"}}
                     - {"knowledge": "User prefers concise answers."}
-                    - {"previous_failures": ["tool_a timed out", "tool_b invalid args"]}
+                    - {"previous_failures": ["tool_a timed out", "tool_b
+                      invalid args"]}
 
     Returns:
         JSON string with query and context
@@ -1177,10 +1406,11 @@ def build_user_prompt(query: str, llm_context: Mapping[str, Any] | None = None) 
 
 def render_observation(
     *,
-    observation: Any | None,
+    observation: object | None,
     error: str | None,
     failure: Mapping[str, Any] | None = None,
 ) -> str:
+    """Render a tool observation (or its error) for the LLM."""
     payload: dict[str, Any] = {}
     if observation is not None:
         payload["observation"] = observation
@@ -1194,6 +1424,7 @@ def render_observation(
 
 
 def render_hop_budget_violation(limit: int) -> str:
+    """Explain that the hop budget is exhausted."""
     return (
         "Hop budget exhausted; you have used all available tool calls. "
         "Finish with the best answer so far or reply with no_path."
@@ -1202,14 +1433,23 @@ def render_hop_budget_violation(limit: int) -> str:
 
 
 def render_deadline_exhausted() -> str:
-    return "Deadline reached. Provide the best available conclusion or return no_path."
+    """Explain that the deadline was reached."""
+    return (
+        "Deadline reached. Provide the best available conclusion or "
+        "return no_path."
+    )
 
 
 def render_validation_error(node_name: str, error: str) -> str:
-    return f"args for tool '{node_name}' did not validate: {error}. Return corrected JSON."
+    """Explain that a tool's arguments did not validate."""
+    return (
+        f"args for tool '{node_name}' did not validate: {error}. Return "
+        "corrected JSON."
+    )
 
 
 def render_output_validation_error(node_name: str, error: str) -> str:
+    """Explain that a tool's output did not validate."""
     return (
         f"tool '{node_name}' returned data that did not validate: {error}. "
         "Ensure the tool output matches the declared schema."
@@ -1217,27 +1457,47 @@ def render_output_validation_error(node_name: str, error: str) -> str:
 
 
 def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
+    """Explain that the tool is unknown, listing the available ones."""
     options = ", ".join(sorted(available))
-    return f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
+    return (
+        f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
+    )
 
 
-def render_invalid_join_injection_source(source: str, available: Sequence[str]) -> str:
+def render_invalid_join_injection_source(
+    source: str, available: Sequence[str]
+) -> str:
+    """Explain that a join injection source is unknown."""
     options = ", ".join(available)
-    return f"args.join.inject uses unknown source '{source}'. Choose one of: {options}."
+    return (
+        f"args.join.inject uses unknown source '{source}'. Choose one of: "
+        f"{options}."
+    )
 
 
-def render_join_validation_error(node_name: str, error: str, *, suggest_inject: bool) -> str:
-    message = f"args for join tool '{node_name}' did not validate: {error}. Return corrected JSON."
+def render_join_validation_error(
+    node_name: str, error: str, *, suggest_inject: bool
+) -> str:
+    """Explain that the join tool's arguments did not validate."""
+    message = (
+        f"args for join tool '{node_name}' did not validate: {error}. "
+        "Return corrected JSON."
+    )
     if suggest_inject:
-        message += " Provide 'args.join.inject' to map parallel outputs to this join tool."
+        message += (
+            " Provide 'args.join.inject' to map parallel outputs to this "
+            "join tool."
+        )
     return message
 
 
 def render_repair_message(error: str) -> str:
+    """Ask for corrected JSON after an invalid response."""
     return (
         "Previous response was invalid JSON or schema mismatch: "
         f"{error}. Reply with corrected JSON only. "
-        'When finishing, set next_node to "final_response" and include args.answer.'
+        'When finishing, set next_node to "final_response" and include '
+        "args.answer."
     )
 
 
@@ -1247,20 +1507,29 @@ def render_structured_repair_prompt(
     error: str,
     answer: str | None,
 ) -> str:
-    """Corrective turn for a final response whose structured payload failed validation."""
+    """Ask again for a final structured payload that failed validation."""
     schema_text = json.dumps(schema, ensure_ascii=False)
-    answer_section = f"\nYour answer text was:\n{answer[:2000]}\n" if answer else ""
+    answer_section = (
+        f"\nYour answer text was:\n{answer[:2000]}\n" if answer else ""
+    )
     return (
-        "STRUCTURED OUTPUT INVALID: your final response's \"structured\" payload "
-        f"did not validate against the required schema.\n\nValidation error:\n{error}\n"
+        'STRUCTURED OUTPUT INVALID: your final response\'s "structured" '
+        "payload "
+        f"did not validate against the required schema.\n\nValidation "
+        f"error:\n{error}\n"
         f"{answer_section}\n"
         f"Required JSON schema:\n{schema_text}\n\n"
-        "Reply with ONLY a single JSON object that validates against the schema above "
-        "(no wrapper, no markdown, no commentary). It must be consistent with your answer."
+        "Reply with ONLY a single JSON object that validates against the "
+        "schema above "
+        "(no wrapper, no markdown, no commentary). It must be consistent "
+        "with your answer."
     )
 
 
-def render_arg_repair_message(tool_name: str, error: str, *, tool_call_mode: str = "prompted") -> str:
+def render_arg_repair_message(
+    tool_name: str, error: str, *, tool_call_mode: str = "prompted"
+) -> str:
+    """Ask the model to fix a tool call's arguments or finish."""
     if tool_call_mode == "native":
         return (
             f"CRITICAL: Your tool call to '{tool_name}' failed validation.\n\n"
@@ -1268,10 +1537,13 @@ def render_arg_repair_message(tool_name: str, error: str, *, tool_call_mode: str
             "You MUST do ONE of the following:\n\n"
             f"OPTION 1 - Call '{tool_name}' again with corrected args:\n"
             "- Provide ALL required arguments with REAL values\n"
-            "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
-            "- Match the exact schema types (strings, numbers, booleans, arrays)\n\n"
+            "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or "
+            "empty strings\n"
+            "- Match the exact schema types (strings, numbers, booleans, "
+            "arrays)\n\n"
             "OPTION 2 - If you cannot provide valid args, FINISH instead:\n"
-            "- Reply with plain text explaining why you cannot proceed (no tool calls)."
+            "- Reply with plain text explaining why you cannot proceed (no "
+            "tool calls)."
         )
     return (
         f"CRITICAL: Your tool call to '{tool_name}' failed validation.\n\n"
@@ -1279,11 +1551,14 @@ def render_arg_repair_message(tool_name: str, error: str, *, tool_call_mode: str
         "You MUST do ONE of the following:\n\n"
         f"OPTION 1 - Fix the args and retry '{tool_name}':\n"
         "- Provide ALL required arguments with REAL values\n"
-        "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
-        "- Match the exact schema types (strings, numbers, booleans, arrays)\n\n"
+        "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or empty "
+        "strings\n"
+        "- Match the exact schema types (strings, numbers, booleans, "
+        "arrays)\n\n"
         "OPTION 2 - If you cannot provide valid args, FINISH instead:\n"
         '- Set "next_node": "final_response"\n'
-        '- Set "args": {"answer": "I cannot proceed because...", "requires_followup": true}\n\n'
+        '- Set "args": {"answer": "I cannot proceed because...", '
+        '"requires_followup": true}\n\n'
         "Respond with a single JSON object. No prose or markdown."
     )
 
@@ -1294,7 +1569,7 @@ def render_missing_args_message(
     *,
     user_query: str | None = None,
 ) -> str:
-    """Strict message when model forgot to provide required args (we autofilled them)."""
+    """Strict message for the required args the model forgot to provide."""
     fields_str = ", ".join(f"'{f}'" for f in missing_fields)
     example_args: dict[str, Any] = {}
     if user_query:
@@ -1303,7 +1578,9 @@ def render_missing_args_message(
                 example_args[field] = user_query
     example_payload = {
         "next_node": tool_name,
-        "args": example_args if example_args else {missing_fields[0]: "<FILL_VALUE>"},
+        "args": example_args
+        if example_args
+        else {missing_fields[0]: "<FILL_VALUE>"},
     }
     example_json = json.dumps(example_payload, ensure_ascii=False)
     user_query_line = f"USER QUESTION: {user_query}\n\n" if user_query else ""
@@ -1313,16 +1590,53 @@ def render_missing_args_message(
         f"MISSING FIELDS: {fields_str}\n\n"
         f"{user_query_line}"
         "You MUST do exactly ONE of the following:\n\n"
-        f"1) Retry '{tool_name}' with ALL missing fields filled using REAL values.\n"
+        f"1) Retry '{tool_name}' with ALL missing fields filled using REAL "
+        f"values.\n"
         "   - Do NOT leave fields empty.\n"
         "   - Do NOT use placeholders like '<auto>', 'unknown', or ''.\n\n"
         "Example (replace values as needed):\n"
         f"{example_json}\n\n"
         "2) If you cannot supply valid values, FINISH instead with:\n"
-        '   {"next_node": "final_response", "args": {"answer": "I need more information: ...", '
+        '   {"next_node": "final_response", "args": {"answer": "I need more '
+        'information: ...", '
         '"requires_followup": true}}\n\n'
         "This is your LAST chance. Missing args again will force termination."
     )
+
+
+def _first_quoted_option(pattern: str, desc: str) -> str | None:
+    """Return the first quoted value of the list ``pattern`` finds."""
+    match = re.search(pattern, desc)
+    if not match:
+        return None
+    # Handle both 'single' and "double" quoted strings
+    options = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1))
+    return options[0] if options else None
+
+
+def _example_value(field: str, desc: str, user_query: str | None) -> str:
+    """Pick an example value for a missing field from its hints."""
+    example_value = None
+    # Check for "Valid options: ['opt1', 'opt2']" pattern
+    if "Valid options:" in desc:
+        example_value = _first_quoted_option(
+            r"Valid options:\s*\[([^\]]+)\]", desc
+        )
+    # Check for "Examples: [...]" pattern
+    if example_value is None and "Examples:" in desc:
+        example_value = _first_quoted_option(r"Examples:\s*\[([^\]]+)\]", desc)
+    if example_value is not None:
+        return example_value
+    # Smart defaults based on common field names
+    if user_query and field in {
+        "query",
+        "question",
+        "prompt",
+        "input",
+        "search_query",
+    }:
+        return user_query
+    return "your value here"
 
 
 def render_arg_fill_prompt(
@@ -1331,27 +1645,20 @@ def render_arg_fill_prompt(
     field_descriptions: dict[str, str] | None = None,
     user_query: str | None = None,
 ) -> str:
-    """
-    Generate a minimal prompt asking only for missing arg values.
+    """Generate a minimal prompt asking only for missing arg values.
 
-    This is a simplified format designed for small models that struggle
-    with full JSON schema compliance but can fill individual values.
+    This is a simplified format designed for small models that struggle with
+    full JSON schema compliance but can fill individual values.
 
-    Parameters
-    ----------
-    tool_name : str
-        Name of the tool being called.
-    missing_fields : list[str]
-        List of field names that need values.
-    field_descriptions : dict[str, str] | None
-        Optional mapping of field names to descriptions (may include enum values,
-        examples, and constraints from the enhanced extraction).
-    user_query : str | None
-        Original user query for context.
+    Args:
+        tool_name: Name of the tool being called.
+        missing_fields: Names of the fields that need values.
+        field_descriptions: Optional mapping of field names to descriptions
+            (may include enum values, examples, and constraints from the
+            enhanced extraction).
+        user_query: Original user query for context.
 
-    Returns
-    -------
-    str
+    Returns:
         A minimal prompt asking for the missing values.
     """
     field_descriptions = field_descriptions or {}
@@ -1368,49 +1675,28 @@ def render_arg_fill_prompt(
     fields_block = "\n".join(field_lines)
 
     # Build example response - try to use real values from hints
-    example_values: dict[str, str] = {}
-    for field in missing_fields:
-        desc = field_descriptions.get(field, "")
-
-        # Try to extract a valid example from the description hints
-        example_value = None
-
-        # Check for "Valid options: ['opt1', 'opt2']" pattern
-        if "Valid options:" in desc:
-            match = re.search(r"Valid options:\s*\[([^\]]+)\]", desc)
-            if match:
-                # Parse the options and use the first one
-                options_str = match.group(1)
-                # Handle both 'single' and "double" quoted strings
-                options = re.findall(r"['\"]([^'\"]+)['\"]", options_str)
-                if options:
-                    example_value = options[0]
-
-        # Check for "Examples: [...]" pattern
-        if example_value is None and "Examples:" in desc:
-            match = re.search(r"Examples:\s*\[([^\]]+)\]", desc)
-            if match:
-                examples = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1))
-                if examples:
-                    example_value = examples[0]
-
-        # Smart defaults based on common field names
-        if example_value is None:
-            if field in {"query", "question", "prompt", "input", "search_query"}:
-                example_value = user_query if user_query else "your value here"
-            else:
-                example_value = "your value here"
-
-        example_values[field] = example_value
-
+    example_values = {
+        field: _example_value(
+            field, field_descriptions.get(field, ""), user_query
+        )
+        for field in missing_fields
+    }
     example_json = json.dumps(example_values, ensure_ascii=False, indent=2)
 
     user_context = f'\nUser\'s request: "{user_query}"\n' if user_query else ""
 
     # Check if any field has valid options - add emphasis
-    has_constrained_fields = any("Valid options:" in field_descriptions.get(f, "") for f in missing_fields)
+    has_constrained_fields = any(
+        "Valid options:" in field_descriptions.get(f, "")
+        for f in missing_fields
+    )
     constraint_note = (
-        "- For fields with 'Valid options', you MUST use one of the listed values\n" if has_constrained_fields else ""
+        (
+            "- For fields with 'Valid options', you MUST use one of the "
+            "listed values\n"
+        )
+        if has_constrained_fields
+        else ""
     )
 
     return (
@@ -1422,7 +1708,8 @@ def render_arg_fill_prompt(
         f"{example_json}\n\n"
         "Rules:\n"
         f"{constraint_note}"
-        "- Provide REAL values only (no placeholders like '<auto>' or 'unknown')\n"
+        "- Provide REAL values only (no placeholders like '<auto>' or "
+        "'unknown')\n"
         "- Include ONLY the fields listed above\n"
         "- Reply with valid JSON only, no explanation"
     )
@@ -1433,15 +1720,12 @@ def render_finish_repair_prompt(
     user_query: str | None = None,
     voice_context: str | None = None,
 ) -> str:
-    """
-    Generate a prompt asking the model to provide the answer it forgot.
+    """Generate a prompt asking the model to provide the answer it forgot.
 
-    This is used when the model tries to finish (next_node="final_response") but doesn't
-    include args.answer.
+    This is used when the model tries to finish (next_node="final_response")
+    but doesn't include args.answer.
 
-    Parameters
-    ----------
-    thought : str | None
+    Parameters ---------- thought : str | None
         The model's thought from the finish action.
     user_query : str | None
         The original user query.
@@ -1468,7 +1752,8 @@ def render_finish_repair_prompt(
         )
 
     return (
-        'FINISH INCOMPLETE: You set next_node to "final_response" but did not provide args.answer.\n\n'
+        'FINISH INCOMPLETE: You set next_node to "final_response" but did '
+        "not provide args.answer.\n\n"
         f"{context}\n"
         f"{voice_section}\n"
         "You MUST provide your answer. Reply with ONLY a JSON object:\n"
@@ -1482,25 +1767,19 @@ def render_finish_repair_prompt(
 
 
 def render_finish_guidance(repair_count: int) -> str | None:
-    """
-    Generate tiered guidance about including args.answer based on past repair count.
+    """Generate tiered guidance about including args.answer.
 
-    This is injected into the system prompt when the model has previously forgotten
-    to include args.answer and required finish_repair. The tone escalates with the count.
+    This is injected into the system prompt when the model has previously
+    forgotten to include args.answer and required finish_repair. The tone
+    escalates with the count.
 
-    Parameters
-    ----------
-    repair_count : int
-        Number of times finish_repair has been used in previous turns.
-        0 = no guidance needed
-        1 = gentle reminder
-        2 = firm reminder
-        3+ = emphatic warning
+    Args:
+        repair_count: Number of times finish_repair has been used in
+            previous turns: 0 needs no guidance, 1 gets a gentle reminder, 2
+            a firm reminder and 3+ an emphatic warning.
 
-    Returns
-    -------
-    str | None
-        Guidance text to merge into system prompt, or None if no guidance needed.
+    Returns:
+        Guidance text to merge into the system prompt, or None if not needed.
     """
     if repair_count <= 0:
         return None
@@ -1508,7 +1787,8 @@ def render_finish_guidance(repair_count: int) -> str | None:
     if repair_count == 1:
         return (
             "<finish_reminder>\n"
-            'REMINDER: When finishing (next_node: "final_response"), always include your complete answer '
+            'REMINDER: When finishing (next_node: "final_response"), always '
+            "include your complete answer "
             "in args.answer. Do not leave args empty or use placeholders.\n"
             "</finish_reminder>"
         )
@@ -1516,20 +1796,26 @@ def render_finish_guidance(repair_count: int) -> str | None:
     if repair_count == 2:
         return (
             "<finish_warning>\n"
-            "IMPORTANT: You have previously forgotten to include args.answer when finishing.\n"
+            "IMPORTANT: You have previously forgotten to include args.answer "
+            "when finishing.\n"
             'When you set next_node to "final_response", you MUST provide:\n'
-            '{"next_node": "final_response", "args": {"answer": "Your complete answer here"}}\n'
+            '{"next_node": "final_response", "args": {"answer": "Your '
+            'complete answer here"}}\n'
             "Do NOT leave args empty. Do NOT use placeholders like <auto>.\n"
             "</finish_warning>"
         )
 
-    # repair_count >= 3
+    # Three or more repairs: critical guidance.
     return (
         "<finish_critical>\n"
-        "CRITICAL: You have repeatedly failed to include args.answer when finishing.\n"
-        "This is causing performance issues. You MUST follow this exact pattern:\n\n"
-        'When next_node is "final_response" (finishing), args MUST contain answer:\n'
-        '{"next_node": "final_response", "args": {"answer": "Your full answer"}}\n\n'
+        "CRITICAL: You have repeatedly failed to include args.answer when "
+        "finishing.\n"
+        "This is causing performance issues. You MUST follow this exact "
+        "pattern:\n\n"
+        'When next_node is "final_response" (finishing), args MUST contain '
+        "answer:\n"
+        '{"next_node": "final_response", "args": {"answer": "Your full '
+        'answer"}}\n\n'
         "NEVER:\n"
         "- Leave args as null or empty {}\n"
         "- Use placeholder values like <auto>, unknown, or <fill_value>\n"
@@ -1540,72 +1826,75 @@ def render_finish_guidance(repair_count: int) -> str | None:
 
 
 def render_arg_fill_guidance(repair_count: int) -> str | None:
-    """
-    Generate tiered guidance about proper tool argument usage.
+    """Generate tiered guidance about proper tool argument usage.
 
     This is injected into the system prompt when the model has repeatedly
     failed to provide valid tool arguments (using placeholders like <auto>).
 
-    Parameters
-    ----------
-    repair_count : int
-        Number of times arg-fill repair has been used in previous turns.
-        0 = no guidance needed
-        1 = gentle reminder
-        2 = firm reminder
-        3+ = emphatic warning
+    Args:
+        repair_count: Number of times arg-fill repair has been used in
+            previous turns: 0 needs no guidance, 1 gets a gentle reminder, 2
+            a firm reminder and 3+ an emphatic warning.
 
-    Returns
-    -------
-    str | None
-        Guidance text to merge into system prompt, or None if no guidance needed.
+    Returns:
+        Guidance text to merge into the system prompt, or None if not needed.
     """
     if repair_count <= 0:
         return None
 
     if repair_count == 1:
         return (
-            "<arg_reminder>\n"
-            "REMINDER: When calling tools, provide ALL required arguments with real values.\n"
-            "Do not use placeholders like '<auto>', 'unknown', or leave fields empty.\n"
-            "If a field has valid options listed, you MUST use one of those exact values.\n"
-            "</arg_reminder>"
+            "<arg_reminder>\nREMINDER: When calling tools, provide ALL "
+            "required arguments "
+            "with real values.\nDo not use placeholders like '<auto>', "
+            "'unknown', or leave "
+            "fields empty.\nIf a field has valid options listed, you MUST "
+            "use one of those "
+            "exact values.\n</arg_reminder>"
         )
 
     if repair_count == 2:
         return (
             "<arg_warning>\n"
-            "IMPORTANT: You have previously failed to provide valid tool arguments.\n"
+            "IMPORTANT: You have previously failed to provide valid tool "
+            "arguments.\n"
             "When calling a tool, you MUST:\n"
             "1. Provide REAL values for ALL required fields\n"
-            "2. Use EXACTLY one of the valid options when listed (check field descriptions)\n"
-            "3. NEVER use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
+            "2. Use EXACTLY one of the valid options when listed (check field "
+            "descriptions)\n"
+            "3. NEVER use placeholders like '<auto>', 'unknown', 'n/a', or "
+            "empty strings\n"
             "4. If you don't know a valid value, FINISH instead of guessing\n"
             "</arg_warning>"
         )
 
-    # repair_count >= 3
+    # Three or more repairs: critical guidance.
     return (
         "<arg_critical>\n"
-        "CRITICAL: You have repeatedly failed to provide valid tool arguments.\n"
+        "CRITICAL: You have repeatedly failed to provide valid tool "
+        "arguments.\n"
         "This is causing performance issues. STOP using placeholders.\n\n"
         "RULES:\n"
-        "- Check the tool's field descriptions for 'Valid options:' - you MUST use one of those\n"
+        "- Check the tool's field descriptions for 'Valid options:' - you "
+        "MUST use one of those\n"
         "- Do NOT invent values - use only what's documented\n"
-        '- If unsure, FINISH with next_node: "final_response" instead of calling the tool\n'
-        "- Every field must have a real, valid value - no '<auto>', 'unknown', or empty\n\n"
-        "If you cannot provide valid arguments, explain to the user what information you need.\n"
+        '- If unsure, FINISH with next_node: "final_response" instead of '
+        "calling the tool\n"
+        "- Every field must have a real, valid value - no '<auto>', "
+        "'unknown', or empty\n\n"
+        "If you cannot provide valid arguments, explain to the user what "
+        "information you need.\n"
         "</arg_critical>"
     )
 
 
 def render_multi_action_guidance(multi_count: int) -> str | None:
-    """
-    Generate tiered guidance about emitting exactly one action JSON object.
+    """Generate tiered guidance about emitting exactly one action JSON object.
 
     This is injected into the system prompt when the model has emitted multiple
-    JSON objects in a single response (e.g. tool call + another tool call + final_response),
-    which can cause the planner to ignore extra actions unless using next_node="parallel".
+    JSON objects in a single response (e.g. tool call + another tool call +
+    final_response), which can cause the planner to ignore extra actions unless
+    using next_node="parallel".
     """
     if multi_count <= 0:
         return None
@@ -1614,7 +1903,8 @@ def render_multi_action_guidance(multi_count: int) -> str | None:
         return (
             "<multi_action_reminder>\n"
             "REMINDER: Output exactly ONE JSON object per assistant message.\n"
-            'If you need multiple tool calls, use next_node="parallel" with args.steps.\n'
+            'If you need multiple tool calls, use next_node="parallel" with '
+            "args.steps.\n"
             "Do not output multiple JSON objects sequentially.\n"
             "</multi_action_reminder>"
         )
@@ -1622,60 +1912,79 @@ def render_multi_action_guidance(multi_count: int) -> str | None:
     if multi_count == 2:
         return (
             "<multi_action_warning>\n"
-            "IMPORTANT: You have emitted multiple JSON objects in a single response.\n"
+            "IMPORTANT: You have emitted multiple JSON objects in a single "
+            "response.\n"
             "You MUST output exactly ONE JSON object.\n"
             "If you need multiple tool calls, use:\n"
-            '{"next_node": "parallel", "args": {"steps": [{"node": "tool_a", "args": {...}}]}}\n'
+            '{"next_node": "parallel", "args": {"steps": [{"node": "tool_a", '
+            '"args": {...}}]}}\n'
             "Do NOT emit multiple JSON objects one after another.\n"
             "</multi_action_warning>"
         )
 
     return (
         "<multi_action_critical>\n"
-        "CRITICAL: You repeatedly emitted multiple JSON objects in one response.\n"
+        "CRITICAL: You repeatedly emitted multiple JSON objects in one "
+        "response.\n"
         "This breaks tool execution reliability.\n\n"
         "RULES:\n"
         "- Output exactly ONE JSON object per message.\n"
-        '- For multiple tool calls, use next_node="parallel" (args.steps + optional join).\n'
-        "- Do NOT include extra commentary, code fences, or additional JSON objects.\n"
+        '- For multiple tool calls, use next_node="parallel" (args.steps + '
+        "optional join).\n"
+        "- Do NOT include extra commentary, code fences, or additional JSON "
+        "objects.\n"
         "</multi_action_critical>"
     )
 
 
 def render_render_component_guidance(failure_count: int) -> str | None:
+    """Return tiered guidance after failed rich-output renders, if any."""
     if failure_count <= 0:
         return None
     if failure_count == 1:
         return (
-            "<render_component_reminder>\n"
-            "REMINDER: rich-output build/render tools must produce props that match the target component schema.\n"
-            "If unsure, call `describe_component(name=...)` first, then retry with the wrapper tool "
-            "or `render_component`. For complex composite outputs, prefer building children separately.\n"
-            "</render_component_reminder>"
+            "<render_component_reminder>\nREMINDER: rich-output build/render "
+            "tools must produce props that "
+            "match the target component schema.\nIf unsure, call "
+            "`describe_component(name=...)` first, then retry "
+            "with the wrapper tool or `render_component`. For complex "
+            "composite outputs, "
+            "prefer "
+            "building children separately.\n</render_component_reminder>"
         )
     if failure_count == 2:
         return (
             "<render_component_warning>\n"
-            "IMPORTANT: You have previously failed to render UI components due to invalid props.\n"
+            "IMPORTANT: You have previously failed to render UI components "
+            "due to invalid props.\n"
             "When using rich-output tools, follow this sequence:\n"
             "1) `describe_component(name=...)` to get the exact props schema\n"
-            "2) For complex composite outputs, build independent child components first with `build_*`\n"
-            "3) If children are independent, use `next_node=\"parallel\"` to build them concurrently\n"
-            "4) Call the final `render_*` tool with `artifact_ref` children or use `render_component`\n"
-            "If stuck, simplify by rendering `markdown` instead of repeatedly retrying the same invalid payload.\n"
+            "2) For complex composite outputs, build independent child "
+            "components first with `build_*`\n"
+            '3) If children are independent, use `next_node="parallel"` to '
+            "build them concurrently\n"
+            "4) Call the final `render_*` tool with `artifact_ref` children "
+            "or use `render_component`\n"
+            "If stuck, simplify by rendering `markdown` instead of repeatedly "
+            "retrying the same invalid payload.\n"
             "</render_component_warning>"
         )
     return (
         "<render_component_critical>\n"
-        "CRITICAL: You repeatedly failed to call rich-output build/render tools with valid props.\n"
+        "CRITICAL: You repeatedly failed to call rich-output build/render "
+        "tools with valid props.\n"
         "STOP retrying the same invalid component payload.\n\n"
         "RULES:\n"
-        "- If you don't know the schema: call `describe_component(name=...)`.\n"
-        "- Do NOT keep emitting one giant nested payload for reports, grids, tabs, or accordions.\n"
+        "- If you don't know the schema: call "
+        "`describe_component(name=...)`.\n"
+        "- Do NOT keep emitting one giant nested payload for reports, grids, "
+        "tabs, or accordions.\n"
         "- Build complex children separately with `build_*` tools.\n"
-        "- If the children are independent, prefer `next_node=\"parallel\"`.\n"
-        "- Then call the final wrapper or `render_component` with `artifact_ref` children.\n"
-        "- If you still cannot satisfy it, use a simpler component (e.g. `markdown`) "
+        '- If the children are independent, prefer `next_node="parallel"`.\n'
+        "- Then call the final wrapper or `render_component` with "
+        "`artifact_ref` children.\n"
+        "- If you still cannot satisfy it, use a simpler component (e.g. "
+        "`markdown`) "
         "or ask the user for missing details.\n"
         "</render_component_critical>"
     )
@@ -1686,23 +1995,19 @@ def render_arg_fill_clarification(
     missing_fields: list[str],
     field_descriptions: dict[str, str] | None = None,
 ) -> str:
-    """
-    Generate a user-friendly clarification message when arg-fill fails.
+    """Generate a user-friendly clarification message when arg-fill fails.
 
     This is shown to the user instead of a diagnostic dump.
 
-    Parameters
-    ----------
-    tool_name : str
+    Parameters ---------- tool_name : str
         Name of the tool being called.
     missing_fields : list[str]
         List of field names that need values.
     field_descriptions : dict[str, str] | None
         Optional mapping of field names to descriptions.
 
-    Returns
-    -------
-    str
+    Returns:
+    ------- str
         A friendly message asking the user for the missing information.
     """
     field_descriptions = field_descriptions or {}
@@ -1712,7 +2017,9 @@ def render_arg_fill_clarification(
         desc = field_descriptions.get(field, "")
         if desc:
             return f"To use {tool_name}, I need you to provide: {desc}"
-        return f"To use {tool_name}, I need you to provide a value for '{field}'."
+        return (
+            f"To use {tool_name}, I need you to provide a value for '{field}'."
+        )
 
     # Multiple fields
     field_list: list[str] = []
@@ -1724,18 +2031,23 @@ def render_arg_fill_clarification(
             field_list.append(f"- {field}")
 
     fields_str = "\n".join(field_list)
-    return f"To use {tool_name}, I need you to provide the following information:\n{fields_str}"
+    return (
+        f"To use {tool_name}, I need you to provide the following "
+        f"information:\n{fields_str}"
+    )
 
 
 def render_proactive_report_guidance() -> str:
-    """Render prompt guidance for proactive report-back after background task completion.
+    """Render guidance for reporting back once a background task completes.
 
-    This guidance is injected when `proactive_report` key exists in `llm_context`,
-    indicating the foreground agent should proactively report on completed background work.
+    This guidance is injected when `proactive_report` key exists in
+    `llm_context`, indicating the foreground agent should proactively report on
+    completed background work.
     """
     return """\
 <proactive_report_guidance>
-A background task has completed and its results have been merged into your context.
+A background task has completed and its results have been merged into your \
+context.
 Proactively inform the user about what was discovered/completed.
 
 Context available in llm_context["proactive_report"]:
@@ -1746,18 +2058,25 @@ Context available in llm_context["proactive_report"]:
 
 You have FULL agent capabilities for this proactive response:
 
-1. **Render artifacts**: If the background task produced artifacts (charts, tables, code, etc.),
-   use rich output to display them directly — don't just mention their existence.
+1. **Render artifacts**: If the background task produced artifacts (charts, \
+tables, code, etc.),
+   use rich output to display them directly — don't just mention their \
+existence.
 
-2. **Produce new artifacts**: Based on the findings, you may generate additional artifacts
-   if they help communicate results (e.g., synthesize a summary table, create a visualization
+2. **Produce new artifacts**: Based on the findings, you may generate \
+additional artifacts
+   if they help communicate results (e.g., synthesize a summary table, create \
+a visualization
    from raw data, generate code snippets that demonstrate findings).
 
-3. **Full response depth**: Provide whatever level of detail is appropriate for the findings.
+3. **Full response depth**: Provide whatever level of detail is appropriate \
+for the findings.
    Some tasks warrant a brief acknowledgment; others deserve thorough analysis.
 
-Maintain conversational continuity with the prior exchange. Reference specific results from
-the digest and facts. The user should feel like the agent autonomously completed work and
+Maintain conversational continuity with the prior exchange. Reference \
+specific results from
+the digest and facts. The user should feel like the agent autonomously \
+completed work and
 is now reporting back with full context.
 </proactive_report_guidance>
 """
@@ -1767,16 +2086,13 @@ def render_graceful_failure_prompt(
     user_query: str | None = None,
     voice_context: str | None = None,
 ) -> str:
-    """
-    Generate a prompt asking the model to gracefully explain it cannot complete the action.
+    """Ask the model to explain gracefully that it cannot complete the action.
 
-    This is used when the planner hits a failure threshold (repeated arg failures, etc.)
-    instead of just returning a technical error. The model should provide a user-friendly
-    response without technical details.
+    This is used when the planner hits a failure threshold (repeated arg
+    failures, etc.) instead of just returning a technical error. The model
+    should provide a user-friendly response without technical details.
 
-    Parameters
-    ----------
-    user_query : str | None
+    Parameters ---------- user_query : str | None
         The original user query.
     voice_context : str | None
         Optional voice/personality context (from system_prompt_extra).
@@ -1798,13 +2114,16 @@ def render_graceful_failure_prompt(
         )
 
     return (
-        "I was unable to complete the requested action due to an internal issue.\n\n"
+        "I was unable to complete the requested action due to an internal "
+        "issue.\n\n"
         f"{context}\n"
         f"{voice_section}\n"
         "Please respond to the user in a helpful, friendly way:\n"
         "- Acknowledge that you couldn't complete what they asked\n"
-        "- Do NOT mention technical details (tool failures, validation errors, placeholders, etc.)\n"
-        "- Offer to help in another way or ask if they'd like to try something different\n"
+        "- Do NOT mention technical details (tool failures, validation "
+        "errors, placeholders, etc.)\n"
+        "- Offer to help in another way or ask if they'd like to try "
+        "something different\n"
         "- Keep the response brief and conversational\n\n"
         "Reply with ONLY a JSON object:\n"
         '{"answer": "Your friendly response to the user here"}\n\n'

@@ -1,3 +1,5 @@
+"""Tests for rich output validate."""
+
 from __future__ import annotations
 
 import pytest
@@ -16,6 +18,7 @@ from penguiflow.rich_output.validate import (
 
 
 def test_validate_component_payload_accepts_valid_props() -> None:
+    """Validate component payload accepts valid props."""
     registry = get_registry()
     validate_component_payload(
         "markdown",
@@ -28,6 +31,7 @@ def test_validate_component_payload_accepts_valid_props() -> None:
 
 
 def test_validate_component_payload_rejects_unknown() -> None:
+    """Validate component payload rejects unknown."""
     registry = get_registry()
     with pytest.raises(RichOutputValidationError):
         validate_component_payload(
@@ -35,12 +39,15 @@ def test_validate_component_payload_rejects_unknown() -> None:
             {},
             registry,
             allowlist=None,
-            limits=ValidationLimits(max_payload_bytes=1000, max_total_bytes=2000),
+            limits=ValidationLimits(
+                max_payload_bytes=1000, max_total_bytes=2000
+            ),
             tool_context={},
         )
 
 
 def test_validate_component_payload_rejects_disallowed() -> None:
+    """Validate component payload rejects disallowed."""
     registry = get_registry()
     with pytest.raises(RichOutputValidationError):
         validate_component_payload(
@@ -48,12 +55,15 @@ def test_validate_component_payload_rejects_disallowed() -> None:
             {"content": "Hello"},
             registry,
             allowlist={"json"},
-            limits=ValidationLimits(max_payload_bytes=1000, max_total_bytes=2000),
+            limits=ValidationLimits(
+                max_payload_bytes=1000, max_total_bytes=2000
+            ),
             tool_context={},
         )
 
 
 def test_validate_component_payload_enforces_size() -> None:
+    """Validate component payload enforces size."""
     registry = get_registry()
     with pytest.raises(RichOutputValidationError):
         validate_component_payload(
@@ -61,12 +71,15 @@ def test_validate_component_payload_enforces_size() -> None:
             {"content": "x" * 200},
             registry,
             allowlist={"markdown"},
-            limits=ValidationLimits(max_payload_bytes=20, max_total_bytes=2000),
+            limits=ValidationLimits(
+                max_payload_bytes=20, max_total_bytes=2000
+            ),
             tool_context={},
         )
 
 
 def test_validate_component_payload_recurses_into_grid() -> None:
+    """Validate component payload recurses into grid."""
     registry = get_registry()
     validate_component_payload(
         "grid",
@@ -84,6 +97,7 @@ def test_validate_component_payload_recurses_into_grid() -> None:
 
 
 def test_validate_component_payload_budget_and_default_limits() -> None:
+    """Validate component payload budget and default limits."""
     registry = get_registry()
     with pytest.raises(RichOutputValidationError, match="budget exceeded"):
         validate_component_payload(
@@ -106,25 +120,30 @@ def test_validate_component_payload_budget_and_default_limits() -> None:
 
 
 def test_validate_component_payload_depth_limit_short_circuits() -> None:
+    """Validate component payload depth limit short circuits."""
     registry = get_registry()
     validate_component_payload(
         "report",
         {"sections": [{"components": [{"component": "nope", "props": {}}]}]},
         registry,
         allowlist={"report"},
-        limits=ValidationLimits(max_payload_bytes=1000, max_total_bytes=2000, max_depth=1),
+        limits=ValidationLimits(
+            max_payload_bytes=1000, max_total_bytes=2000, max_depth=1
+        ),
         tool_context={},
         depth=1,
     )
 
 
 def test_estimate_payload_bytes_falls_back_to_string_encoding() -> None:
+    """Estimate payload bytes falls back to string encoding."""
     payload = {"bad": {1, 2, 3}}
     size = _estimate_payload_bytes(payload)
     assert size > 0
 
 
 def test_nested_component_iterators_cover_invalid_and_valid_shapes() -> None:
+    """Nested component iterators cover invalid and valid shapes."""
     assert list(_iter_report_sections("not-a-list")) == []
     assert list(_iter_component_items("not-a-list")) == []
     assert list(_iter_tab_items("not-a-list")) == []
@@ -133,16 +152,33 @@ def test_nested_component_iterators_cover_invalid_and_valid_shapes() -> None:
     report_sections = [
         "skip",
         {
-            "components": [{"component": "markdown", "props": {"content": "Hi"}}, {"component": "markdown"}],
-            "subsections": [{"components": [{"component": "json", "props": {"data": {"a": 1}}}]}],
+            "components": [
+                {"component": "markdown", "props": {"content": "Hi"}},
+                {"component": "markdown"},
+            ],
+            "subsections": [
+                {
+                    "components": [
+                        {"component": "json", "props": {"data": {"a": 1}}}
+                    ]
+                }
+            ],
         },
     ]
-    tabs = [{"component": "markdown", "props": {"content": "A"}}, {"component": "markdown", "props": None}]
-    accordion = [{"component": "json", "props": {"data": {"a": 1}}}, {"component": "json", "props": None}]
+    tabs = [
+        {"component": "markdown", "props": {"content": "A"}},
+        {"component": "markdown", "props": None},
+    ]
+    accordion = [
+        {"component": "json", "props": {"data": {"a": 1}}},
+        {"component": "json", "props": None},
+    ]
 
     assert list(_iter_report_sections(report_sections)) == [
         ("markdown", {"content": "Hi"}),
         ("json", {"data": {"a": 1}}),
     ]
     assert list(_iter_tab_items(tabs)) == [("markdown", {"content": "A"})]
-    assert list(_iter_accordion_items(accordion)) == [("json", {"data": {"a": 1}})]
+    assert list(_iter_accordion_items(accordion)) == [
+        ("json", {"data": {"a": 1}})
+    ]

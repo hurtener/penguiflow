@@ -6,12 +6,28 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+from typing_extensions import override
+
 if TYPE_CHECKING:
     from penguiflow.steering.guard_inbox import SteeringGuardInbox
-from .context import ContextSnapshotBuilder, ContextSnapshotV1, GuardrailContext, GuardrailEvent
-from .models import GuardrailAction, GuardrailDecision, GuardrailSeverity, PauseSpec, RedactionSpec, StopSpec
-from .protocols import DecisionPolicy, GuardrailRule, RiskRouter
-from .registry import RuleRegistry
+
+    from .protocols import GuardrailRule, RiskRouter
+    from .registry import RuleRegistry
+from .context import (
+    ContextSnapshotBuilder,
+    ContextSnapshotV1,
+    GuardrailContext,
+    GuardrailEvent,
+)
+from .models import (
+    GuardrailAction,
+    GuardrailDecision,
+    GuardrailSeverity,
+    PauseSpec,
+    RedactionSpec,
+    StopSpec,
+)
+from .protocols import DecisionPolicy
 from .routing import DefaultRiskRouter, RiskRoutingDecision
 
 
@@ -27,12 +43,14 @@ class GatewayConfig:
     async_fail_open: bool = True
 
 
-class DefaultDecisionPolicy:
-    """Priority-based resolution with redaction combining and effect merging."""
+class DefaultDecisionPolicy(DecisionPolicy):
+    """Priority-based resolution that combines redactions and effects."""
 
     def __init__(self, combine_effects: bool = True) -> None:
+        """Resolve decisions, optionally merging the effects of all of them."""
         self._combine_effects = combine_effects
 
+    @override
     def resolve(
         self,
         decisions: list[GuardrailDecision],
@@ -95,11 +113,18 @@ class GuardrailGateway:
     registry: RuleRegistry
     guard_inbox: SteeringGuardInbox
     config: GatewayConfig = field(default_factory=GatewayConfig)
-    decision_policy: DecisionPolicy = field(default_factory=DefaultDecisionPolicy)
+    decision_policy: DecisionPolicy = field(
+        default_factory=DefaultDecisionPolicy
+    )
     risk_router: RiskRouter = field(default_factory=DefaultRiskRouter)
-    context_builder: ContextSnapshotBuilder = field(default_factory=ContextSnapshotBuilder)
+    context_builder: ContextSnapshotBuilder = field(
+        default_factory=ContextSnapshotBuilder
+    )
 
-    async def evaluate(self, ctx: GuardrailContext, event: GuardrailEvent) -> GuardrailDecision:
+    async def evaluate(
+        self, ctx: GuardrailContext, event: GuardrailEvent
+    ) -> GuardrailDecision:
+        """Evaluate ``event`` against the rules; return the final decision."""
         context_snapshot = self.context_builder.build(event, ctx)
         routing = self.risk_router.route(event, context_snapshot)
 
@@ -111,15 +136,21 @@ class GuardrailGateway:
             )
 
         sync_decisions = await self._evaluate_sync(event, context_snapshot)
-        sync_stops = [d for d in sync_decisions if d.action == GuardrailAction.STOP]
+        sync_stops = [
+            d for d in sync_decisions if d.action == GuardrailAction.STOP
+        ]
         if sync_stops:
-            final = self.decision_policy.resolve(sync_stops, event, context_snapshot)
+            final = self.decision_policy.resolve(
+                sync_stops, event, context_snapshot
+            )
             self._process_effects(final, ctx)
             return final
 
         correlation_id: str | None = None
         if self.config.async_enabled:
-            correlation_id = await self._submit_async(event, context_snapshot, routing)
+            correlation_id = await self._submit_async(
+                event, context_snapshot, routing
+            )
 
         async_decisions: list[GuardrailDecision] = []
         if correlation_id and routing.async_wait_ms > 0:
@@ -137,7 +168,9 @@ class GuardrailGateway:
                 reason="No rules triggered",
             )
 
-        final = self.decision_policy.resolve(all_decisions, event, context_snapshot)
+        final = self.decision_policy.resolve(
+            all_decisions, event, context_snapshot
+        )
         self._process_effects(final, ctx)
         return final
 
@@ -162,7 +195,10 @@ class GuardrailGateway:
                 return GuardrailDecision(
                     action=GuardrailAction.STOP,
                     rule_id=rule.rule_id,
-                    reason=f"Sync guardrail '{rule.rule_id}' timed out (fail-closed)",
+                    reason=(
+                        f"Sync guardrail '{rule.rule_id}' timed out "
+                        "(fail-closed)"
+                    ),
                     severity=GuardrailSeverity.CRITICAL,
                     stop=StopSpec(
                         error_code="GUARDRAIL_SYNC_TIMEOUT",
@@ -175,7 +211,10 @@ class GuardrailGateway:
                 return GuardrailDecision(
                     action=GuardrailAction.STOP,
                     rule_id=rule.rule_id,
-                    reason=f"Sync guardrail '{rule.rule_id}' errored (fail-closed)",
+                    reason=(
+                        f"Sync guardrail '{rule.rule_id}' errored "
+                        "(fail-closed)"
+                    ),
                     severity=GuardrailSeverity.CRITICAL,
                     stop=StopSpec(
                         error_code="GUARDRAIL_SYNC_ERROR",
@@ -184,7 +223,9 @@ class GuardrailGateway:
                 )
 
         if self.config.sync_parallel:
-            results = await asyncio.gather(*[safe_eval(rule) for rule in rules])
+            results = await asyncio.gather(
+                *[safe_eval(rule) for rule in rules]
+            )
         else:
             results = [await safe_eval(rule) for rule in rules]
 
@@ -223,9 +264,6 @@ class GuardrailGateway:
                 correlation_id,
                 timeout_s=timeout_ms / 1000,
             )
-            for decision in response.decisions:
-                decision.was_sync = False
-            return response.decisions
         except TimeoutError:
             if on_timeout == "stop":
                 return [
@@ -246,15 +284,20 @@ class GuardrailGateway:
                     )
                 ]
             return []
+        for decision in response.decisions:
+            decision.was_sync = False
+        return response.decisions
 
-    def _process_effects(self, decision: GuardrailDecision, ctx: GuardrailContext) -> None:
+    def _process_effects(
+        self, decision: GuardrailDecision, ctx: GuardrailContext
+    ) -> None:
         for effect in decision.effects:
             if effect == "increment_strike":
                 category = decision.rule_id.split("-")[0]
-                ctx.strike_counts[category] = ctx.strike_counts.get(category, 0) + 1
-            elif effect == "flag_trajectory":
-                pass
-            elif effect == "emit_alert":
+                ctx.strike_counts[category] = (
+                    ctx.strike_counts.get(category, 0) + 1
+                )
+            elif effect == "flag_trajectory" or effect == "emit_alert":
                 pass
 
 

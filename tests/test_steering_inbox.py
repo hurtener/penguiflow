@@ -1,3 +1,5 @@
+"""Tests for steering inbox."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +11,7 @@ from penguiflow.steering import SteeringEvent, SteeringEventType, SteeringInbox
 
 @pytest.mark.asyncio
 async def test_steering_inbox_pause_resume() -> None:
+    """Steering inbox pause resume."""
     inbox = SteeringInbox()
     await inbox.push(
         SteeringEvent(
@@ -44,6 +47,7 @@ async def test_steering_inbox_pause_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_steering_inbox_cancel_sets_flag() -> None:
+    """Steering inbox cancel sets flag."""
     inbox = SteeringInbox()
     await inbox.push(
         SteeringEvent(
@@ -59,6 +63,7 @@ async def test_steering_inbox_cancel_sets_flag() -> None:
 
 @pytest.mark.asyncio
 async def test_steering_inbox_queue_bound() -> None:
+    """Steering inbox queue bound."""
     inbox = SteeringInbox(maxsize=1)
     first = await inbox.push(
         SteeringEvent(

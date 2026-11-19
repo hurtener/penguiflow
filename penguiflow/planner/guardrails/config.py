@@ -6,16 +6,27 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-import yaml  # type: ignore[import-untyped,unused-ignore]
+import yaml
 
 from .context import ContextSnapshotBuilder, ToolRiskTier
-from .gateway import GatewayConfig, GuardrailGateway
 from .models import RuleCost
-from .registry import RuleRegistry
-from .routing import DefaultRiskRouter
-from .rules import InjectionPatternRule, JailbreakIntent, SecretRedactionRule, ToolAllowlistRule
+from .rules import (
+    InjectionPatternRule,
+    JailbreakIntent,
+    SecretRedactionRule,
+    ToolAllowlistRule,
+)
+
+if TYPE_CHECKING:
+    from .gateway import GatewayConfig, GuardrailGateway
+    from .registry import RuleRegistry
+    from .routing import DefaultRiskRouter
+
+
+class PolicyPackError(ValueError):
+    """Raised when a guardrail policy pack is malformed."""
 
 
 @dataclass(frozen=True)
@@ -27,14 +38,16 @@ class GuardrailPolicyPack:
     data: dict[str, Any]
 
 
-def load_policy_pack(path: str | Path, *, env: str | None = None) -> GuardrailPolicyPack:
+def load_policy_pack(
+    path: str | Path, *, env: str | None = None
+) -> GuardrailPolicyPack:
     """Load and validate a guardrail policy pack from YAML."""
-
     source = Path(path)
     raw = source.read_text(encoding="utf-8")
     data = yaml.safe_load(raw)
     if not isinstance(data, Mapping):
-        raise ValueError("Policy pack must be a mapping")
+        msg = "Policy pack must be a mapping"
+        raise PolicyPackError(msg)
 
     payload = dict(data)
     if env is not None:
@@ -46,7 +59,9 @@ def load_policy_pack(path: str | Path, *, env: str | None = None) -> GuardrailPo
 
     policy_id = str(payload.get("policy_pack"))
     version = str(payload.get("version"))
-    return GuardrailPolicyPack(policy_id=policy_id, version=version, data=dict(payload))
+    return GuardrailPolicyPack(
+        policy_id=policy_id, version=version, data=dict(payload)
+    )
 
 
 def apply_policy_config(
@@ -57,7 +72,6 @@ def apply_policy_config(
     policy: GuardrailPolicyPack,
 ) -> None:
     """Apply policy pack settings to guardrail components."""
-
     data = policy.data
 
     gateway_cfg = data.get("gateway")
@@ -81,12 +95,15 @@ def apply_policy_config(
         _apply_risk_router(router, risk_cfg)
 
 
-def _apply_gateway_config(cfg: GatewayConfig, payload: Mapping[str, Any]) -> None:
+def _apply_gateway_config(
+    cfg: GatewayConfig, payload: Mapping[str, Any]
+) -> None:
     mode = payload.get("mode")
     if isinstance(mode, str):
         if mode not in {"shadow", "enforce"}:
-            raise ValueError(f"Unsupported gateway mode: {mode}")
-        cfg.mode = cast(Literal["shadow", "enforce"], mode)
+            msg = f"Unsupported gateway mode: {mode}"
+            raise PolicyPackError(msg)
+        cfg.mode = cast("Literal['shadow', 'enforce']", mode)
 
     sync_cfg = payload.get("sync")
     if isinstance(sync_cfg, Mapping):
@@ -110,23 +127,30 @@ def _apply_gateway_config(cfg: GatewayConfig, payload: Mapping[str, Any]) -> Non
             cfg.async_fail_open = fail_open
 
 
-def _apply_rule_configs(registry: RuleRegistry, rules: list[Any], *, is_async: bool) -> None:
+def _apply_rule_configs(
+    registry: RuleRegistry, rules: list[Any], *, is_async: bool
+) -> None:
     rules_by_id = {rule.rule_id: rule for rule in registry.all_rules()}
 
     for entry in rules:
         if not isinstance(entry, Mapping):
-            raise ValueError("Rule entry must be a mapping")
+            msg = "Rule entry must be a mapping"
+            raise PolicyPackError(msg)
         rule_id = entry.get("id")
         if not isinstance(rule_id, str):
-            raise ValueError("Rule entry requires string 'id'")
+            msg = "Rule entry requires string 'id'"
+            raise PolicyPackError(msg)
         rule = rules_by_id.get(rule_id)
         if rule is None:
-            raise ValueError(f"Unknown rule id: {rule_id}")
+            msg = f"Unknown rule id: {rule_id}"
+            raise PolicyPackError(msg)
         if isinstance(rule.cost, RuleCost):
             if is_async and rule.cost != RuleCost.DEEP:
-                raise ValueError(f"Rule '{rule_id}' is not an async rule")
+                msg = f"Rule '{rule_id}' is not an async rule"
+                raise PolicyPackError(msg)
             if not is_async and rule.cost != RuleCost.FAST:
-                raise ValueError(f"Rule '{rule_id}' is not a sync rule")
+                msg = f"Rule '{rule_id}' is not a sync rule"
+                raise PolicyPackError(msg)
         enabled = entry.get("enabled")
         if isinstance(enabled, bool):
             rule.enabled = enabled
@@ -135,66 +159,96 @@ def _apply_rule_configs(registry: RuleRegistry, rules: list[Any], *, is_async: b
             _apply_rule_config(rule, config)
 
 
-def _apply_rule_config(rule: Any, config: Mapping[str, Any]) -> None:
+def _apply_allowlist_config(
+    rule: ToolAllowlistRule, config: Mapping[str, Any]
+) -> None:
+    """Replace the allow/deny lists given in ``config``."""
+    denied = config.get("denied_tools")
+    if isinstance(denied, list):
+        rule.denied_tools = frozenset(str(item) for item in denied)
+    allowed = config.get("allowed_tools")
+    if isinstance(allowed, list):
+        rule.allowed_tools = frozenset(str(item) for item in allowed)
+
+
+def _apply_redaction_config(
+    rule: SecretRedactionRule, config: Mapping[str, Any]
+) -> None:
+    """Add the secret patterns given in ``config``."""
+    patterns = config.get("patterns")
+    if not isinstance(patterns, Mapping):
+        return
+    compiled = {
+        str(key): re.compile(value)
+        for key, value in patterns.items()
+        if isinstance(value, str)
+    }
+    if compiled:
+        rule.patterns.update(compiled)
+
+
+def _injection_pattern(item: object) -> tuple[str, JailbreakIntent] | None:
+    """Parse a ``{pattern, intent}`` mapping or ``[pattern, intent]`` pair."""
+    if isinstance(item, Mapping):
+        pattern, intent = item.get("pattern"), item.get("intent")
+    elif isinstance(item, (list, tuple)) and len(item) == 2:
+        pattern, intent = item
+    else:
+        return None
+    if not isinstance(pattern, str) or not isinstance(intent, str):
+        return None
+    try:
+        return pattern, JailbreakIntent(intent)
+    except ValueError:
+        return None
+
+
+def _apply_injection_config(
+    rule: InjectionPatternRule, config: Mapping[str, Any]
+) -> None:
+    """Replace the injection patterns with the valid ones in ``config``."""
+    patterns = config.get("patterns")
+    if not isinstance(patterns, list):
+        return
+    converted = [
+        parsed
+        for item in patterns
+        if (parsed := _injection_pattern(item)) is not None
+    ]
+    if converted:
+        rule.patterns = tuple(converted)
+
+
+def _apply_rule_config(rule: object, config: Mapping[str, Any]) -> None:
     if isinstance(rule, ToolAllowlistRule):
-        denied = config.get("denied_tools")
-        if isinstance(denied, list):
-            rule.denied_tools = frozenset(str(item) for item in denied)
-        allowed = config.get("allowed_tools")
-        if isinstance(allowed, list):
-            rule.allowed_tools = frozenset(str(item) for item in allowed)
-        return
-
-    if isinstance(rule, SecretRedactionRule):
-        patterns = config.get("patterns")
-        if isinstance(patterns, Mapping):
-            compiled: dict[str, re.Pattern[str]] = {}
-            for key, value in patterns.items():
-                if isinstance(value, str):
-                    compiled[str(key)] = re.compile(value)
-            if compiled:
-                rule.patterns.update(compiled)
-        return
-
-    if isinstance(rule, InjectionPatternRule):
-        patterns = config.get("patterns")
-        if isinstance(patterns, list):
-            converted: list[tuple[str, JailbreakIntent]] = []
-            for item in patterns:
-                if isinstance(item, Mapping):
-                    pattern = item.get("pattern")
-                    intent = item.get("intent")
-                    if isinstance(pattern, str) and isinstance(intent, str):
-                        try:
-                            converted.append((pattern, JailbreakIntent(intent)))
-                        except ValueError:
-                            continue
-                elif isinstance(item, (list, tuple)) and len(item) == 2:
-                    pattern, intent = item
-                    if isinstance(pattern, str) and isinstance(intent, str):
-                        try:
-                            converted.append((pattern, JailbreakIntent(intent)))
-                        except ValueError:
-                            continue
-            if converted:
-                rule.patterns = tuple(converted)
-        return
-
-    for key, value in config.items():
-        if hasattr(rule, key):
-            setattr(rule, key, value)
+        _apply_allowlist_config(rule, config)
+    elif isinstance(rule, SecretRedactionRule):
+        _apply_redaction_config(rule, config)
+    elif isinstance(rule, InjectionPatternRule):
+        _apply_injection_config(rule, config)
+    else:
+        for key, value in config.items():
+            if hasattr(rule, key):
+                setattr(rule, key, value)
 
 
-def _apply_risk_router(router: DefaultRiskRouter, payload: Mapping[str, Any]) -> None:
+def _apply_risk_router(
+    router: DefaultRiskRouter, payload: Mapping[str, Any]
+) -> None:
     high_wait = payload.get("high_risk_wait_ms")
-    if isinstance(high_wait, (int, float)):
-        router._high_wait = float(high_wait)
     medium_wait = payload.get("medium_risk_wait_ms")
-    if isinstance(medium_wait, (int, float)):
-        router._medium_wait = float(medium_wait)
     critical_closed = payload.get("critical_fail_closed")
-    if isinstance(critical_closed, bool):
-        router._critical_fail_closed = critical_closed
+    router.configure(
+        high_risk_wait_ms=float(high_wait)
+        if isinstance(high_wait, (int, float))
+        else None,
+        medium_risk_wait_ms=float(medium_wait)
+        if isinstance(medium_wait, (int, float))
+        else None,
+        critical_fail_closed=critical_closed
+        if isinstance(critical_closed, bool)
+        else None,
+    )
 
 
 def _parse_tool_risks(payload: Mapping[str, Any]) -> dict[str, ToolRiskTier]:
@@ -210,21 +264,27 @@ def _parse_tool_risks(payload: Mapping[str, Any]) -> dict[str, ToolRiskTier]:
 
 
 def _validate_policy_pack(payload: Mapping[str, Any]) -> None:
-    if "policy_pack" not in payload or not isinstance(payload.get("policy_pack"), str):
-        raise ValueError("policy_pack must be a string")
+    if "policy_pack" not in payload or not isinstance(
+        payload.get("policy_pack"), str
+    ):
+        msg = "policy_pack must be a string"
+        raise PolicyPackError(msg)
     if "version" not in payload or not isinstance(payload.get("version"), str):
-        raise ValueError("version must be a string")
+        msg = "version must be a string"
+        raise PolicyPackError(msg)
 
     for key in ("gateway", "tool_risks", "risk_router"):
         if key in payload and not isinstance(payload[key], Mapping):
-            raise ValueError(f"{key} must be a mapping")
+            msg = f"{key} must be a mapping"
+            raise PolicyPackError(msg)
 
     for key in ("sync_rules", "async_rules"):
         if key in payload and not isinstance(payload[key], list):
-            raise ValueError(f"{key} must be a list")
+            msg = f"{key} must be a list"
+            raise PolicyPackError(msg)
 
 
-def _deep_merge(base: Mapping[str, Any], overlay: Any) -> dict[str, Any]:
+def _deep_merge(base: Mapping[str, Any], overlay: object) -> dict[str, Any]:
     merged = dict(base)
     if not isinstance(overlay, Mapping):
         return merged
@@ -236,4 +296,9 @@ def _deep_merge(base: Mapping[str, Any], overlay: Any) -> dict[str, Any]:
     return merged
 
 
-__all__ = ["GuardrailPolicyPack", "apply_policy_config", "load_policy_pack"]
+__all__ = [
+    "GuardrailPolicyPack",
+    "PolicyPackError",
+    "apply_policy_config",
+    "load_policy_pack",
+]

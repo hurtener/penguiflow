@@ -10,7 +10,10 @@ from penguiflow.llm.schema.openai import OpenAIJsonSchemaTransformer
 
 
 class TestOpenAIJsonSchemaTransformer:
+    """Tests for open AI json schema transformer."""
+
     def test_basic_transform(self) -> None:
+        """Basic transform."""
         schema = {
             "type": "object",
             "properties": {
@@ -27,6 +30,7 @@ class TestOpenAIJsonSchemaTransformer:
         assert set(result.get("required", [])) == {"name", "age"}
 
     def test_removes_constraints(self) -> None:
+        """Removes constraints."""
         schema = {
             "type": "object",
             "properties": {
@@ -57,6 +61,7 @@ class TestOpenAIJsonSchemaTransformer:
         assert "maximum" not in count_prop
 
     def test_removes_metadata(self) -> None:
+        """Removes metadata."""
         schema = {
             "type": "object",
             "title": "MySchema",
@@ -70,6 +75,7 @@ class TestOpenAIJsonSchemaTransformer:
         assert "$schema" not in result
 
     def test_converts_oneof_to_anyof(self) -> None:
+        """Converts oneof to anyof."""
         schema = {
             "oneOf": [
                 {"type": "string"},
@@ -85,6 +91,7 @@ class TestOpenAIJsonSchemaTransformer:
         assert len(result["anyOf"]) == 2
 
     def test_nested_object_strict(self) -> None:
+        """Nested object strict."""
         schema = {
             "type": "object",
             "properties": {
@@ -101,9 +108,12 @@ class TestOpenAIJsonSchemaTransformer:
 
         # Both levels should have additionalProperties: false
         assert result.get("additionalProperties") is False
-        assert result["properties"]["nested"].get("additionalProperties") is False
+        assert (
+            result["properties"]["nested"].get("additionalProperties") is False
+        )
 
     def test_preserves_refs(self) -> None:
+        """Preserves refs."""
         schema = {
             "type": "object",
             "properties": {
@@ -122,7 +132,10 @@ class TestOpenAIJsonSchemaTransformer:
 
 
 class TestAnthropicJsonSchemaTransformer:
+    """Tests for anthropic json schema transformer."""
+
     def test_basic_transform(self) -> None:
+        """Basic transform."""
         schema = {
             "type": "object",
             "properties": {
@@ -136,6 +149,7 @@ class TestAnthropicJsonSchemaTransformer:
         assert "properties" in result
 
     def test_relocates_constraints_to_description(self) -> None:
+        """Relocates constraints to description."""
         schema = {
             "type": "object",
             "properties": {
@@ -158,6 +172,7 @@ class TestAnthropicJsonSchemaTransformer:
         assert "minLength: 5" in desc or "min" in desc.lower()
 
     def test_merges_with_existing_description(self) -> None:
+        """Merges with existing description."""
         schema = {
             "type": "object",
             "properties": {
@@ -177,6 +192,7 @@ class TestAnthropicJsonSchemaTransformer:
         assert "user's name" in desc.lower() or "minLength" in desc
 
     def test_removes_title_and_schema(self) -> None:
+        """Removes title and schema."""
         schema = {
             "type": "object",
             "title": "TestSchema",
@@ -191,7 +207,10 @@ class TestAnthropicJsonSchemaTransformer:
 
 
 class TestGoogleJsonSchemaTransformer:
+    """Tests for google json schema transformer."""
+
     def test_basic_transform(self) -> None:
+        """Basic transform."""
         schema = {
             "type": "object",
             "properties": {
@@ -204,18 +223,24 @@ class TestGoogleJsonSchemaTransformer:
         assert result["type"] == "object"
         assert result.get("additionalProperties") is False
 
-    def test_does_not_override_additional_properties_schema_for_dict_like_objects(self) -> None:
+    def test_keeps_additional_properties_of_dict_like(
+        self,
+    ) -> None:
+        """Keeps the additionalProperties schema of dict-like objects."""
         schema = {
             "type": "object",
-            # Dict-like object: no explicit properties, schema-valued additionalProperties.
+            # Dict-like object: no explicit properties, schema-valued
+            # additionalProperties.
             "additionalProperties": {"type": "string"},
         }
         transformer = GoogleJsonSchemaTransformer(schema, strict=True)
         result = transformer.transform()
-        # Must preserve schema-valued additionalProperties (do not force boolean False).
+        # Must preserve schema-valued additionalProperties (do not force
+        # boolean False).
         assert result["additionalProperties"] == {"type": "string"}
 
     def test_converts_const_to_enum(self) -> None:
+        """Converts const to enum."""
         schema = {
             "type": "object",
             "properties": {
@@ -234,6 +259,7 @@ class TestGoogleJsonSchemaTransformer:
         assert status_prop["enum"] == ["active"]
 
     def test_infers_type_from_const(self) -> None:
+        """Infers type from const."""
         schema = {
             "type": "object",
             "properties": {
@@ -251,6 +277,7 @@ class TestGoogleJsonSchemaTransformer:
         assert result["properties"]["name"]["type"] == "string"
 
     def test_moves_format_to_description(self) -> None:
+        """Moves format to description."""
         schema = {
             "type": "object",
             "properties": {
@@ -269,6 +296,7 @@ class TestGoogleJsonSchemaTransformer:
         assert "date-time" in desc
 
     def test_simplifies_anyof_with_null(self) -> None:
+        """Simplifies anyof with null."""
         schema = {
             "type": "object",
             "properties": {
@@ -290,6 +318,7 @@ class TestGoogleJsonSchemaTransformer:
         assert "anyOf" not in value_prop
 
     def test_removes_unsupported_keywords(self) -> None:
+        """Removes unsupported keywords."""
         schema = {
             "type": "object",
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -306,7 +335,10 @@ class TestGoogleJsonSchemaTransformer:
 
 
 class TestBedrockJsonSchemaTransformer:
+    """Tests for bedrock json schema transformer."""
+
     def test_basic_transform(self) -> None:
+        """Basic transform."""
         schema = {
             "type": "object",
             "properties": {
@@ -321,6 +353,7 @@ class TestBedrockJsonSchemaTransformer:
         assert "name" in result.get("required", [])
 
     def test_inlines_refs(self) -> None:
+        """Inlines refs."""
         schema = {
             "type": "object",
             "properties": {
@@ -343,6 +376,7 @@ class TestBedrockJsonSchemaTransformer:
         assert result["properties"]["item"]["type"] == "object"
 
     def test_removes_unsupported_keywords(self) -> None:
+        """Removes unsupported keywords."""
         schema = {
             "type": "object",
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -360,6 +394,7 @@ class TestBedrockJsonSchemaTransformer:
         assert "default" not in result
 
     def test_handles_nested_inlining(self) -> None:
+        """Handles nested inlining."""
         schema = {
             "type": "object",
             "properties": {
@@ -386,7 +421,10 @@ class TestBedrockJsonSchemaTransformer:
 
 
 class TestDatabricksJsonSchemaTransformer:
+    """Tests for databricks json schema transformer."""
+
     def test_basic_transform(self) -> None:
+        """Basic transform."""
         schema = {
             "type": "object",
             "properties": {
@@ -400,6 +438,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert result.get("additionalProperties") is False
 
     def test_removes_pattern_and_constraints(self) -> None:
+        """Removes pattern and constraints."""
         schema = {
             "type": "object",
             "properties": {
@@ -420,6 +459,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert "maxLength" not in name_prop
 
     def test_removes_refs_and_defs(self) -> None:
+        """Removes refs and defs."""
         schema = {
             "type": "object",
             "properties": {
@@ -439,6 +479,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert "$ref" not in item_prop
 
     def test_simplifies_nullable_anyof(self) -> None:
+        """Simplifies nullable anyof."""
         schema = {
             "type": "object",
             "properties": {
@@ -458,6 +499,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert "anyOf" not in value_prop
 
     def test_removes_composition_keywords(self) -> None:
+        """Removes composition keywords."""
         schema = {
             "type": "object",
             "properties": {
@@ -477,6 +519,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert "oneOf" not in complex_prop
 
     def test_removes_unsupported_metadata(self) -> None:
+        """Removes unsupported metadata."""
         schema = {
             "type": "object",
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -495,6 +538,7 @@ class TestDatabricksJsonSchemaTransformer:
 
     def test_warns_on_complex_schema(self) -> None:
         # Create schema with many keys
+        """Warns on complex schema."""
         properties = {f"field_{i}": {"type": "string"} for i in range(70)}
         schema = {"type": "object", "properties": properties}
 
@@ -502,9 +546,13 @@ class TestDatabricksJsonSchemaTransformer:
         transformer.transform()
 
         # Should have warnings about key limit
-        assert len(transformer._warnings) > 0 or not transformer.is_strict_compatible
+        assert (
+            len(transformer.warnings) > 0
+            or not transformer.is_strict_compatible
+        )
 
     def test_handles_allof(self) -> None:
+        """Handles allof."""
         schema = {
             "allOf": [
                 {"type": "object", "properties": {"a": {"type": "string"}}},
@@ -541,7 +589,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert result is not None
         assert not transformer.is_strict_compatible
         # Should have warning about recursive reference
-        assert any("recursive" in w.lower() for w in transformer._warnings)
+        assert any("recursive" in w.lower() for w in transformer.warnings)
 
     def test_cached_transformed_def(self) -> None:
         """Test that the same $ref used multiple times hits the cache."""
@@ -562,7 +610,7 @@ class TestDatabricksJsonSchemaTransformer:
         assert result["properties"]["first"]["type"] == "string"
         assert result["properties"]["second"]["type"] == "string"
         # Cache should have the def
-        assert "Item" in transformer._transformed_defs
+        assert "Item" in transformer.transformed_defs
 
     def test_unknown_ref_handling(self) -> None:
         """Test that unknown $ref patterns are handled gracefully."""
@@ -582,23 +630,27 @@ class TestDatabricksJsonSchemaTransformer:
         assert "Unresolved ref" in external.get("description", "")
         assert not transformer.is_strict_compatible
         # Should have warning about unknown ref
-        assert any("resolve" in w.lower() for w in transformer._warnings)
+        assert any("resolve" in w.lower() for w in transformer.warnings)
 
 
 class TestTransformerStrictModes:
     """Test strict vs non-strict mode behaviors."""
 
     def test_openai_strict_mode(self) -> None:
+        """OpenAI strict mode."""
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
 
         strict = OpenAIJsonSchemaTransformer(schema, strict=True).transform()
-        non_strict = OpenAIJsonSchemaTransformer(schema, strict=False).transform()
+        non_strict = OpenAIJsonSchemaTransformer(
+            schema, strict=False
+        ).transform()
 
         assert strict.get("additionalProperties") is False
         # Non-strict may not have additionalProperties: false
         assert non_strict is not None
 
     def test_google_strict_mode(self) -> None:
+        """Google strict mode."""
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
 
         strict = GoogleJsonSchemaTransformer(schema, strict=True).transform()
@@ -606,6 +658,7 @@ class TestTransformerStrictModes:
         assert strict.get("additionalProperties") is False
 
     def test_bedrock_strict_mode(self) -> None:
+        """Bedrock strict mode."""
         schema = {"type": "object", "properties": {"x": {"type": "string"}}}
 
         strict = BedrockJsonSchemaTransformer(schema, strict=True).transform()
@@ -618,6 +671,7 @@ class TestTransformerCompatibility:
     """Test is_strict_compatible flag behavior."""
 
     def test_compatible_schema(self) -> None:
+        """Compatible schema."""
         schema = {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -628,6 +682,7 @@ class TestTransformerCompatibility:
         assert transformer.is_strict_compatible is True
 
     def test_incompatible_with_removed_keywords(self) -> None:
+        """Incompatible with removed keywords."""
         schema = {
             "type": "object",
             "properties": {

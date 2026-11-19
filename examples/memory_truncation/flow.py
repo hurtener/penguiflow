@@ -1,36 +1,61 @@
+"""Short-term memory example: truncate history to a token budget."""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from typing_extensions import override
 
 from penguiflow.planner import ReactPlanner
-from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
+from penguiflow.planner.memory import (
+    MemoryBudget,
+    MemoryKey,
+    ShortTermMemoryConfig,
+)
+from penguiflow.planner.models import JSONLLMClient
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
-class ScriptedLLMClient:
+class ScriptedLLMClient(JSONLLMClient):
+    """LLM client that replays scripted responses."""
+
     def __init__(self, answers: list[str]) -> None:
+        """Replay ``answers`` in order."""
         self._answers = list(answers)
         self.calls: list[list[Mapping[str, str]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: Any = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._answers:
-            raise AssertionError("No scripted answers left")
+            msg = "No scripted answers left"
+            raise AssertionError(msg)
         answer = self._answers.pop(0)
-        return json.dumps({"thought": "finish", "next_node": None, "args": {"raw_answer": answer}}), 0.0
+        return json.dumps(
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": answer},
+            }
+        ), 0.0
 
 
-def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str, Any]:
+def _extract_memory_from_messages(
+    messages: list[Mapping[str, str]],
+) -> dict[str, Any]:
     for msg in messages:
         if msg.get("role") != "system":
             continue
@@ -39,13 +64,18 @@ def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str
             continue
         if "</read_only_conversation_memory_json>" not in content:
             continue
-        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        start = content.index("<read_only_conversation_memory_json>") + len(
+            "<read_only_conversation_memory_json>"
+        )
         end = content.index("</read_only_conversation_memory_json>", start)
-        return json.loads(content[start:end])
+        parsed = json.loads(content[start:end])
+        assert isinstance(parsed, dict)
+        return parsed
     return {}
 
 
 async def run_demo() -> dict[str, Any]:
+    """Run the demo end to end."""
     client = ScriptedLLMClient(["a1", "a2", "a3", "a4"])
     planner = ReactPlanner(
         llm_client=client,
@@ -67,8 +97,9 @@ async def run_demo() -> dict[str, Any]:
 
 
 def main() -> None:
+    """Run the example."""
     payload = asyncio.run(run_demo())
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    sys.stdout.write(f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n")
 
 
 if __name__ == "__main__":

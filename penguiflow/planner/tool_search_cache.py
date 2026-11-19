@@ -1,16 +1,20 @@
+"""SQLite-backed tool search index for the planner's tool_search tool."""
+
 from __future__ import annotations
 
 import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..catalog import NodeSpec, ToolLoadingMode
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
 
 _SCHEMA_VERSION = 2
 _SIDE_EFFECT_RANK = {
@@ -33,7 +37,23 @@ class _ToolRecord:
     record_hash: str
 
 
+def _run_fts(
+    conn: sqlite3.Connection, sql: str, params: list[Any]
+) -> list[tuple[Any, ...]] | None:
+    """Run an FTS query; ``None`` when SQLite rejects the match syntax."""
+    try:
+        rows: list[tuple[Any, ...]] = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "syntax error" in message or "fts5" in message:
+            return None
+        raise
+    return rows
+
+
 class ToolSearchCache:
+    """SQLite index of the tool catalog with FTS, regex and exact search."""
+
     def __init__(
         self,
         *,
@@ -45,6 +65,7 @@ class ToolSearchCache:
         rebuild_cache_on_init: bool = False,
         max_search_results: int = 10,
     ) -> None:
+        """Index the tool catalog in a SQLite database under ``cache_dir``."""
         self._cache_dir = Path(cache_dir)
         self._db_path = self._cache_dir / "tool_cache.db"
         self._preferred_namespaces = list(preferred_namespaces or [])
@@ -59,21 +80,25 @@ class ToolSearchCache:
 
     @property
     def fts_available(self) -> bool:
+        """Whether SQLite FTS5 is available for full-text search."""
         if self._fts_available is None:
             self._ensure_schema()
         return bool(self._fts_available)
 
     @property
     def db_path(self) -> Path:
+        """Path of the SQLite index."""
         return self._db_path
 
     def tool_count(self) -> int:
+        """Return the number of indexed tools."""
         self._ensure_schema()
         with sqlite3.connect(self._db_path) as conn:
             row = conn.execute("SELECT COUNT(1) FROM tools").fetchone()
         return int(row[0] if row else 0)
 
     def sync_tools(self, specs: Sequence[NodeSpec]) -> None:
+        """Index ``specs``; the rebuild is skipped if they are unchanged."""
         records = [_tool_record(spec) for spec in specs]
         fingerprint = _catalog_fingerprint(records)
 
@@ -91,13 +116,23 @@ class ToolSearchCache:
             ):
                 return
 
-            if self._rebuild_cache_on_init or not self._enable_incremental_index:
+            if (
+                self._rebuild_cache_on_init
+                or not self._enable_incremental_index
+            ):
                 conn.execute("DELETE FROM tools")
                 to_upsert = records
                 to_delete: Iterable[str] = []
             else:
-                existing = {row[0]: row[1] for row in conn.execute("SELECT name, record_hash FROM tools")}
-                desired = {record.name: record.record_hash for record in records}
+                existing = {
+                    row[0]: row[1]
+                    for row in conn.execute(
+                        "SELECT name, record_hash FROM tools"
+                    )
+                }
+                desired = {
+                    record.name: record.record_hash for record in records
+                }
                 to_delete = set(existing) - set(desired)
                 if schema_outdated:
                     # Force re-upsert so new columns (e.g. declared_tags) get
@@ -105,7 +140,9 @@ class ToolSearchCache:
                     to_upsert = records
                 else:
                     to_upsert = [
-                        record for record in records if existing.get(record.name) != record.record_hash
+                        record
+                        for record in records
+                        if existing.get(record.name) != record.record_hash
                     ]
 
             if to_delete:
@@ -138,7 +175,9 @@ class ToolSearchCache:
                             record.name,
                             record.description,
                             json.dumps(record.tags, ensure_ascii=False),
-                            json.dumps(record.declared_tags, ensure_ascii=False),
+                            json.dumps(
+                                record.declared_tags, ensure_ascii=False
+                            ),
                             record.side_effects,
                             record.loading_mode,
                             record.record_hash,
@@ -161,18 +200,23 @@ class ToolSearchCache:
         tags: Sequence[str] = (),
         namespace: str | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
+        """Search the indexed tools; return the results and the search used."""
         cleaned_query = query.strip()
         if not cleaned_query:
             return [], search_type
 
         effective_search_type = search_type
         if search_type == "fts" and not self.fts_available:
-            effective_search_type = "regex" if self._fts_fallback_to_regex else "exact"
+            effective_search_type = (
+                "regex" if self._fts_fallback_to_regex else "exact"
+            )
 
         limit = min(max(int(limit), 1), self._max_search_results)
 
         required_tags = _normalise_tag_filter(tags)
-        namespace_filter = namespace.strip() if isinstance(namespace, str) else None
+        namespace_filter = (
+            namespace.strip() if isinstance(namespace, str) else None
+        )
         if namespace_filter == "":
             namespace_filter = None
 
@@ -180,15 +224,22 @@ class ToolSearchCache:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("PRAGMA case_sensitive_like = OFF")
             if effective_search_type == "fts":
-                results, executed = self._search_fts(conn, cleaned_query, allowed_names)
+                results, executed = self._search_fts(
+                    conn, cleaned_query, allowed_names
+                )
                 if not executed and cleaned_query:
-                    # FTS query could not be executed (parser error / empty tokens) -> fail-soft.
+                    # FTS query could not be executed (parser error / empty
+                    # tokens) -> fail-soft.
                     if self._fts_fallback_to_regex:
                         effective_search_type = "regex"
-                        results = self._search_regex_exact(conn, cleaned_query, "regex", allowed_names)
+                        results = self._search_regex_exact(
+                            conn, cleaned_query, "regex", allowed_names
+                        )
                     else:
                         effective_search_type = "exact"
-                        results = self._search_regex_exact(conn, cleaned_query, "exact", allowed_names)
+                        results = self._search_regex_exact(
+                            conn, cleaned_query, "exact", allowed_names
+                        )
             else:
                 results = self._search_regex_exact(
                     conn,
@@ -201,13 +252,27 @@ class ToolSearchCache:
             item
             for item in results
             if include_always_loaded
-            or not _is_always_loaded(item["name"], item["loading_mode"], self._always_loaded_patterns)
+            or not _is_always_loaded(
+                item["name"],
+                item["loading_mode"],
+                self._always_loaded_patterns,
+            )
         ]
 
         if required_tags:
-            filtered = [item for item in filtered if _matches_tag_filter(item.get("declared_tags", []), required_tags)]
+            filtered = [
+                item
+                for item in filtered
+                if _matches_tag_filter(
+                    item.get("declared_tags", []), required_tags
+                )
+            ]
         if namespace_filter is not None:
-            filtered = [item for item in filtered if _matches_namespace(item["name"], namespace_filter)]
+            filtered = [
+                item
+                for item in filtered
+                if _matches_namespace(item["name"], namespace_filter)
+            ]
 
         sorted_results = sorted(
             filtered,
@@ -250,9 +315,13 @@ class ToolSearchCache:
                 )
                 """
             )
-            # Schema v2 migration: add declared_tags column on pre-existing databases.
+            # Schema v2 migration: add declared_tags column on pre-existing
+            # databases.
             try:
-                conn.execute("ALTER TABLE tools ADD COLUMN declared_tags TEXT NOT NULL DEFAULT '[]'")
+                conn.execute(
+                    "ALTER TABLE tools ADD COLUMN declared_tags TEXT "
+                    "NOT NULL DEFAULT '[]'"
+                )
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
@@ -292,12 +361,16 @@ class ToolSearchCache:
                 VALUES (new.rowid, new.name, new.description, new.tags);
             END;
             CREATE TRIGGER IF NOT EXISTS tools_ad AFTER DELETE ON tools BEGIN
-                INSERT INTO tools_fts(tools_fts, rowid, name, description, tags)
-                VALUES('delete', old.rowid, old.name, old.description, old.tags);
+                INSERT INTO tools_fts(tools_fts, rowid, name, description, \
+tags)
+                VALUES('delete', old.rowid, old.name, old.description, \
+old.tags);
             END;
             CREATE TRIGGER IF NOT EXISTS tools_au AFTER UPDATE ON tools BEGIN
-                INSERT INTO tools_fts(tools_fts, rowid, name, description, tags)
-                VALUES('delete', old.rowid, old.name, old.description, old.tags);
+                INSERT INTO tools_fts(tools_fts, rowid, name, description, \
+tags)
+                VALUES('delete', old.rowid, old.name, old.description, \
+old.tags);
                 INSERT INTO tools_fts(rowid, name, description, tags)
                 VALUES (new.rowid, new.name, new.description, new.tags);
             END;
@@ -326,35 +399,41 @@ class ToolSearchCache:
             allowed_params.extend(sorted(allowed_names))
 
         sql = (
-            "SELECT tools.name, tools.description, tools.tags, tools.declared_tags, "
+            "SELECT tools.name, tools.description, tools.tags, "
+            "tools.declared_tags, "
             "tools.side_effects, tools.loading_mode, bm25(tools_fts) as rank "
             "FROM tools_fts JOIN tools ON tools_fts.rowid = tools.rowid "
             "WHERE tools_fts MATCH ?" + clause
         )
 
-        def _run(match_query: str) -> list[tuple[Any, ...]] | None:
-            try:
-                return conn.execute(sql, [match_query, *allowed_params]).fetchall()
-            except sqlite3.OperationalError as exc:
-                message = str(exc).lower()
-                if "syntax error" in message or "fts5" in message:
-                    return None
-                raise
-
-        rows = _run(strict_query)
+        rows = _run_fts(conn, sql, [strict_query, *allowed_params])
         if rows is None:
             return [], False
         if not rows:
-            # AND queries are often too strict. Retry with OR for better recall.
-            rows = _run(relaxed_query)
+            # AND queries are often too strict. Retry with OR for better
+            # recall.
+            rows = _run_fts(conn, sql, [relaxed_query, *allowed_params])
             if rows is None:
                 return [], False
         if not rows:
             return [], True
+        return self._score_fts_rows(rows), True
 
+    def _score_fts_rows(
+        self, rows: list[tuple[Any, ...]]
+    ) -> list[dict[str, Any]]:
+        """Turn bm25-ranked rows into results with normalized scores."""
         scored: list[dict[str, Any]] = []
         raw_scores: list[float] = []
-        for name, description, tags, declared_tags, side_effects, loading_mode, raw in rows:
+        for (
+            name,
+            description,
+            tags,
+            declared_tags,
+            side_effects,
+            loading_mode,
+            raw,
+        ) in rows:
             raw_value = float(raw) if raw is not None else 0.0
             raw_value = max(raw_value, 0.0)
             score_raw = 1.0 / (1.0 + raw_value)
@@ -366,7 +445,8 @@ class ToolSearchCache:
                     "tags": _parse_tags(tags),
                     "declared_tags": _parse_tags(declared_tags),
                     "side_effects": side_effects or "pure",
-                    "loading_mode": loading_mode or ToolLoadingMode.ALWAYS.value,
+                    "loading_mode": loading_mode
+                    or ToolLoadingMode.ALWAYS.value,
                     "match_type": "fts",
                     "score_raw": score_raw,
                 }
@@ -378,12 +458,18 @@ class ToolSearchCache:
             if max_score == min_score:
                 score = 0.5
             else:
-                score = (item["score_raw"] - min_score) / (max_score - min_score)
+                score = (item["score_raw"] - min_score) / (
+                    max_score - min_score
+                )
             item["score"] = max(0.0, min(1.0, score))
-            item["namespace_rank"] = _namespace_rank(item["name"], self._preferred_namespaces)
-            item["side_effects_rank"] = _SIDE_EFFECT_RANK.get(item["side_effects"], 99)
+            item["namespace_rank"] = _namespace_rank(
+                item["name"], self._preferred_namespaces
+            )
+            item["side_effects_rank"] = _SIDE_EFFECT_RANK.get(
+                item["side_effects"], 99
+            )
             item.pop("score_raw", None)
-        return scored, True
+        return scored
 
     def _search_regex_exact(
         self,
@@ -407,7 +493,6 @@ def _coerce_fts_query(value: str) -> str:
     SQLite FTS5 MATCH has its own query grammar; raw user input may contain
     punctuation (e.g. '!') that triggers parser errors.
     """
-
     return " ".join(_fts_tokens(value))
 
 
@@ -461,13 +546,15 @@ def _catalog_fingerprint(records: Sequence[_ToolRecord]) -> str:
     return _hash_payload(payload)
 
 
-def _hash_payload(payload: Any) -> str:
+def _hash_payload(payload: object) -> str:
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _get_meta(conn: sqlite3.Connection, key: str) -> str | None:
-    row = conn.execute("SELECT value FROM tool_index_meta WHERE key = ?", (key,)).fetchone()
+    row = conn.execute(
+        "SELECT value FROM tool_index_meta WHERE key = ?", (key,)
+    ).fetchone()
     if row:
         return str(row[0])
     return None
@@ -497,7 +584,8 @@ def _fetch_tool_rows(
         clause = f" WHERE name IN ({placeholders})"
         params.extend(sorted(allowed_names))
     sql = (
-        "SELECT name, description, tags, declared_tags, side_effects, loading_mode "
+        "SELECT name, description, tags, declared_tags, side_effects, "
+        "loading_mode "
         f"FROM tools{clause}"
     )
     return [
@@ -509,7 +597,14 @@ def _fetch_tool_rows(
             str(side_effects or "pure"),
             str(loading_mode or ToolLoadingMode.ALWAYS.value),
         )
-        for name, description, tags, declared_tags, side_effects, loading_mode in conn.execute(sql, params)
+        for (
+            name,
+            description,
+            tags,
+            declared_tags,
+            side_effects,
+            loading_mode,
+        ) in conn.execute(sql, params)
     ]
 
 
@@ -520,7 +615,14 @@ def _score_exact(
 ) -> list[dict[str, Any]]:
     query_lower = query.lower()
     results: list[dict[str, Any]] = []
-    for name, description, tags_raw, declared_tags_raw, side_effects, loading_mode in rows:
+    for (
+        name,
+        description,
+        tags_raw,
+        declared_tags_raw,
+        side_effects,
+        loading_mode,
+    ) in rows:
         tags = _parse_tags(tags_raw)
         declared_tags = _parse_tags(declared_tags_raw)
         if not _exact_match(query_lower, name, description, tags):
@@ -553,7 +655,8 @@ def _score_regex(
     except re.error:
         regex = None
 
-    # Natural language queries with whitespace are rarely intended as literal regex.
+    # Natural language queries with whitespace are rarely intended as literal
+    # regex.
     if regex is None or any(ch.isspace() for ch in query):
         tokens = _fts_tokens(query)
         if not tokens:
@@ -565,7 +668,14 @@ def _score_regex(
             return []
 
     results: list[dict[str, Any]] = []
-    for name, description, tags_raw, declared_tags_raw, side_effects, loading_mode in rows:
+    for (
+        name,
+        description,
+        tags_raw,
+        declared_tags_raw,
+        side_effects,
+        loading_mode,
+    ) in rows:
         tags = _parse_tags(tags_raw)
         declared_tags = _parse_tags(declared_tags_raw)
         score = _regex_score(regex, name, description, tags)
@@ -588,7 +698,9 @@ def _score_regex(
     return results
 
 
-def _exact_match(query: str, name: str, description: str, tags: list[str]) -> bool:
+def _exact_match(
+    query: str, name: str, description: str, tags: list[str]
+) -> bool:
     if query == name.lower():
         return True
     if query == description.lower():
@@ -646,7 +758,9 @@ def _normalise_tag_filter(tags: Sequence[str]) -> list[str]:
     return cleaned
 
 
-def _matches_tag_filter(declared_tags: Sequence[str], required: Sequence[str]) -> bool:
+def _matches_tag_filter(
+    declared_tags: Sequence[str], required: Sequence[str]
+) -> bool:
     if not required:
         return True
     declared = {str(tag) for tag in declared_tags or ()}
@@ -659,7 +773,9 @@ def _matches_namespace(name: str, namespace: str) -> bool:
     return name == namespace or name.startswith(namespace + ".")
 
 
-def _is_always_loaded(name: str, loading_mode: str, patterns: Sequence[str]) -> bool:
+def _is_always_loaded(
+    name: str, loading_mode: str, patterns: Sequence[str]
+) -> bool:
     if loading_mode == ToolLoadingMode.ALWAYS.value:
         return True
     if not patterns:

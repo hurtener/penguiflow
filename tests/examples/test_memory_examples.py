@@ -1,3 +1,5 @@
+"""Tests for memory examples."""
+
 from __future__ import annotations
 
 import pytest
@@ -12,6 +14,7 @@ from examples.memory_truncation.flow import run_demo as run_truncation
 
 @pytest.mark.asyncio
 async def test_memory_basic_injects_previous_turn() -> None:
+    """Memory basic injects previous turn."""
     payload = await run_basic()
     recent = payload["conversation_memory"]["recent_turns"]
     assert recent[0]["user"] == "q1"
@@ -20,6 +23,7 @@ async def test_memory_basic_injects_previous_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_truncation_keeps_last_two_turns() -> None:
+    """Memory truncation keeps last two turns."""
     payload = await run_truncation()
     recent = payload["recent_turns"]
     assert [t["user"] for t in recent] == ["q2", "q3"]
@@ -27,6 +31,7 @@ async def test_memory_truncation_keeps_last_two_turns() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_persistence_hydrates_from_state_store() -> None:
+    """Memory persistence hydrates from state store."""
     payload = await run_persistence()
     recent = payload["conversation_memory"]["recent_turns"]
     assert recent[0]["user"] == "q1"
@@ -35,23 +40,34 @@ async def test_memory_persistence_hydrates_from_state_store() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_redis_serialization_roundtrip() -> None:
+    """Memory redis serialization roundtrip."""
     payload = await run_redis()
-    recent = payload["llm_prompt_context"]["conversation_memory"]["recent_turns"]
+    recent = payload["llm_prompt_context"]["conversation_memory"][
+        "recent_turns"
+    ]
     assert recent[0]["user"] == "q1"
     assert recent[0]["assistant"] == "a1"
 
 
 @pytest.mark.asyncio
 async def test_memory_callbacks_emit_events() -> None:
+    """Memory callbacks emit events."""
     payload = await run_callbacks()
-    assert payload["turns"] == [{"user": "q1", "assistant": "a1"}, {"user": "q2", "assistant": "a2"}]
+    assert payload["turns"] == [
+        {"user": "q1", "assistant": "a1"},
+        {"user": "q2", "assistant": "a2"},
+    ]
     assert payload["summaries"]
-    assert any(item["new"].startswith("<session_summary>") for item in payload["summaries"])
+    assert any(
+        item["new"].startswith("<session_summary>")
+        for item in payload["summaries"]
+    )
     assert payload["health"]
 
 
 @pytest.mark.asyncio
 async def test_memory_custom_injects_turns() -> None:
+    """Memory custom injects turns."""
     payload = await run_custom()
     recent = payload["conversation_memory"]["recent_turns"]
     assert recent[0]["user"] == "q1"

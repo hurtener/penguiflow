@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from .react import ReflectionCriteria, Trajectory
-
 if TYPE_CHECKING:  # pragma: no cover - type checking helper
-    from .react import ReflectionCritique
+    from .react import ReflectionCriteria, ReflectionCritique, Trajectory
 
 
 def build_critique_system_prompt(criteria: ReflectionCriteria) -> str:
     """Build the system prompt instructing the critique LLM."""
-
     return f"""You are a quality assessor for AI-generated answers.
 
-Your task is to evaluate whether an answer adequately addresses the user's query.
+Your task is to evaluate whether an answer adequately addresses the user's \
+query.
 
 ## Evaluation Criteria
 
@@ -51,11 +49,10 @@ Be critical but fair. An answer must address ALL parts of the query to pass.
 
 def build_critique_user_prompt(
     query: str,
-    candidate_answer: Any,
+    candidate_answer: object,
     trajectory: Trajectory,
 ) -> str:
     """Build the user prompt containing query, trajectory and answer."""
-
     trajectory_summary = _summarize_trajectory_for_critique(trajectory)
 
     return f"""## Original Query
@@ -75,7 +72,6 @@ Does it fully address the query based on the information gathered?
 
 def _summarize_trajectory_for_critique(trajectory: Trajectory) -> str:
     """Render a compact textual summary of recent trajectory steps."""
-
     if not trajectory.steps:
         return "No tool calls were made."
 
@@ -88,11 +84,12 @@ def _summarize_trajectory_for_critique(trajectory: Trajectory) -> str:
     return "\n".join(lines) if lines else "No recent tool usage recorded."
 
 
-def _format_answer(answer: Any) -> str:
+def _format_answer(answer: object) -> str:
     """Format the candidate answer for inclusion in a prompt."""
-
     if isinstance(answer, BaseModel):
-        return json.dumps(answer.model_dump(mode="json"), indent=2, ensure_ascii=False)
+        return json.dumps(
+            answer.model_dump(mode="json"), indent=2, ensure_ascii=False
+        )
     if isinstance(answer, dict):
         for key in ("answer", "result", "response", "output"):
             if key in answer:
@@ -108,14 +105,17 @@ def build_revision_prompt(
     critique: ReflectionCritique,
 ) -> str:
     """Build the prompt requesting a revised answer from the planner LLM."""
-
     suggestions = critique.suggestions or []
     if suggestions:
         suggestion_lines = "\n".join(f"- {item}" for item in suggestions)
     else:
         suggestion_lines = "- Address the critique feedback above"
 
-    thought_section = f"Previous reasoning: {original_thought}\n\n" if original_thought else ""
+    thought_section = (
+        f"Previous reasoning: {original_thought}\n\n"
+        if original_thought
+        else ""
+    )
 
     instructions = (
         "Please revise your answer to address these concerns. "

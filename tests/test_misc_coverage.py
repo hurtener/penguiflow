@@ -1,5 +1,7 @@
 """Coverage tests for message envelopes and node policies."""
 
+from __future__ import annotations
+
 import pytest
 
 from penguiflow import NodePolicy
@@ -7,7 +9,7 @@ from penguiflow import NodePolicy
 # ─── Core coverage - Message envelope ────────────────────────────────────────
 
 
-def test_message_headers_propagation():
+def test_message_headers_propagation() -> None:
     """Message headers should be preserved through copy."""
     from penguiflow.types import Headers, Message
 
@@ -22,7 +24,7 @@ def test_message_headers_propagation():
 # ─── Node policy tests ───────────────────────────────────────────────────────
 
 
-def test_node_policy_defaults():
+def test_node_policy_defaults() -> None:
     """NodePolicy should have correct defaults."""
     policy = NodePolicy()
     assert policy.validate == "both"
@@ -30,7 +32,7 @@ def test_node_policy_defaults():
     assert policy.max_retries == 0
 
 
-def test_node_policy_custom():
+def test_node_policy_custom() -> None:
     """NodePolicy should accept custom values."""
     policy = NodePolicy(validate="in", timeout_s=30.0, max_retries=3)
     assert policy.validate == "in"
@@ -38,7 +40,7 @@ def test_node_policy_custom():
     assert policy.max_retries == 3
 
 
-def test_node_policy_invalid_validate():
+def test_node_policy_invalid_validate() -> None:
     """NodePolicy should reject invalid validate values."""
     with pytest.raises(ValueError, match="validate must be one of"):
         NodePolicy(validate="invalid")

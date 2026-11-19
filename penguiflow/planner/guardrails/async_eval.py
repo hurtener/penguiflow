@@ -6,24 +6,31 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from .context import ContextSnapshotV1, GuardrailEvent
-from .models import GuardrailDecision
-from .protocols import GuardrailRule
-from .registry import RuleRegistry
 
 if TYPE_CHECKING:
     from penguiflow.steering.guard_inbox import SteeringGuardEvent
+
+    from .models import GuardrailDecision
+    from .protocols import GuardrailRule
+    from .registry import RuleRegistry
 
 
 class AsyncRuleEvaluator:
     """Evaluates deep (async) rules for a submitted event."""
 
     def __init__(self, registry: RuleRegistry) -> None:
+        """Evaluate the async rules of ``registry``."""
         self._registry = registry
 
-    async def evaluate(self, event: SteeringGuardEvent) -> list[GuardrailDecision]:
+    async def evaluate(
+        self, event: SteeringGuardEvent
+    ) -> list[GuardrailDecision]:
+        """Run the event's async rules concurrently; return their decisions."""
         rules = self._registry.get_async_rules(event.event_type)
         if event.required_rules:
-            rules = [rule for rule in rules if rule.rule_id in event.required_rules]
+            rules = [
+                rule for rule in rules if rule.rule_id in event.required_rules
+            ]
         if not rules:
             return []
 
@@ -43,12 +50,14 @@ class AsyncRuleEvaluator:
 
         async def safe_eval(rule: GuardrailRule) -> GuardrailDecision | None:
             try:
-                decision = await rule.evaluate(guardrail_event, context_snapshot)
-                if decision:
-                    decision.was_sync = False
-                return decision
+                decision = await rule.evaluate(
+                    guardrail_event, context_snapshot
+                )
             except Exception:
                 return None
+            if decision:
+                decision.was_sync = False
+            return decision
 
         results = await asyncio.gather(*[safe_eval(rule) for rule in rules])
         return [decision for decision in results if decision is not None]

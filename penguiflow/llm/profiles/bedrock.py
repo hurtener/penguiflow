@@ -556,7 +556,8 @@ PROFILES: dict[str, ModelProfile] = {
         supports_reasoning=True,
         supports_streaming=True,
         default_output_mode="prompted",  # Uses prompted JSON output
-        native_structured_kind="bedrock_tool_use",  # Falls back to prompted mode
+        # Falls back to prompted mode
+        native_structured_kind="bedrock_tool_use",
         schema_transformer_name="BedrockJsonSchemaTransformer",
         strict_mode_default=False,
         max_context_tokens=64000,

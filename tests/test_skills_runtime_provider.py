@@ -1,13 +1,18 @@
+"""Tests for skills runtime provider."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+import re
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import ValidationError
+from typing_extensions import override
 
 from penguiflow.planner import ReactPlanner
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.skills import (
     CompositeSkillProvider,
     RetrievalResponse,
@@ -26,21 +31,32 @@ from penguiflow.skills import (
     SkillSearchResult,
 )
 from penguiflow.skills.provider import build_skill_capability_context
-from penguiflow.skills.tools.skill_propose_tool import SkillProposeArgs, skill_propose
+from penguiflow.skills.tools.skill_propose_tool import (
+    SkillProposeArgs,
+    skill_propose,
+)
+
+from .tool_context_doubles import FakeToolContext
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from pathlib import Path
+
+    from penguiflow.skills import SkillCapabilityContext, SkillsDirectoryConfig
 
 
-class _StaticSkillProvider:
+class _StaticSkillProvider(SkillProvider):
     def __init__(self, skills: list[SkillResultDetailed]) -> None:
         self._skills = {skill.name: skill for skill in skills}
 
+    @override
     async def get_relevant(
         self,
         query: SkillQuery,
         *,
-        tool_context: dict[str, object],
-        capability_context: object | None = None,
+        tool_context: Mapping[str, object],
+        capability_context: SkillCapabilityContext | None = None,
     ) -> RetrievalResponse:
-        del tool_context, capability_context
         skills = list(self._skills.values())[: query.top_k]
         return RetrievalResponse(
             skills=skills,
@@ -53,14 +69,14 @@ class _StaticSkillProvider:
             was_summarized=False,
         )
 
+    @override
     async def search(
         self,
         query: SkillSearchQuery,
         *,
-        tool_context: dict[str, object],
-        capability_context: object | None = None,
+        tool_context: Mapping[str, object],
+        capability_context: SkillCapabilityContext | None = None,
     ) -> SkillSearchResponse:
-        del tool_context, capability_context
         needle = query.query.lower()
         matches = [
             SkillSearchResult(
@@ -73,26 +89,28 @@ class _StaticSkillProvider:
             for skill in self._skills.values()
             if needle in skill.name.lower() or needle in skill.trigger.lower()
         ][: query.limit]
-        return SkillSearchResponse(skills=matches, query=query.query, search_type=query.search_type)
+        return SkillSearchResponse(
+            skills=matches, query=query.query, search_type=query.search_type
+        )
 
+    @override
     async def get_by_name(
         self,
-        names: list[str],
+        names: Sequence[str],
         *,
-        tool_context: dict[str, object],
-        capability_context: object | None = None,
+        tool_context: Mapping[str, object],
+        capability_context: SkillCapabilityContext | None = None,
     ) -> list[SkillResultDetailed]:
-        del tool_context, capability_context
         return [self._skills[name] for name in names if name in self._skills]
 
+    @override
     async def list(
         self,
         req: SkillListRequest,
         *,
-        tool_context: dict[str, object],
-        capability_context: object | None = None,
+        tool_context: Mapping[str, object],
+        capability_context: SkillCapabilityContext | None = None,
     ) -> SkillListResponse:
-        del tool_context, capability_context
         ordered = list(self._skills.values())
         offset = (req.page - 1) * req.page_size
         page = ordered[offset : offset + req.page_size]
@@ -111,14 +129,14 @@ class _StaticSkillProvider:
             total=len(ordered),
         )
 
+    @override
     async def directory(
         self,
-        config: Any,
+        config: SkillsDirectoryConfig,
         *,
-        tool_context: dict[str, object],
-        capability_context: object | None = None,
-    ) -> list[SkillDirectoryEntry]:
-        del tool_context, capability_context
+        tool_context: Mapping[str, object],
+        capability_context: SkillCapabilityContext | None = None,
+    ) -> Sequence[SkillDirectoryEntry]:
         return [
             SkillDirectoryEntry(
                 name=skill.name,
@@ -129,13 +147,13 @@ class _StaticSkillProvider:
             for skill in list(self._skills.values())[: config.max_entries]
         ]
 
+    @override
     async def format_for_injection(
         self,
-        skills: list[SkillResultDetailed],
+        skills: Sequence[SkillResultDetailed],
         *,
         max_tokens: int,
     ) -> tuple[str, int, int, bool]:
-        del max_tokens
         return "\n".join(skill.name for skill in skills), 0, 0, False
 
 
@@ -143,20 +161,23 @@ class _PagedSkillProvider(_StaticSkillProvider):
     def __init__(self, prefix: str, count: int) -> None:
         super().__init__(
             [
-                _runtime_skill(f"{prefix}.skill_{index}", trigger=f"{prefix} trigger {index}")
+                _runtime_skill(
+                    f"{prefix}.skill_{index}",
+                    trigger=f"{prefix} trigger {index}",
+                )
                 for index in range(count)
             ]
         )
         self._ordered_names = list(self._skills.keys())
 
+    @override
     async def list(
         self,
         req: SkillListRequest,
         *,
-        tool_context: dict[str, object],
-        capability_context: object | None = None,
+        tool_context: Mapping[str, object],
+        capability_context: SkillCapabilityContext | None = None,
     ) -> SkillListResponse:
-        del tool_context, capability_context
         offset = (req.page - 1) * req.page_size
         page_names = self._ordered_names[offset : offset + req.page_size]
         return SkillListResponse(
@@ -175,32 +196,36 @@ class _PagedSkillProvider(_StaticSkillProvider):
         )
 
 
-class _StubClient:
+class _StubClient(JSONLLMClient):
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
-        self.calls: list[list[dict[str, str]]] = []
-        self.response_formats: list[dict[str, object] | None] = []
+        self.calls: list[list[Mapping[str, Any]]] = []
+        self.response_formats: list[Mapping[str, Any] | None] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[dict[str, str]],
-        response_format: dict[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del stream, on_stream_chunk
         self.calls.append(list(messages))
         self.response_formats.append(response_format)
         if not self._responses:
-            raise AssertionError("No stub response configured")
+            msg = "No stub response configured"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.25
 
 
-class _DummyCtx:
+class _DummyCtx(FakeToolContext):
+    """Tool context of project ``proj`` bound to ``planner``."""
+
     def __init__(self, planner: ReactPlanner) -> None:
-        self._planner = planner
-        self.tool_context = {"project_id": "proj"}
+        """Bind ``planner`` as the context's planner."""
+        super().__init__(tool_context={"project_id": "proj"})
+        self.planner = planner
 
 
 def _runtime_skill(name: str, *, trigger: str) -> SkillResultDetailed:
@@ -214,20 +239,27 @@ def _runtime_skill(name: str, *, trigger: str) -> SkillResultDetailed:
 
 
 def test_react_planner_custom_skills_provider_enables_skill_tools() -> None:
-    provider = _StaticSkillProvider([_runtime_skill("runtime.persona.mail_triage", trigger="Triage mail")])
+    """ReAct planner custom skills provider enables skill tools."""
+    provider = _StaticSkillProvider(
+        [_runtime_skill("runtime.persona.mail_triage", trigger="Triage mail")]
+    )
     planner = ReactPlanner(
         llm_client=_StubClient([]),
         catalog=[],
         skills_provider=provider,
     )
 
-    assert planner._skills_provider is provider
-    assert planner._skills_config.enabled is True
-    assert {"skill_search", "skill_get", "skill_list"}.issubset(planner._spec_by_name)
-    assert "skill_propose" not in planner._spec_by_name
+    assert planner.skills_provider is provider
+    assert planner.skills_config is not None
+    assert planner.skills_config.enabled is True
+    assert {"skill_search", "skill_get", "skill_list"}.issubset(
+        planner.spec_by_name
+    )
+    assert "skill_propose" not in planner.spec_by_name
 
 
 def test_react_planner_rejects_invalid_skill_provider_configs() -> None:
+    """ReAct planner rejects invalid skill provider configs."""
     provider = _StaticSkillProvider([])
 
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -235,10 +267,10 @@ def test_react_planner_rejects_invalid_skill_provider_configs() -> None:
             llm_client=_StubClient([]),
             catalog=[],
             skills_provider=provider,
-            skills_provider_factory=lambda config: provider,
+            skills_provider_factory=lambda _config: provider,
         )
 
-    with pytest.raises(ValueError, match="skills.enabled=True"):
+    with pytest.raises(ValueError, match=re.escape("skills.enabled=True")):
         ReactPlanner(
             llm_client=_StubClient([]),
             catalog=[],
@@ -248,12 +280,18 @@ def test_react_planner_rejects_invalid_skill_provider_configs() -> None:
 
 
 def test_react_planner_skills_provider_factory_survives_fork() -> None:
+    """ReAct planner skills provider factory survives fork."""
     created: list[_StaticSkillProvider] = []
 
     def factory(config: SkillsConfig) -> SkillProvider:
         assert config.enabled is True
         provider = _StaticSkillProvider(
-            [_runtime_skill(f"runtime.persona.skill_{len(created)}", trigger="Runtime skill")]
+            [
+                _runtime_skill(
+                    f"runtime.persona.skill_{len(created)}",
+                    trigger="Runtime skill",
+                )
+            ]
         )
         created.append(provider)
         return provider
@@ -266,13 +304,16 @@ def test_react_planner_skills_provider_factory_survives_fork() -> None:
     child = planner.fork()
 
     assert len(created) == 2
-    assert planner._skills_provider is created[0]
-    assert child._skills_provider is created[1]
-    assert child._skills_provider is not planner._skills_provider
+    assert planner.skills_provider is created[0]
+    assert child.skills_provider is created[1]
+    assert child.skills_provider is not planner.skills_provider
 
 
 @pytest.mark.asyncio
-async def test_react_planner_composes_local_and_runtime_skills_with_runtime_precedence(tmp_path: Path) -> None:
+async def test_planner_composes_local_and_runtime_skills(
+    tmp_path: Path,
+) -> None:
+    """Local and runtime skills compose, with runtime ones first."""
     pack_root = tmp_path / "skills"
     pack_root.mkdir()
     (pack_root / "mail_triage.skill.yaml").write_text(
@@ -290,8 +331,12 @@ async def test_react_planner_composes_local_and_runtime_skills_with_runtime_prec
     )
     runtime_provider = _StaticSkillProvider(
         [
-            _runtime_skill("pack.demo.mail_triage", trigger="Runtime override"),
-            _runtime_skill("runtime.persona.mail_escalation", trigger="Escalate VIP mail"),
+            _runtime_skill(
+                "pack.demo.mail_triage", trigger="Runtime override"
+            ),
+            _runtime_skill(
+                "runtime.persona.mail_escalation", trigger="Escalate VIP mail"
+            ),
         ]
     )
     planner = ReactPlanner(
@@ -305,47 +350,65 @@ async def test_react_planner_composes_local_and_runtime_skills_with_runtime_prec
         skills_provider=runtime_provider,
     )
 
-    assert isinstance(planner._skills_provider, CompositeSkillProvider)
-    details = await planner._skills_provider.get_by_name(
+    assert isinstance(planner.skills_provider, CompositeSkillProvider)
+    details = await planner.skills_provider.get_by_name(
         ["pack.demo.mail_triage", "runtime.persona.mail_escalation"],
         tool_context={"project_id": "proj"},
-        capability_context=build_skill_capability_context(allowed_tool_names=set()),
+        capability_context=build_skill_capability_context(
+            allowed_tool_names=set()
+        ),
     )
 
-    assert [item.name for item in details] == ["pack.demo.mail_triage", "runtime.persona.mail_escalation"]
+    assert [item.name for item in details] == [
+        "pack.demo.mail_triage",
+        "runtime.persona.mail_escalation",
+    ]
     assert details[0].trigger == "Runtime override"
 
 
 @pytest.mark.asyncio
 async def test_composite_skill_provider_lists_across_provider_pages() -> None:
+    """Composite skill provider lists across provider pages."""
     provider = CompositeSkillProvider(
-        [_PagedSkillProvider("runtime.alpha", 3), _PagedSkillProvider("runtime.beta", 3)],
+        [
+            _PagedSkillProvider("runtime.alpha", 3),
+            _PagedSkillProvider("runtime.beta", 3),
+        ],
         config=SkillsConfig(enabled=True),
     )
 
     response = await provider.list(
         SkillListRequest(page=2, page_size=2),
         tool_context={"project_id": "proj"},
-        capability_context=build_skill_capability_context(allowed_tool_names=set()),
+        capability_context=build_skill_capability_context(
+            allowed_tool_names=set()
+        ),
     )
 
     assert response.total == 6
-    assert [entry.name for entry in response.skills] == ["runtime.alpha.skill_2", "runtime.beta.skill_0"]
+    assert [entry.name for entry in response.skills] == [
+        "runtime.alpha.skill_2",
+        "runtime.beta.skill_0",
+    ]
 
 
 def test_skill_propose_is_disabled_by_default() -> None:
+    """Skill propose is disabled by default."""
     planner = ReactPlanner(
         llm_client=_StubClient([]),
         catalog=[],
         skills=SkillsConfig(enabled=True),
     )
 
-    assert "skill_propose" not in planner._spec_by_name
-    assert "Use skill_propose" not in planner._system_prompt
+    assert "skill_propose" not in planner.spec_by_name
+    assert "Use skill_propose" not in planner.system_prompt
 
 
 @pytest.mark.asyncio
-async def test_skill_propose_returns_structured_draft_and_records_event() -> None:
+async def test_skill_propose_returns_structured_draft_and_records_event() -> (
+    None
+):
+    """Skill propose returns structured draft and records event."""
     client = _StubClient(
         [
             json.dumps(
@@ -375,7 +438,10 @@ async def test_skill_propose_returns_structured_draft_and_records_event() -> Non
 
     response = await skill_propose(
         SkillProposeArgs(
-            source_material="When new support email arrives, open the inbox and prioritize urgent threads.",
+            source_material=(
+                "When new support email arrives, open the inbox and "
+                "prioritize urgent threads."
+            ),
             task_type="domain",
             required_tool_names=["mail.search"],
             required_namespaces=["mail"],
@@ -384,17 +450,21 @@ async def test_skill_propose_returns_structured_draft_and_records_event() -> Non
         _DummyCtx(planner),
     )
 
-    assert "skill_propose" in planner._spec_by_name
-    assert "It does NOT save or persist skills." in planner._system_prompt
+    assert "skill_propose" in planner.spec_by_name
+    assert "It does NOT save or persist skills." in planner.system_prompt
     assert response.draft.skill.required_tool_names == ["mail.search"]
     assert response.draft.warnings == ["Needs human review"]
-    assert client.response_formats[0] is not None
-    assert client.response_formats[0]["json_schema"]["name"] == "skill_proposal"
-    assert any(event.event_type == "skill_propose" for event in planner._event_buffer)
+    response_format = client.response_formats[0]
+    assert response_format is not None
+    assert response_format["json_schema"]["name"] == "skill_proposal"
+    assert any(
+        event.event_type == "skill_propose" for event in planner.event_buffer
+    )
 
 
 @pytest.mark.asyncio
 async def test_skill_propose_surfaces_invalid_draft_payload() -> None:
+    """Skill propose surfaces invalid draft payload."""
     planner = ReactPlanner(
         llm_client=_StubClient([json.dumps({"skill": {"name": "broken"}})]),
         catalog=[],

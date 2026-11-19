@@ -31,7 +31,7 @@ def _make_registry() -> ArtifactRegistry:
 
 
 async def test_clamp_observation_stores_artifact_with_full_scope() -> None:
-    """When observation exceeds threshold, stored artifact has the full scope."""
+    """Oversized observations are stored with the full scope."""
     store = InMemoryArtifactStore()
     scope = ArtifactScope(
         session_id="sess-1",
@@ -41,9 +41,11 @@ async def test_clamp_observation_stores_artifact_with_full_scope() -> None:
     )
     # Create an observation large enough to exceed max_observation_chars (1000)
     large_obs = {"data": "x" * 2000}
-    config = _make_config(auto_artifact_threshold=100, max_observation_chars=1000)
+    config = _make_config(
+        auto_artifact_threshold=100, max_observation_chars=1000
+    )
 
-    result, was_clamped = await _clamp_observation(
+    _result, was_clamped = await _clamp_observation(
         observation=large_obs,
         spec_name="test_tool",
         trajectory_step=0,
@@ -69,12 +71,14 @@ async def test_clamp_observation_stores_artifact_with_full_scope() -> None:
 
 
 async def test_clamp_observation_stores_artifact_with_none_scope() -> None:
-    """When scope=None (default), _clamp_observation still works (backwards-compatible)."""
+    """_clamp_observation still works without a scope."""
     store = InMemoryArtifactStore()
     large_obs = {"data": "x" * 2000}
-    config = _make_config(auto_artifact_threshold=100, max_observation_chars=1000)
+    config = _make_config(
+        auto_artifact_threshold=100, max_observation_chars=1000
+    )
 
-    result, was_clamped = await _clamp_observation(
+    _result, was_clamped = await _clamp_observation(
         observation=large_obs,
         spec_name="test_tool",
         trajectory_step=0,

@@ -5,19 +5,24 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeGuard, cast
-
-from pydantic import BaseModel
-
-from penguiflow.artifacts import ArtifactRef
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast
 
 from .trajectory import BackgroundTaskResult
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+    from penguiflow.artifacts import ArtifactRef, ArtifactStore
+
+    from .trajectory import Trajectory
 
 ArtifactKind = Literal["ui_component", "binary", "tool_artifact"]
 
 
 @dataclass(slots=True)
 class ArtifactRecord:
+    """An artifact a tool produced during the run, addressable by ref."""
+
     ref: str
     kind: ArtifactKind
     source_tool: str | None = None
@@ -34,6 +39,7 @@ class ArtifactRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_public(self) -> dict[str, Any]:
+        """Return the record as shown to the LLM (no payload)."""
         return {
             "ref": self.ref,
             "kind": self.kind,
@@ -50,6 +56,7 @@ class ArtifactRecord:
         }
 
     def to_snapshot(self) -> dict[str, Any]:
+        """Return the record for persisting in the trajectory metadata."""
         return {
             "ref": self.ref,
             "kind": self.kind,
@@ -72,6 +79,7 @@ class ArtifactRegistry:
     """Track artifacts produced during planner execution."""
 
     def __init__(self) -> None:
+        """Create an empty registry."""
         self._records: list[ArtifactRecord] = []
         self._records_by_ref: dict[str, ArtifactRecord] = {}
         self._payloads: dict[str, Any] = {}
@@ -80,11 +88,10 @@ class ArtifactRegistry:
         self._external_keys: set[str] = set()
 
     @classmethod
-    def from_snapshot(cls, snapshot: Mapping[str, Any] | None) -> ArtifactRegistry:
+    def from_snapshot(cls, snapshot: object) -> ArtifactRegistry:
+        """Rebuild a registry from a :meth:`snapshot` (empty if invalid)."""
         registry = cls()
-        if not snapshot:
-            return registry
-        if not isinstance(snapshot, Mapping):
+        if not snapshot or not isinstance(snapshot, Mapping):
             return registry
         registry._counter = int(snapshot.get("counter", 0) or 0)
         for item in snapshot.get("records", []) or []:
@@ -95,7 +102,7 @@ class ArtifactRegistry:
                 kind_value = "tool_artifact"
             record = ArtifactRecord(
                 ref=str(item.get("ref", "")),
-                kind=cast(ArtifactKind, kind_value),
+                kind=cast("ArtifactKind", kind_value),
                 source_tool=item.get("source_tool"),
                 step_index=item.get("step_index"),
                 field_name=item.get("field_name"),
@@ -120,12 +127,14 @@ class ArtifactRegistry:
         return registry
 
     def snapshot(self) -> dict[str, Any]:
+        """Return the registry state to persist in the trajectory."""
         return {
             "counter": self._counter,
             "records": [record.to_snapshot() for record in self._records],
         }
 
     def write_snapshot(self, metadata: dict[str, Any]) -> None:
+        """Store the registry snapshot in a trajectory's metadata."""
         metadata["artifact_registry"] = self.snapshot()
 
     def list_records(
@@ -135,11 +144,16 @@ class ArtifactRegistry:
         source_tool: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Return public records, filtered by kind and source tool."""
         records = list(self._records)
         if kind and kind != "all":
             records = [record for record in records if record.kind == kind]
         if source_tool:
-            records = [record for record in records if record.source_tool == source_tool]
+            records = [
+                record
+                for record in records
+                if record.source_tool == source_tool
+            ]
         if limit is not None and limit > 0:
             records = records[-limit:]
         return [record.to_public() for record in records]
@@ -148,11 +162,12 @@ class ArtifactRegistry:
         self,
         tool_name: str,
         out_model: type[BaseModel],
-        observation: Mapping[str, Any],
+        observation: object,
         *,
         step_index: int,
         metadata_extra: Mapping[str, Any] | None = None,
     ) -> None:
+        """Register the artifact-marked fields of a tool's observation."""
         if not isinstance(observation, Mapping):
             return
         for field_name, field_info in out_model.model_fields.items():
@@ -185,12 +200,13 @@ class ArtifactRegistry:
         self,
         tool_name: str,
         field_name: str,
-        payload: Any,
+        payload: object,
         *,
         step_index: int,
         item_index: int | None = None,
         metadata_extra: Mapping[str, Any] | None = None,
     ) -> ArtifactRecord:
+        """Register one tool artifact and return its record."""
         ref = self._next_ref()
         component = _infer_component_name(payload)
         title = _extract_title(payload)
@@ -216,16 +232,19 @@ class ArtifactRegistry:
         self._payloads[ref] = payload
         return record
 
-    def ingest_llm_context(self, llm_context: Any, *, step_index: int | None = None) -> None:
+    def ingest_llm_context(
+        self, llm_context: object, *, step_index: int | None = None
+    ) -> None:
         """Ingest artifacts embedded in llm_context ContextPatch payloads.
 
         Legacy background task results were merged into session llm_context as
         serialized ContextPatch dicts (typically under `background_result(s)`),
         including an `artifacts` list. Those need to be registered into the
-        in-run ArtifactRegistry so they can be referenced via `artifact_ref` and
-        later resolved into UI component payloads.
+        in-run ArtifactRegistry so they can be referenced via `artifact_ref`
+        and later resolved into UI component payloads.
 
-        Newer runs should prefer ingest_background_results(trajectory.background_results).
+        Newer runs should prefer
+        ingest_background_results(trajectory.background_results).
 
         This is best-effort and idempotent for a given task/artifact key.
         """
@@ -245,9 +264,16 @@ class ArtifactRegistry:
 
         for patch in patches:
             task_id = patch.get("task_id")
-            self._ingest_patch_artifacts(task_id=task_id, artifacts=patch.get("artifacts"), step_index=target_step)
+            self._ingest_patch_artifacts(
+                task_id=task_id,
+                artifacts=patch.get("artifacts"),
+                step_index=target_step,
+            )
 
-    def ingest_background_results(self, background_results: Any, *, step_index: int | None = None) -> None:
+    def ingest_background_results(
+        self, background_results: object, *, step_index: int | None = None
+    ) -> None:
+        """Ingest the artifacts of background task results."""
         if background_results is None:
             return
         target_step = 0 if step_index is None else int(step_index)
@@ -272,9 +298,13 @@ class ArtifactRegistry:
             artifacts = item.get("artifacts")
             if artifacts is None and isinstance(item.get("payload"), Mapping):
                 artifacts = item["payload"].get("artifacts")
-            self._ingest_patch_artifacts(task_id=task_id, artifacts=artifacts, step_index=target_step)
+            self._ingest_patch_artifacts(
+                task_id=task_id, artifacts=artifacts, step_index=target_step
+            )
 
-    def _ingest_patch_artifacts(self, *, task_id: Any, artifacts: Any, step_index: int) -> None:
+    def _ingest_patch_artifacts(
+        self, *, task_id: object, artifacts: object, step_index: int
+    ) -> None:
         if not isinstance(artifacts, list):
             return
         task_id_str = str(task_id) if task_id is not None else ""
@@ -320,6 +350,7 @@ class ArtifactRegistry:
         source_tool: str | None,
         step_index: int | None,
     ) -> ArtifactRecord:
+        """Register a stored binary artifact, deduplicated by artifact id."""
         if ref.id in self._binary_index:
             existing_ref = self._binary_index[ref.id]
             return self._records_by_ref[existing_ref]
@@ -331,7 +362,9 @@ class ArtifactRegistry:
             artifact_id=ref.id,
             mime_type=ref.mime_type,
             size_bytes=ref.size_bytes,
-            scope_session_id=getattr(ref.scope, "session_id", None) if ref.scope else None,
+            scope_session_id=getattr(ref.scope, "session_id", None)
+            if ref.scope
+            else None,
             title=ref.filename,
             summary=_binary_summary(ref),
             component=_binary_component_name(ref.mime_type),
@@ -346,9 +379,10 @@ class ArtifactRegistry:
         self,
         ref: str,
         *,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """Return the payload of an artifact ref, or ``None`` if unknown."""
         record = self._records_by_ref.get(ref)
         if record is None:
             return None
@@ -368,15 +402,15 @@ class ArtifactRegistry:
         self,
         ref: str,
         *,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         session_id: str | None = None,
-        artifact_store: Any | None = None,
+        artifact_store: ArtifactStore | None = None,
     ) -> dict[str, Any] | None:
         """Async variant of resolve_ref that can hydrate stored tool artifacts.
 
-        Tool artifacts coming from background jobs may be stored out-of-band in an
-        ArtifactStore (as JSON), with only a compact ArtifactRef stub present in
-        the artifact payload.
+        Tool artifacts coming from background jobs may be stored out-of-band in
+        an ArtifactStore (as JSON), with only a compact ArtifactRef stub
+        present in the artifact payload.
         """
         record = self._records_by_ref.get(ref)
         if record is None:
@@ -390,7 +424,9 @@ class ArtifactRegistry:
         if payload is None:
             return None
 
-        hydrated = await _maybe_hydrate_stored_payload(payload, artifact_store=artifact_store)
+        hydrated = await _maybe_hydrate_stored_payload(
+            payload, artifact_store=artifact_store
+        )
         if hydrated is not None:
             payload = hydrated
             self._payloads[ref] = payload
@@ -406,56 +442,75 @@ class ArtifactRegistry:
         return ref
 
 
-def get_artifact_registry(ctx: Any) -> ArtifactRegistry | None:
-    planner = getattr(ctx, "_planner", None)
-    registry = getattr(planner, "_artifact_registry", None)
+def get_artifact_registry(ctx: object) -> ArtifactRegistry | None:
+    """Return the artifact registry of the planner behind ``ctx``, if any."""
+    planner = getattr(ctx, "planner", None)
+    registry = getattr(planner, "artifact_registry", None)
     if isinstance(registry, ArtifactRegistry):
         return registry
     return None
 
 
 def resolve_artifact_refs(
-    value: Any,
+    value: object,
     *,
     registry: ArtifactRegistry,
-    trajectory: Any | None,
+    trajectory: Trajectory | None,
     session_id: str | None,
-) -> Any:
+) -> object:
+    """Replace artifact refs in ``value`` with their payloads."""
     if isinstance(value, list):
         return [
-            resolve_artifact_refs(item, registry=registry, trajectory=trajectory, session_id=session_id)
+            resolve_artifact_refs(
+                item,
+                registry=registry,
+                trajectory=trajectory,
+                session_id=session_id,
+            )
             for item in value
         ]
     if isinstance(value, dict):
         if "artifact_ref" in value:
             ref = value.get("artifact_ref")
             if isinstance(ref, str):
-                resolved = registry.resolve_ref(ref, trajectory=trajectory, session_id=session_id)
+                resolved = registry.resolve_ref(
+                    ref, trajectory=trajectory, session_id=session_id
+                )
                 if resolved is None:
-                    raise RuntimeError(f"Unknown artifact_ref '{ref}'")
+                    msg = f"Unknown artifact_ref '{ref}'"
+                    raise RuntimeError(msg)
                 merged = dict(resolved)
                 for key, sub_value in value.items():
                     if key == "artifact_ref":
                         continue
                     merged[key] = resolve_artifact_refs(
-                        sub_value, registry=registry, trajectory=trajectory, session_id=session_id
+                        sub_value,
+                        registry=registry,
+                        trajectory=trajectory,
+                        session_id=session_id,
                     )
                 return merged
         return {
-            key: resolve_artifact_refs(sub_value, registry=registry, trajectory=trajectory, session_id=session_id)
+            key: resolve_artifact_refs(
+                sub_value,
+                registry=registry,
+                trajectory=trajectory,
+                session_id=session_id,
+            )
             for key, sub_value in value.items()
         }
     return value
 
 
 async def resolve_artifact_refs_async(
-    value: Any,
+    value: object,
     *,
     registry: ArtifactRegistry,
-    trajectory: Any | None,
+    trajectory: Trajectory | None,
     session_id: str | None,
-    artifact_store: Any | None,
-) -> Any:
+    artifact_store: ArtifactStore | None,
+) -> object:
+    """Replace artifact refs in ``value``, loading stored payloads."""
     if isinstance(value, list):
         return [
             await resolve_artifact_refs_async(
@@ -478,7 +533,8 @@ async def resolve_artifact_refs_async(
                     artifact_store=artifact_store,
                 )
                 if resolved is None:
-                    raise RuntimeError(f"Unknown artifact_ref '{ref}'")
+                    msg = f"Unknown artifact_ref '{ref}'"
+                    raise RuntimeError(msg)
                 merged = dict(resolved)
                 for key, sub_value in value.items():
                     if key == "artifact_ref":
@@ -504,7 +560,8 @@ async def resolve_artifact_refs_async(
     return value
 
 
-def has_artifact_refs(value: Any) -> bool:
+def has_artifact_refs(value: object) -> bool:
+    """Whether ``value`` contains any artifact ref."""
     if isinstance(value, list):
         return any(has_artifact_refs(item) for item in value)
     if isinstance(value, dict):
@@ -514,11 +571,13 @@ def has_artifact_refs(value: Any) -> bool:
     return False
 
 
-def _is_artifact_ref_dict(value: Any) -> TypeGuard[Mapping[str, Any]]:
+def _is_artifact_ref_dict(value: object) -> TypeGuard[Mapping[str, Any]]:
     return isinstance(value, Mapping) and isinstance(value.get("id"), str)
 
 
-async def _maybe_hydrate_stored_payload(payload: Any, *, artifact_store: Any | None) -> Any | None:
+async def _maybe_hydrate_stored_payload(
+    payload: object, *, artifact_store: ArtifactStore | None
+) -> object:
     """Hydrate payload stored as JSON in ArtifactStore via a compact stub.
 
     Expected stub shape:
@@ -549,7 +608,9 @@ async def _maybe_hydrate_stored_payload(payload: Any, *, artifact_store: Any | N
         return None
 
 
-def _component_payload_from_tool_payload(payload: Any) -> dict[str, Any] | None:
+def _component_payload_from_tool_payload(
+    payload: object,
+) -> dict[str, Any] | None:
     if isinstance(payload, Mapping):
         component = payload.get("component")
         props = payload.get("props")
@@ -560,18 +621,31 @@ def _component_payload_from_tool_payload(payload: Any) -> dict[str, Any] | None:
             if component_type == "echarts":
                 config = payload.get("config") or payload.get("option")
                 if isinstance(config, Mapping):
-                    return {"component": "echarts", "props": {"option": dict(config)}}
+                    return {
+                        "component": "echarts",
+                        "props": {"option": dict(config)},
+                    }
             if component_type == "plotly":
                 data = payload.get("data")
                 layout = payload.get("layout")
                 config = payload.get("config")
-                if isinstance(data, list) or isinstance(layout, Mapping) or isinstance(config, Mapping):
+                if (
+                    isinstance(data, list)
+                    or isinstance(layout, Mapping)
+                    or isinstance(config, Mapping)
+                ):
                     return {
                         "component": "plotly",
                         "props": {
-                            "data": list(data) if isinstance(data, list) else [],
-                            "layout": dict(layout) if isinstance(layout, Mapping) else {},
-                            "config": dict(config) if isinstance(config, Mapping) else {},
+                            "data": list(data)
+                            if isinstance(data, list)
+                            else [],
+                            "layout": dict(layout)
+                            if isinstance(layout, Mapping)
+                            else {},
+                            "config": dict(config)
+                            if isinstance(config, Mapping)
+                            else {},
                         },
                     }
             if component_type == "mermaid":
@@ -581,7 +655,9 @@ def _component_payload_from_tool_payload(payload: Any) -> dict[str, Any] | None:
     return None
 
 
-def _binary_component_payload(record: ArtifactRecord, session_id: str | None) -> dict[str, Any]:
+def _binary_component_payload(
+    record: ArtifactRecord, session_id: str | None
+) -> dict[str, Any]:
     artifact_id = record.artifact_id or record.ref
     url = _artifact_url(artifact_id, session_id or record.scope_session_id)
     mime_type = record.mime_type or ""
@@ -599,7 +675,9 @@ def _binary_component_payload(record: ArtifactRecord, session_id: str | None) ->
                 "tool_input": metadata.get("tool_input"),
                 "prefers_border": metadata.get("prefers_border", False),
                 "namespace": metadata.get("namespace"),
-                "session_id": metadata.get("session_id", session_id or record.scope_session_id),
+                "session_id": metadata.get(
+                    "session_id", session_id or record.scope_session_id
+                ),
                 "sandbox": metadata.get("sandbox"),
             },
         }
@@ -653,7 +731,9 @@ def _binary_summary(ref: ArtifactRef) -> str:
     return "Stored binary artifact"
 
 
-def _payload_from_trajectory(trajectory: Any, record: ArtifactRecord) -> Any | None:
+def _payload_from_trajectory(
+    trajectory: Trajectory, record: ArtifactRecord
+) -> object:
     if record.step_index is None or record.field_name is None:
         return None
     steps = getattr(trajectory, "steps", None)
@@ -668,13 +748,16 @@ def _payload_from_trajectory(trajectory: Any, record: ArtifactRecord) -> Any | N
     if record.field_name not in observation:
         return None
     value = observation[record.field_name]
-    if record.item_index is not None and isinstance(value, list):
-        if 0 <= record.item_index < len(value):
-            return value[record.item_index]
+    if (
+        record.item_index is not None
+        and isinstance(value, list)
+        and 0 <= record.item_index < len(value)
+    ):
+        return value[record.item_index]
     return value
 
 
-def _infer_component_name(payload: Any) -> str | None:
+def _infer_component_name(payload: object) -> str | None:
     if isinstance(payload, Mapping):
         component = payload.get("component")
         if isinstance(component, str):
@@ -685,7 +768,7 @@ def _infer_component_name(payload: Any) -> str | None:
     return None
 
 
-def _extract_title(payload: Any) -> str | None:
+def _extract_title(payload: object) -> str | None:
     if isinstance(payload, Mapping):
         for key in ("title", "name", "label", "caption"):
             value = payload.get(key)
@@ -694,7 +777,7 @@ def _extract_title(payload: Any) -> str | None:
     return None
 
 
-def _extract_summary(payload: Any, component: str | None) -> str | None:
+def _extract_summary(payload: object, component: str | None) -> str | None:
     if isinstance(payload, Mapping):
         summary = payload.get("summary") or payload.get("description")
         if isinstance(summary, str) and summary.strip():
@@ -704,7 +787,7 @@ def _extract_summary(payload: Any, component: str | None) -> str | None:
     return None
 
 
-def _extract_metadata(payload: Any) -> dict[str, Any]:
+def _extract_metadata(payload: object) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         return {}
     metadata: dict[str, Any] = {}
@@ -726,22 +809,26 @@ def _extract_metadata(payload: Any) -> dict[str, Any]:
     return metadata
 
 
-def _compact_metadata(meta: Mapping[str, Any], *, max_items: int = 8) -> dict[str, Any]:
+def _compact_metadata(
+    meta: Mapping[str, Any], *, max_items: int = 8
+) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     for key, value in meta.items():
         if len(compact) >= max_items:
             break
         if _is_scalar(value):
-            compact[key] = _compact_text(value) if isinstance(value, str) else value
+            compact[key] = (
+                _compact_text(value) if isinstance(value, str) else value
+            )
     return compact
 
 
 def _binary_metadata(ref: ArtifactRef) -> dict[str, Any]:
     """Metadata extraction for binary artifacts.
 
-    Most binaries keep compact scalar metadata to reduce trajectory size.
-    MCP App HTML artifacts preserve specific structured fields required by
-    the frontend renderer.
+    Most binaries keep compact scalar metadata to reduce trajectory size. MCP
+    App HTML artifacts preserve specific structured fields required by the
+    frontend renderer.
     """
     source = ref.source if isinstance(ref.source, Mapping) else {}
     metadata = _compact_metadata(source)
@@ -764,7 +851,7 @@ def _binary_metadata(ref: ArtifactRef) -> dict[str, Any]:
     return metadata
 
 
-def _json_safe_copy(value: Any) -> Any:
+def _json_safe_copy(value: object) -> object:
     try:
         return json.loads(json.dumps(value, ensure_ascii=False, default=str))
     except Exception:
@@ -777,18 +864,18 @@ def _compact_text(value: str, max_len: int = 120) -> str:
     return value[: max_len - 3] + "..."
 
 
-def _is_scalar(value: Any) -> bool:
+def _is_scalar(value: object) -> bool:
     return isinstance(value, (str, int, float, bool))
 
 
 __all__ = [
-    "ArtifactRegistry",
-    "ArtifactRecord",
     "ArtifactKind",
+    "ArtifactRecord",
+    "ArtifactRegistry",
     "get_artifact_registry",
+    "has_artifact_refs",
     "resolve_artifact_refs",
     "resolve_artifact_refs_async",
-    "has_artifact_refs",
 ]
 
 _ALLOWED_KINDS = {"ui_component", "binary", "tool_artifact"}

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from typing_extensions import override
 
 from ..types import (
     LLMMessage,
@@ -15,19 +15,22 @@ from ..types import (
     ToolSpec,
     extract_single_tool_call,
 )
+from .base import ModelT, OutputStrategy
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from ..profiles import ModelProfile
     from ..schema.plan import SchemaPlan
     from ..types import CompletionResponse
 
 
-class ToolsOutputStrategy:
+class ToolsOutputStrategy(OutputStrategy):
     """Tool-based structured output strategy.
 
-    Forces the model to call a specific tool with the schema as its
-    input schema. This is more portable than native structured output
-    as most providers support function/tool calling.
+    Forces the model to call a specific tool with the schema as its input
+    schema. This is more portable than native structured output as most
+    providers support function/tool calling.
 
     Trade-offs:
     - More portable across providers
@@ -37,13 +40,14 @@ class ToolsOutputStrategy:
 
     TOOL_NAME = "structured_output"
 
+    @override
     def build_request(
         self,
         model: str,
         messages: list[LLMMessage],
         response_model: type[BaseModel],
         profile: ModelProfile,
-        plan: SchemaPlan,
+        plan: SchemaPlan | None,
         temperature: float | None = None,
     ) -> LLMRequest:
         """Build a request with forced tool calling.
@@ -59,6 +63,9 @@ class ToolsOutputStrategy:
         Returns:
             LLMRequest configured for tool-based structured output.
         """
+        if plan is None:
+            msg = "The tool-based output strategy requires a schema plan"
+            raise ValueError(msg)
         return LLMRequest(
             model=model,
             messages=tuple(messages),
@@ -76,11 +83,12 @@ class ToolsOutputStrategy:
             temperature=temperature,
         )
 
+    @override
     def parse_response(
         self,
         response: CompletionResponse,
-        response_model: type[BaseModel],
-    ) -> BaseModel:
+        response_model: type[ModelT],
+    ) -> ModelT:
         """Parse response from tool calling.
 
         Args:
@@ -93,5 +101,7 @@ class ToolsOutputStrategy:
         Raises:
             ValueError: If no tool call found or wrong tool called.
         """
-        call = extract_single_tool_call(response.message, expected_name=self.TOOL_NAME)
+        call = extract_single_tool_call(
+            response.message, expected_name=self.TOOL_NAME
+        )
         return response_model.model_validate_json(call.arguments_json)

@@ -1,4 +1,4 @@
-"""Tests for steering validation, sanitization, and state adapter compatibility."""
+"""Tests for steering sanitization and state adapter compatibility."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class TestReactUtils:
         assert result == '{"key": "value", "num": 123}'
 
     def test_safe_json_dumps_non_serializable(self) -> None:
-        """Test _safe_json_dumps with non-serializable value falls back to str()."""
+        """_safe_json_dumps falls back to str() for unserializable data."""
         from penguiflow.planner.react_utils import _safe_json_dumps
 
         # Create a non-JSON-serializable object
@@ -38,7 +38,7 @@ class TestReactUtils:
         from penguiflow.planner.react_utils import _safe_json_dumps
 
         # Create a circular reference
-        circular: dict = {}
+        circular: dict[str, object] = {}
         circular["self"] = circular
 
         result = _safe_json_dumps(circular)
@@ -46,7 +46,7 @@ class TestReactUtils:
         assert "self" in result
 
     def test_serialize_validation_errors_handles_value_error_ctx(self) -> None:
-        """Validation errors with embedded ValueError instances should stay serializable."""
+        """Validation errors holding ValueErrors stay serializable."""
         from penguiflow.planner.react_utils import _serialize_validation_errors
 
         class ValidatorModel(BaseModel):
@@ -56,7 +56,8 @@ class TestReactUtils:
             @model_validator(mode="after")
             def validate_mode(self) -> ValidatorModel:
                 if self.mode == "research" and not self.stream:
-                    raise ValueError("research requires stream=true")
+                    msg = "research requires stream=true"
+                    raise ValueError(msg)
                 return self
 
         with pytest.raises(ValidationError) as exc_info:
@@ -120,7 +121,15 @@ class TestSteeringModule:
         from penguiflow.steering import sanitize_payload
 
         # Create deep nesting
-        deep = {"level1": {"level2": {"level3": {"level4": {"level5": {"level6": {"level7": "value"}}}}}}}
+        deep = {
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "level4": {"level5": {"level6": {"level7": "value"}}}
+                    }
+                }
+            }
+        }
         result = sanitize_payload(deep)
         # Should truncate at some depth
         assert "truncated" in str(result) or "level" in str(result)
@@ -135,7 +144,9 @@ class TestSessionApplyPendingPatch:
         return StreamingSession("test-session")
 
     @pytest.mark.asyncio
-    async def test_apply_pending_patch_not_found(self, session: StreamingSession) -> None:
+    async def test_apply_pending_patch_not_found(
+        self, session: StreamingSession
+    ) -> None:
         """Test applying a patch that doesn't exist."""
         result = await session.apply_pending_patch(patch_id="nonexistent")
         assert result is False
@@ -159,7 +170,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         # Pydantic validates payload at construction, so we need to mock
         event = MagicMock()
@@ -175,7 +189,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -185,14 +202,19 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "INJECT_CONTEXT requires non-empty 'text'" in exc_info.value.errors
+        assert (
+            "INJECT_CONTEXT requires non-empty 'text'" in exc_info.value.errors
+        )
 
     def test_validate_inject_context_invalid_scope(self) -> None:
         """Test INJECT_CONTEXT with invalid scope."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -202,14 +224,20 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "'scope' must be 'foreground' or 'task_only'" in exc_info.value.errors[0]
+        assert (
+            "'scope' must be 'foreground' or 'task_only'"
+            in exc_info.value.errors[0]
+        )
 
     def test_validate_inject_context_invalid_severity(self) -> None:
         """Test INJECT_CONTEXT with invalid severity."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -219,14 +247,20 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "'severity' must be 'note' or 'correction'" in exc_info.value.errors[0]
+        assert (
+            "'severity' must be 'note' or 'correction'"
+            in exc_info.value.errors[0]
+        )
 
     def test_validate_redirect_missing_instruction(self) -> None:
         """Test REDIRECT without instruction."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -236,14 +270,20 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "REDIRECT requires non-empty 'instruction'" in exc_info.value.errors[0]
+        assert (
+            "REDIRECT requires non-empty 'instruction'"
+            in exc_info.value.errors[0]
+        )
 
     def test_validate_redirect_invalid_constraints(self) -> None:
         """Test REDIRECT with invalid constraints type."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -260,7 +300,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -277,7 +320,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -294,7 +340,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -304,14 +353,20 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "PRIORITIZE requires integer 'priority'" in exc_info.value.errors[0]
+        assert (
+            "PRIORITIZE requires integer 'priority'"
+            in exc_info.value.errors[0]
+        )
 
     def test_validate_approve_missing_token(self) -> None:
         """Test APPROVE without resume_token."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -321,14 +376,20 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "APPROVE/REJECT requires 'resume_token'" in exc_info.value.errors[0]
+        assert (
+            "APPROVE/REJECT requires 'resume_token'"
+            in exc_info.value.errors[0]
+        )
 
     def test_validate_approve_invalid_decision(self) -> None:
         """Test APPROVE with non-string decision."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -345,7 +406,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -362,7 +426,10 @@ class TestSteeringValidation:
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -372,14 +439,20 @@ class TestSteeringValidation:
         )
         with pytest.raises(SteeringValidationError) as exc_info:
             validate_steering_event(event)
-        assert "USER_MESSAGE requires non-empty 'text'" in exc_info.value.errors[0]
+        assert (
+            "USER_MESSAGE requires non-empty 'text'"
+            in exc_info.value.errors[0]
+        )
 
     def test_validate_user_message_invalid_active_tasks(self) -> None:
         """Test USER_MESSAGE with non-list active_tasks."""
         import pytest
 
         from penguiflow.state.models import SteeringEvent, SteeringEventType
-        from penguiflow.steering import SteeringValidationError, validate_steering_event
+        from penguiflow.steering import (
+            SteeringValidationError,
+            validate_steering_event,
+        )
 
         event = SteeringEvent(
             session_id="s1",
@@ -414,6 +487,7 @@ class TestSteeringSanitization:
         from penguiflow.steering import _sanitize_value
 
         result = _sanitize_value({1, 2, 3}, depth=3)
+        assert isinstance(result, list)
         assert len(result) == 3
 
     def test_sanitize_value_with_none(self) -> None:
@@ -439,12 +513,18 @@ class TestSteeringSanitization:
 
     def test_sanitize_value_truncates_large_list(self) -> None:
         """Test _sanitize_value truncates large lists."""
-        from penguiflow.steering import MAX_STEERING_LIST_ITEMS, _sanitize_value
+        from penguiflow.steering import (
+            MAX_STEERING_LIST_ITEMS,
+            _sanitize_value,
+        )
 
         big_list = list(range(MAX_STEERING_LIST_ITEMS + 10))
         result = _sanitize_value(big_list, depth=3)
+        assert isinstance(result, list)
         # Should be truncated
-        assert len(result) == MAX_STEERING_LIST_ITEMS + 1  # +1 for truncation marker
+        assert (
+            len(result) == MAX_STEERING_LIST_ITEMS + 1
+        )  # +1 for truncation marker
         assert result[-1] == "<truncated>"
 
     def test_sanitize_value_truncates_many_dict_keys(self) -> None:
@@ -453,6 +533,7 @@ class TestSteeringSanitization:
 
         big_dict = {f"key_{i}": i for i in range(MAX_STEERING_KEYS + 10)}
         result = _sanitize_value(big_dict, depth=3)
+        assert isinstance(result, dict)
         # Should have truncation flag
         assert "__truncated_keys__" in result
 
@@ -479,19 +560,17 @@ class TestSteeringSanitization:
         from penguiflow.steering import sanitize_payload
 
         # Pass a value that after sanitization returns a string (not a dict)
-        result = sanitize_payload("plain string")  # type: ignore
+        result = sanitize_payload("plain string")
         # Since string is sanitized to string, it gets wrapped
         assert result == {"value": "plain string"}
 
     def test_sanitize_payload_json_error_fallback(self) -> None:
         """Test sanitize_payload handles JSON encoding errors."""
-
         # Create an object that passes sanitization but fails JSON encoding
-        # This is tricky since _sanitize_value handles most types
-        # We need to mock or use something that slips through
-        # Actually, _sanitize_value handles all types, so this path
-        # might be unreachable in practice. Let's test the large payload path instead.
-        pass
+        # This is tricky since _sanitize_value handles most types We need to
+        # mock or use something that slips through Actually, _sanitize_value
+        # handles all types, so this path might be unreachable in practice.
+        # Let's test the large payload path instead.
 
     def test_sanitize_payload_large_payload_truncation(self) -> None:
         """Test sanitize_payload truncates very large payloads."""
@@ -501,12 +580,15 @@ class TestSteeringSanitization:
             sanitize_payload,
         )
 
-        # Create payload with many keys, each with max-length strings
-        # to exceed bytes limit after JSON encoding
-        # We need: num_keys * (key_len + value_len + overhead) > MAX_PAYLOAD_BYTES
-        # With MAX_KEYS=64 and MAX_STRING=4096, we can get: 64 * (64 + 4096 + ~10) ~ 267K
+        # Create payload with many keys, each with max-length strings to exceed
+        # bytes limit after JSON encoding We need: num_keys * (key_len +
+        # value_len + overhead) > MAX_PAYLOAD_BYTES With MAX_KEYS=64 and
+        # MAX_STRING=4096, we can get: 64 * (64 + 4096 + ~10) ~ 267K
         # MAX_PAYLOAD_BYTES is 16384, so this should exceed it
-        large_payload = {f"key_{i:03d}": "x" * MAX_STEERING_STRING for i in range(MAX_STEERING_KEYS)}
+        large_payload = {
+            f"key_{i:03d}": "x" * MAX_STEERING_STRING
+            for i in range(MAX_STEERING_KEYS)
+        }
         result = sanitize_payload(large_payload)
         assert result.get("truncated") is True
         assert "summary" in result
@@ -609,7 +691,9 @@ class TestSteeringInbox:
         assert await inbox.push(event2) is True
 
     @pytest.mark.asyncio
-    async def test_inbox_queue_full_decrements_user_message_count(self) -> None:
+    async def test_inbox_queue_full_decrements_user_message_count(
+        self,
+    ) -> None:
         """Test queue full decrements user message count."""
         from penguiflow.state.models import SteeringEvent, SteeringEventType
         from penguiflow.steering import SteeringInbox
@@ -828,7 +912,12 @@ class TestStateAdapters:
     async def test_save_task_compat_missing_method(self) -> None:
         """Test save_task_compat raises on missing method."""
         from penguiflow.state.adapters import save_task_compat
-        from penguiflow.state.models import TaskContextSnapshot, TaskState, TaskStatus, TaskType
+        from penguiflow.state.models import (
+            TaskContextSnapshot,
+            TaskState,
+            TaskStatus,
+            TaskType,
+        )
 
         class BadStore:
             pass
@@ -839,7 +928,9 @@ class TestStateAdapters:
             status=TaskStatus.PENDING,
             task_type=TaskType.BACKGROUND,
             priority=0,
-            context_snapshot=TaskContextSnapshot(session_id="s1", task_id="t1"),
+            context_snapshot=TaskContextSnapshot(
+                session_id="s1", task_id="t1"
+            ),
         )
         with pytest.raises(TypeError, match="save_task"):
             await save_task_compat(BadStore(), state)
@@ -895,7 +986,9 @@ class TestStateAdapters:
         class BadStore:
             pass
 
-        event = PlannerEvent(event_type="thought", ts=time.time(), trajectory_step=0)
+        event = PlannerEvent(
+            event_type="thought", ts=time.time(), trajectory_step=0
+        )
         with pytest.raises(TypeError, match="save_planner_event"):
             await save_planner_event_compat(BadStore(), "trace1", event)
 
@@ -907,13 +1000,17 @@ class TestStateAdapters:
         from penguiflow.planner.models import PlannerEvent
         from penguiflow.state.adapters import save_planner_event_compat
 
-        saved: list = []
+        saved: list[tuple[str, PlannerEvent]] = []
 
         class GoodStore:
-            async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None:
+            async def save_planner_event(
+                self, trace_id: str, event: PlannerEvent
+            ) -> None:
                 saved.append((trace_id, event))
 
-        event = PlannerEvent(event_type="thought", ts=time.time(), trajectory_step=0)
+        event = PlannerEvent(
+            event_type="thought", ts=time.time(), trajectory_step=0
+        )
         await save_planner_event_compat(GoodStore(), "trace1", event)
         assert len(saved) == 1
         assert saved[0][0] == "trace1"
@@ -937,22 +1034,39 @@ class TestStateAdapters:
         from penguiflow.planner.models import PlannerEvent
         from penguiflow.state.adapters import list_planner_events_compat
 
-        events = [PlannerEvent(event_type="thought", ts=time.time(), trajectory_step=0)]
+        events = [
+            PlannerEvent(
+                event_type="thought", ts=time.time(), trajectory_step=0
+            )
+        ]
+
+        requested: list[str] = []
 
         class GoodStore:
-            async def list_planner_events(self, trace_id: str) -> list:
+            async def list_planner_events(
+                self, trace_id: str
+            ) -> list[PlannerEvent]:
+                requested.append(trace_id)
                 return events
 
         result = await list_planner_events_compat(GoodStore(), "trace1")
         assert len(result) == 1
+        assert requested == ["trace1"]
 
     @pytest.mark.asyncio
     async def test_maybe_save_remote_binding_none_store(self) -> None:
         """Test maybe_save_remote_binding with None store."""
+        from penguiflow.state import RemoteBinding
         from penguiflow.state.adapters import maybe_save_remote_binding
 
+        binding = RemoteBinding(
+            trace_id="trace1",
+            context_id="ctx",
+            task_id="task",
+            agent_url="http://agent",
+        )
         # Should not raise
-        await maybe_save_remote_binding(None, {"binding": "data"})
+        await maybe_save_remote_binding(None, binding)
 
 
 class TestBackgroundTasksConfig:

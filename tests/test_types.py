@@ -8,6 +8,7 @@ from penguiflow.types import Headers, Message
 
 
 def test_headers_defaults() -> None:
+    """Headers defaults."""
     headers = Headers(tenant="acme")
     assert headers.tenant == "acme"
     assert headers.topic is None
@@ -15,6 +16,7 @@ def test_headers_defaults() -> None:
 
 
 def test_message_metadata_defaults() -> None:
+    """Message metadata defaults."""
     headers = Headers(tenant="penguin", topic="metrics")
     msg1 = Message(payload={"foo": "bar"}, headers=headers)
     time.sleep(0.001)

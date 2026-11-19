@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import prompts
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class _ConstraintTracker:
@@ -26,7 +28,9 @@ class _ConstraintTracker:
         time_source: Callable[[], float],
     ) -> None:
         now = time_source()
-        self._deadline_at = now + deadline_s if deadline_s is not None else None
+        self._deadline_at = (
+            now + deadline_s if deadline_s is not None else None
+        )
         self._hop_budget = hop_budget
         self._hops_used = 0
         self._time_source = time_source
@@ -67,7 +71,9 @@ class _ConstraintTracker:
         }
 
     @classmethod
-    def from_snapshot(cls, snapshot: dict[str, Any], *, time_source: Callable[[], float]) -> _ConstraintTracker:
+    def from_snapshot(
+        cls, snapshot: dict[str, Any], *, time_source: Callable[[], float]
+    ) -> _ConstraintTracker:
         deadline_remaining = snapshot.get("deadline_remaining_s")
         hop_budget = snapshot.get("hop_budget")
         tracker = cls(
@@ -80,12 +86,19 @@ class _ConstraintTracker:
         if deadline_remaining is None and snapshot.get("deadline_at") is None:
             tracker._deadline_at = None
         elif deadline_remaining is not None:
-            tracker._deadline_at = time_source() + max(float(deadline_remaining), 0.0)
+            tracker._deadline_at = time_source() + max(
+                float(deadline_remaining), 0.0
+            )
         else:
             tracker._deadline_at = snapshot.get("deadline_at")
-        tracker.deadline_triggered = bool(snapshot.get("deadline_triggered", False))
+        tracker.deadline_triggered = bool(
+            snapshot.get("deadline_triggered", False)
+        )
         tracker.hop_exhausted = bool(snapshot.get("hop_exhausted", False))
-        if tracker._hop_budget is not None and tracker._hops_used >= tracker._hop_budget:
+        if (
+            tracker._hop_budget is not None
+            and tracker._hops_used >= tracker._hop_budget
+        ):
             tracker.hop_exhausted = True
         return tracker
 

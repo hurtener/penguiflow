@@ -1,13 +1,17 @@
+"""Tests for render component props arg fill."""
+
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from typing_extensions import override
 
-from penguiflow.catalog import build_catalog
+from penguiflow.catalog import NodeSpec, build_catalog
 from penguiflow.planner import PlannerEvent, ReactPlanner
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
 from penguiflow.rich_output.runtime import (
     RichOutputConfig,
@@ -16,8 +20,11 @@ from penguiflow.rich_output.runtime import (
     reset_runtime,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
-class _ArgFillAwareClient:
+
+class _ArgFillAwareClient(JSONLLMClient):
     def __init__(
         self,
         *,
@@ -31,15 +38,15 @@ class _ArgFillAwareClient:
         self.calls: list[list[Mapping[str, str]]] = []
         self._main_calls = 0
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         last = messages[-1]["content"] if messages else ""
 
@@ -48,13 +55,18 @@ class _ArgFillAwareClient:
                 if f'"{field_name}"' in last:
                     return json.dumps(response, ensure_ascii=False), 0.0
             if '"component"' in last:
-                return json.dumps({"component": "report"}, ensure_ascii=False), 0.0
+                return json.dumps(
+                    {"component": "report"}, ensure_ascii=False
+                ), 0.0
             return (
                 json.dumps(
                     {
                         "props": {
                             "sections": [
-                                {"title": "Summary", "content": "Mock report section."},
+                                {
+                                    "title": "Summary",
+                                    "content": "Mock report section.",
+                                },
                             ]
                         }
                     },
@@ -69,9 +81,11 @@ class _ArgFillAwareClient:
         return self._final_action, 0.0
 
 
-def _make_rich_output_catalog() -> tuple[ModelRegistry, object]:
+def _make_rich_output_catalog() -> tuple[ModelRegistry, list[NodeSpec]]:
     reset_runtime()
-    config = RichOutputConfig(enabled=True, allowlist=["report", "markdown", "echarts", "datagrid"])
+    config = RichOutputConfig(
+        enabled=True, allowlist=["report", "markdown", "echarts", "datagrid"]
+    )
     configure_rich_output(config)
     registry = ModelRegistry()
     nodes = list(attach_rich_output_nodes(registry, config=config))
@@ -79,7 +93,10 @@ def _make_rich_output_catalog() -> tuple[ModelRegistry, object]:
 
 
 @pytest.mark.asyncio
-async def test_render_component_schema_invalid_triggers_props_arg_fill() -> None:
+async def test_render_component_schema_invalid_triggers_props_arg_fill() -> (
+    None
+):
+    """Render component schema invalid triggers props arg fill."""
     _, catalog = _make_rich_output_catalog()
     events: list[PlannerEvent] = []
     client = _ArgFillAwareClient(
@@ -106,7 +123,8 @@ async def test_render_component_schema_invalid_triggers_props_arg_fill() -> None
     prop_attempts = [
         evt
         for evt in events
-        if evt.event_type == "arg_fill_attempt" and evt.extra.get("missing_fields") == ["props"]
+        if evt.event_type == "arg_fill_attempt"
+        and evt.extra.get("missing_fields") == ["props"]
     ]
     assert prop_attempts, "expected arg-fill to run for render_component.props"
 
@@ -114,13 +132,17 @@ async def test_render_component_schema_invalid_triggers_props_arg_fill() -> None
         evt
         for evt in events
         if evt.event_type == "tool_call_result"
-        and "Invalid props for 'report'" in str(evt.extra.get("result_json") or "")
+        and "Invalid props for 'report'"
+        in str(evt.extra.get("result_json") or "")
     ]
-    assert not tool_errors, "render_component should not be executed with invalid report props"
+    assert not tool_errors, (
+        "render_component should not be executed with invalid report props"
+    )
 
 
 @pytest.mark.asyncio
-async def test_render_component_autofill_component_then_props_in_same_step() -> None:
+async def test_render_component_autofills_component_and_props() -> None:
+    """Render component autofill component then props in same step."""
     _, catalog = _make_rich_output_catalog()
     events: list[PlannerEvent] = []
     client = _ArgFillAwareClient(
@@ -154,7 +176,10 @@ async def test_render_component_autofill_component_then_props_in_same_step() -> 
 
 
 @pytest.mark.asyncio
-async def test_render_report_schema_invalid_triggers_sections_arg_fill() -> None:
+async def test_render_report_schema_invalid_triggers_sections_arg_fill() -> (
+    None
+):
+    """Render report schema invalid triggers sections arg fill."""
     _, catalog = _make_rich_output_catalog()
     events: list[PlannerEvent] = []
     client = _ArgFillAwareClient(
@@ -204,14 +229,21 @@ async def test_render_report_schema_invalid_triggers_sections_arg_fill() -> None
     section_attempts = [
         evt
         for evt in events
-        if evt.event_type == "arg_fill_attempt" and evt.extra.get("missing_fields") == ["sections"]
+        if evt.event_type == "arg_fill_attempt"
+        and evt.extra.get("missing_fields") == ["sections"]
     ]
-    assert section_attempts, "expected arg-fill to run for render_report.sections"
+    assert section_attempts, (
+        "expected arg-fill to run for render_report.sections"
+    )
 
     tool_errors = [
         evt
         for evt in events
         if evt.event_type == "tool_call_result"
-        and "Invalid props for 'markdown'" in str(evt.extra.get("result_json") or "")
+        and "Invalid props for 'markdown'"
+        in str(evt.extra.get("result_json") or "")
     ]
-    assert not tool_errors, "render_report should not be executed with invalid nested component props"
+    assert not tool_errors, (
+        "render_report should not be executed with invalid nested "
+        "component props"
+    )

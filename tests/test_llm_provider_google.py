@@ -1,7 +1,8 @@
 """Tests for Google/Gemini provider initialization and configuration.
 
 Tests use gemini-2.5-flash as the default model (recommended for general use).
-The provider supports Gemini 2.5/3.0 model families with the google-genai SDK v1.57+.
+The provider supports Gemini 2.5/3.0 model families with the google-genai SDK
+v1.57+.
 """
 
 from __future__ import annotations
@@ -33,47 +34,59 @@ class TestGoogleProviderInit:
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
-            provider = GoogleProvider("gemini-2.5-flash", api_key="test-api-key")
+            provider = GoogleProvider(
+                "gemini-2.5-flash", api_key="test-api-key"
+            )
 
             assert provider.model == "gemini-2.5-flash"
             assert provider.provider_name == "google"
             # Provider should have created a client
-            assert provider._client is not None
+            assert provider.client is not None
 
     def test_init_with_timeout(self) -> None:
         """Test initialization with custom timeout."""
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
-            provider = GoogleProvider("gemini-2.5-flash", api_key="test", timeout=120.0)
+            provider = GoogleProvider(
+                "gemini-2.5-flash", api_key="test", timeout=120.0
+            )
 
-            assert provider._timeout == 120.0
+            assert provider.timeout == 120.0
 
     def test_init_uses_env_var(self) -> None:
         """Test initialization uses GOOGLE_API_KEY env var."""
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             with patch.dict(os.environ, {"GOOGLE_API_KEY": "env-api-key"}):
                 provider = GoogleProvider("gemini-2.5-flash")
                 # Provider should have created a client
-                assert provider._client is not None
+                assert provider.client is not None
 
     def test_init_with_custom_profile(self) -> None:
         """Test initialization with custom model profile."""
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.profiles import ModelProfile
             from penguiflow.llm.providers.google import GoogleProvider
 
@@ -82,7 +95,9 @@ class TestGoogleProviderInit:
                 supports_schema_guided_output=True,
                 max_output_tokens=4096,
             )
-            provider = GoogleProvider("gemini-2.5-flash", api_key="test", profile=custom_profile)
+            provider = GoogleProvider(
+                "gemini-2.5-flash", api_key="test", profile=custom_profile
+            )
 
             assert provider.profile is custom_profile
 
@@ -91,7 +106,9 @@ class TestGoogleProviderInit:
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
@@ -110,18 +127,22 @@ class TestGoogleProviderBuildConfig:
         mock_types = MagicMock()
         mock_genai.types = mock_types
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
 
             request = LLMRequest(
                 model="gemini-2.5-flash",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 temperature=0.7,
             )
 
-            provider._build_config(request)
+            provider.build_config(request)
 
             mock_types.GenerateContentConfig.assert_called_once()
 
@@ -131,36 +152,46 @@ class TestGoogleProviderBuildConfig:
         mock_types = MagicMock()
         mock_genai.types = mock_types
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
 
             request = LLMRequest(
                 model="gemini-2.5-flash",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 max_tokens=500,
             )
 
-            provider._build_config(request)
+            provider.build_config(request)
 
             call_kwargs = mock_types.GenerateContentConfig.call_args[1]
             assert call_kwargs["max_output_tokens"] == 500
 
-    def test_build_config_structured_output_uses_response_json_schema(self) -> None:
-        """Structured output should use response_json_schema to avoid Schema coercion issues."""
+    def test_build_config_structured_output_uses_response_json_schema(
+        self,
+    ) -> None:
+        """Structured output uses response_json_schema, not Schema."""
         mock_genai = MagicMock()
         mock_types = MagicMock()
         mock_genai.types = mock_types
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
 
             request = LLMRequest(
                 model="gemini-2.5-flash",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 structured_output=StructuredOutputSpec(
                     name="test_schema",
                     json_schema={
@@ -172,32 +203,39 @@ class TestGoogleProviderBuildConfig:
                 ),
             )
 
-            provider._build_config(request)
+            provider.build_config(request)
 
             call_kwargs = mock_types.GenerateContentConfig.call_args[1]
             assert call_kwargs["response_mime_type"] == "application/json"
             assert "response_json_schema" in call_kwargs
             assert "response_schema" not in call_kwargs
 
-    def test_build_config_reasoning_effort_does_not_set_level_and_budget(self) -> None:
-        """Gemini config rejects setting both thinking_budget and thinking_level."""
+    def test_build_config_reasoning_effort_does_not_set_level_and_budget(
+        self,
+    ) -> None:
+        """Gemini config rejects thinking_budget with thinking_level."""
         from penguiflow.llm.providers.google import GoogleProvider
 
-        provider = GoogleProvider.__new__(GoogleProvider)
-        provider._profile = MagicMock()
-        provider._model = "gemini-2.5-flash"
+        provider = GoogleProvider(
+            "gemini-2.5-flash", api_key="test-key", profile=MagicMock()
+        )
 
         request = LLMRequest(
             model="gemini-2.5-flash",
-            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
             max_tokens=4096,
             extra={"reasoning_effort": "medium"},
         )
 
-        cfg = provider._build_config(request)  # type: ignore[attr-defined]
+        cfg = provider.build_config(request)
         assert cfg.thinking_config is not None
         # Only one of these may be set.
-        assert not (cfg.thinking_config.thinking_budget and cfg.thinking_config.thinking_level)
+        assert not (
+            cfg.thinking_config.thinking_budget
+            and cfg.thinking_config.thinking_level
+        )
         assert cfg.thinking_config.thinking_budget is not None
 
 
@@ -210,7 +248,9 @@ class TestGoogleProviderComplete:
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
@@ -220,7 +260,9 @@ class TestGoogleProviderComplete:
 
             request = LLMRequest(
                 model="gemini-2.5-flash",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
@@ -235,13 +277,15 @@ class TestGoogleProviderErrorMapping:
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
 
             exc = ValueError("Invalid API key provided")
-            result = provider._map_error(exc)
+            result = provider.map_error(exc)
 
             assert isinstance(result, LLMAuthError)
 
@@ -250,13 +294,15 @@ class TestGoogleProviderErrorMapping:
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
 
             exc = ValueError("Rate limit exceeded for quota bucket")
-            result = provider._map_error(exc)
+            result = provider.map_error(exc)
 
             assert isinstance(result, LLMRateLimitError)
 
@@ -265,13 +311,15 @@ class TestGoogleProviderErrorMapping:
         mock_genai = MagicMock()
         mock_genai.types = MagicMock()
 
-        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+        with patch.dict(
+            "sys.modules", {"google": MagicMock(), "google.genai": mock_genai}
+        ):
             from penguiflow.llm.providers.google import GoogleProvider
 
             provider = GoogleProvider("gemini-2.5-flash", api_key="test")
 
             exc = ValueError("Something unexpected")
-            result = provider._map_error(exc)
+            result = provider.map_error(exc)
 
             assert isinstance(result, LLMError)
             assert "Something unexpected" in result.message

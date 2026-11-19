@@ -1,10 +1,11 @@
 """Model fallback with per-(model, key) cooldown for rate-limit resilience.
 
-When a model returns HTTP 429, :class:`FallbackLLMClient` routes the call to the
-next configured model (or the next API key for the same model) and places the
-rate-limited ``(model, key)`` pair in a cooldown. Because each planner step is a
-discrete ``complete()`` call and trajectory state lives in the planner, this
-switch is transparent — a run continues uninterrupted on the fallback model.
+When a model returns HTTP 429, :class:`FallbackLLMClient` routes the call to
+the next configured model (or the next API key for the same model) and places
+the rate-limited ``(model, key)`` pair in a cooldown. Because each planner step
+is a discrete ``complete()`` call and trajectory state lives in the planner,
+this switch is transparent — a run continues uninterrupted on the fallback
+model.
 """
 
 from __future__ import annotations
@@ -13,13 +14,31 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+
+from typing_extensions import override
 
 from .errors import LLMRateLimitError
 from .providers.base import Provider
 from .types import StreamEvent
+
+if TYPE_CHECKING:
+    from penguiflow.planner.models import JSONLLMClient
+
+    from .profiles import ModelProfile
+    from .protocol import NativeLLMAdapter, NativeToolCallResult
+    from .types import (
+        CancelToken,
+        CompletionResponse,
+        LLMRequest,
+        StreamCallback,
+        ToolSpec,
+    )
+
+_T = TypeVar("_T")
+ChunkCallback = Callable[[str, bool], None]
 
 logger = logging.getLogger("penguiflow.llm.fallback")
 
@@ -36,12 +55,17 @@ class CooldownStore:
     singleton) without changing :class:`FallbackLLMClient`.
     """
 
-    def __init__(self) -> None:
-        self._until: dict[Entry, float] = {}
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        """Create an empty cooldown store.
 
-    @staticmethod
-    def _now() -> float:
-        return time.monotonic()
+        Args:
+            clock: Monotonic time source, in seconds; tests pass a fake one.
+        """
+        self._until: dict[Entry, float] = {}
+        self._clock = clock
+
+    def _now(self) -> float:
+        return self._clock()
 
     def in_cooldown(self, entry: Entry) -> bool:
         """Whether ``entry`` is currently cooling down."""
@@ -49,7 +73,7 @@ class CooldownStore:
         return expiry is not None and expiry > self._now()
 
     def set_cooldown(self, entry: Entry, seconds: float) -> float:
-        """Place ``entry`` in cooldown for ``seconds``; returns the expiry time."""
+        """Put ``entry`` in cooldown for ``seconds``; return the expiry."""
         expiry = self._now() + seconds
         self._until[entry] = expiry
         return expiry
@@ -91,12 +115,18 @@ class ModelFallbackConfig:
     max_wait_s: float = 30.0
 
     def __post_init__(self) -> None:
+        """Validate the fallback chain, key pool and cooldown."""
         if not self.models:
-            raise ValueError("ModelFallbackConfig.models must not be empty")
+            msg = "ModelFallbackConfig.models must not be empty"
+            raise ValueError(msg)
         if self.api_keys is not None and not self.api_keys:
-            raise ValueError("ModelFallbackConfig.api_keys must not be empty when provided")
+            msg = (
+                "ModelFallbackConfig.api_keys must not be empty when provided"
+            )
+            raise ValueError(msg)
         if self.cooldown_s <= 0:
-            raise ValueError("ModelFallbackConfig.cooldown_s must be positive")
+            msg = "ModelFallbackConfig.cooldown_s must be positive"
+            raise ValueError(msg)
 
     @classmethod
     def from_env(
@@ -113,10 +143,13 @@ class ModelFallbackConfig:
         """
         models = [os.environ[v] for v in model_vars if os.environ.get(v)]
         if not models:
-            raise ValueError(f"No fallback models found in env vars: {list(model_vars)}")
+            msg = f"No fallback models found in env vars: {list(model_vars)}"
+            raise ValueError(msg)
         api_keys: list[str] | None = None
         if api_key_vars:
-            api_keys = [os.environ[v] for v in api_key_vars if os.environ.get(v)] or None
+            api_keys = [
+                os.environ[v] for v in api_key_vars if os.environ.get(v)
+            ] or None
         return cls(
             models=models,
             api_keys=api_keys,
@@ -125,16 +158,51 @@ class ModelFallbackConfig:
         )
 
 
-# Factory that builds an object exposing an async ``complete()`` for one model.
-AdapterFactory = Callable[..., Any]
+class NativeAdapter(Protocol):
+    """Adapter surface that :class:`FallbackLLMClient` fails over across."""
+
+    async def complete(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: ChunkCallback | None = None,
+        on_reasoning_chunk: ChunkCallback | None = None,
+    ) -> tuple[str, float]:
+        """Run a JSON completion and return ``(text, cost)``."""
+        ...
+
+    async def complete_with_tools(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[ToolSpec],
+        stream: bool = False,
+        on_stream_chunk: ChunkCallback | None = None,
+        on_reasoning_chunk: ChunkCallback | None = None,
+    ) -> NativeToolCallResult:
+        """Run a completion with provider-native tool declarations."""
+        ...
+
+
+# Factories build one client for one model. They receive the model id, an
+# ``api_key`` keyword and the wrapper's extra keyword arguments, which each
+# factory validates itself.
+AdapterFactory = Callable[..., NativeAdapter]
+ClientFactory = Callable[..., "JSONLLMClient"]
 ProviderFactory = Callable[..., Provider]
 
 
-def _default_adapter_factory(model: str, *, api_key: str | None, **kwargs: Any) -> Any:
+def _default_adapter_factory(
+    model: str, *, api_key: str | None, **kwargs: object
+) -> NativeLLMAdapter:
     """Build a :class:`NativeLLMAdapter` for ``model`` (deferred import)."""
     from .protocol import NativeLLMAdapter
 
-    return NativeLLMAdapter(model, api_key=api_key, **kwargs)
+    # The adapter validates the forwarded options at construction time.
+    build: Callable[..., NativeLLMAdapter] = NativeLLMAdapter
+    return build(model, api_key=api_key, **kwargs)
 
 
 class FallbackLLMClient:
@@ -153,16 +221,24 @@ class FallbackLLMClient:
         cooldown_store: CooldownStore | None = None,
         adapter_factory: AdapterFactory | None = None,
         default_api_key: str | None = None,
-        **adapter_kwargs: Any,
+        **adapter_kwargs: object,
     ) -> None:
+        """Wrap ``primary_model`` with failover across ``config``'s models."""
         self._model = primary_model
         self._config = config
-        self._store = cooldown_store if cooldown_store is not None else CooldownStore()
-        self._adapter_factory = adapter_factory or _default_adapter_factory
+        self._store = (
+            cooldown_store if cooldown_store is not None else CooldownStore()
+        )
+        self._adapter_factory: AdapterFactory = (
+            adapter_factory or _default_adapter_factory
+        )
         self._default_api_key = default_api_key
         # Inner adapters must not retry 429s in-place — a rate limit should
         # trigger fast failover to the next model, not local backoff.
-        self._adapter_kwargs = {**adapter_kwargs, "retry_rate_limit_errors": False}
+        self._adapter_kwargs = {
+            **adapter_kwargs,
+            "retry_rate_limit_errors": False,
+        }
 
         # Effective chain: primary first, then fallbacks (de-duplicated).
         chain = [primary_model]
@@ -173,9 +249,11 @@ class FallbackLLMClient:
         # Entry order is model-major, key-minor: keys rotate within a model
         # before advancing to the next model.
         self._entries: list[Entry] = [
-            (model, key_index) for model in chain for key_index in range(n_keys)
+            (model, key_index)
+            for model in chain
+            for key_index in range(n_keys)
         ]
-        self._adapters: dict[Entry, Any] = {}
+        self._adapters: dict[Entry, NativeAdapter] = {}
 
     # -- introspection ------------------------------------------------------
 
@@ -186,7 +264,7 @@ class FallbackLLMClient:
 
     # -- internals ----------------------------------------------------------
 
-    def _adapter(self, entry: Entry) -> Any:
+    def _adapter(self, entry: Entry) -> NativeAdapter:
         """Lazily build (and cache) the adapter for an entry."""
         cached = self._adapters.get(entry)
         if cached is not None:
@@ -196,7 +274,9 @@ class FallbackLLMClient:
             api_key: str | None = self._config.api_keys[key_index]
         else:
             api_key = self._default_api_key
-        adapter = self._adapter_factory(model, api_key=api_key, **self._adapter_kwargs)
+        adapter = self._adapter_factory(
+            model, api_key=api_key, **self._adapter_kwargs
+        )
         self._adapters[entry] = adapter
         return adapter
 
@@ -220,7 +300,9 @@ class FallbackLLMClient:
     ) -> tuple[str, float]:
         """Run a completion, failing over to fallback models on 429."""
 
-        async def call(adapter: Any, stream_chunk: Callable[[str, bool], None] | None) -> tuple[str, float]:
+        async def call(
+            adapter: NativeAdapter, stream_chunk: ChunkCallback | None
+        ) -> tuple[str, float]:
             return await adapter.complete(
                 messages=messages,
                 response_format=response_format,
@@ -229,20 +311,24 @@ class FallbackLLMClient:
                 on_reasoning_chunk=on_reasoning_chunk,
             )
 
-        return await self._with_failover(call, stream=stream, on_stream_chunk=on_stream_chunk)
+        return await self._with_failover(
+            call, stream=stream, on_stream_chunk=on_stream_chunk
+        )
 
     async def complete_with_tools(
         self,
         *,
         messages: Sequence[Mapping[str, Any]],
-        tools: Sequence[Any],
+        tools: Sequence[ToolSpec],
         stream: bool = False,
         on_stream_chunk: Callable[[str, bool], None] | None = None,
         on_reasoning_chunk: Callable[[str, bool], None] | None = None,
-    ) -> Any:
-        """Native tool-calling sibling of ``complete`` with the same failover."""
+    ) -> NativeToolCallResult:
+        """Native tool-calling variant of ``complete``, same failover."""
 
-        async def call(adapter: Any, stream_chunk: Callable[[str, bool], None] | None) -> Any:
+        async def call(
+            adapter: NativeAdapter, stream_chunk: ChunkCallback | None
+        ) -> NativeToolCallResult:
             return await adapter.complete_with_tools(
                 messages=messages,
                 tools=tools,
@@ -251,16 +337,18 @@ class FallbackLLMClient:
                 on_reasoning_chunk=on_reasoning_chunk,
             )
 
-        return await self._with_failover(call, stream=stream, on_stream_chunk=on_stream_chunk)
+        return await self._with_failover(
+            call, stream=stream, on_stream_chunk=on_stream_chunk
+        )
 
     async def _with_failover(
         self,
-        call: Callable[[Any, Callable[[str, bool], None] | None], Any],
+        call: Callable[[NativeAdapter, ChunkCallback | None], Awaitable[_T]],
         *,
         stream: bool,
         on_stream_chunk: Callable[[str, bool], None] | None,
-    ) -> Any:
-        """Shared 429 failover core: entry selection, cooldown, mid-stream rules."""
+    ) -> _T:
+        """Shared 429 failover: selection, cooldown and mid-stream rules."""
         chunks_emitted = 0
 
         def wrapped_stream_chunk(text: str, done: bool) -> None:
@@ -301,13 +389,18 @@ class FallbackLLMClient:
             model, key_index = entry
             adapter = self._adapter(entry)
             try:
-                return await call(adapter, wrapped_stream_chunk if stream else None)
+                return await call(
+                    adapter, wrapped_stream_chunk if stream else None
+                )
             except LLMRateLimitError as exc:
                 last_error = exc
-                cooldown_s = max(self._config.cooldown_s, exc.retry_after or 0.0)
+                cooldown_s = max(
+                    self._config.cooldown_s, exc.retry_after or 0.0
+                )
                 expiry = self._store.set_cooldown(entry, cooldown_s)
                 logger.warning(
-                    "llm_model_cooldown | model=%s key_index=%d cooldown_s=%.1f "
+                    "llm_model_cooldown | model=%s key_index=%d "
+                    "cooldown_s=%.1f "
                     "retry_after=%s expiry=%.1f",
                     model,
                     key_index,
@@ -316,9 +409,9 @@ class FallbackLLMClient:
                     expiry,
                 )
                 if chunks_emitted > 0:
-                    # Output already streamed to the user — cannot transparently
-                    # switch. Propagate so the planner retries the step on a
-                    # fresh model (the entry is now in cooldown).
+                    # Output already streamed to the user — cannot
+                    # transparently switch. Propagate so the planner retries
+                    # the step on a fresh model (the entry is now in cooldown).
                     raise
                 # No output emitted yet: select the next entry and retry.
                 continue
@@ -336,7 +429,9 @@ class _FallbackExecutor:
     ) -> None:
         self._model = primary_model
         self._config = config
-        self._store = cooldown_store if cooldown_store is not None else CooldownStore()
+        self._store = (
+            cooldown_store if cooldown_store is not None else CooldownStore()
+        )
 
         chain = [primary_model]
         chain.extend(m for m in config.models if m != primary_model)
@@ -344,14 +439,18 @@ class _FallbackExecutor:
 
         n_keys = len(config.api_keys) if config.api_keys else 1
         self._entries: list[Entry] = [
-            (model, key_index) for model in chain for key_index in range(n_keys)
+            (model, key_index)
+            for model in chain
+            for key_index in range(n_keys)
         ]
 
     @property
     def model(self) -> str:
         return self._model
 
-    def resolve_api_key(self, key_index: int, default_api_key: str | None) -> str | None:
+    def resolve_api_key(
+        self, key_index: int, default_api_key: str | None
+    ) -> str | None:
         if self._config.api_keys:
             return self._config.api_keys[key_index]
         return default_api_key
@@ -364,10 +463,10 @@ class _FallbackExecutor:
 
     async def run(
         self,
-        call: Callable[[Entry], Any],
+        call: Callable[[Entry], Awaitable[_T]],
         *,
         streamed_output_emitted: Callable[[], bool] | None = None,
-    ) -> Any:
+    ) -> _T:
         last_error: LLMRateLimitError | None = None
         waited = False
 
@@ -375,9 +474,15 @@ class _FallbackExecutor:
             entry = self._select()
             if entry is None:
                 wait_s = self._store.seconds_until_earliest(self._entries)
-                if not waited and wait_s is not None and wait_s <= self._config.max_wait_s:
+                if (
+                    not waited
+                    and wait_s is not None
+                    and wait_s <= self._config.max_wait_s
+                ):
                     waited = True
-                    logger.warning("llm_fallback_all_cooling_down | waiting=%.1fs", wait_s)
+                    logger.warning(
+                        "llm_fallback_all_cooling_down | waiting=%.1fs", wait_s
+                    )
                     await asyncio.sleep(wait_s)
                     continue
                 if last_error is not None:
@@ -393,10 +498,13 @@ class _FallbackExecutor:
                 return await call(entry)
             except LLMRateLimitError as exc:
                 last_error = exc
-                cooldown_s = max(self._config.cooldown_s, exc.retry_after or 0.0)
+                cooldown_s = max(
+                    self._config.cooldown_s, exc.retry_after or 0.0
+                )
                 expiry = self._store.set_cooldown(entry, cooldown_s)
                 logger.warning(
-                    "llm_model_cooldown | model=%s key_index=%d cooldown_s=%.1f "
+                    "llm_model_cooldown | model=%s key_index=%d "
+                    "cooldown_s=%.1f "
                     "retry_after=%s expiry=%.1f",
                     model,
                     key_index,
@@ -404,7 +512,10 @@ class _FallbackExecutor:
                     exc.retry_after,
                     expiry,
                 )
-                if streamed_output_emitted is not None and streamed_output_emitted():
+                if (
+                    streamed_output_emitted is not None
+                    and streamed_output_emitted()
+                ):
                     raise
                 continue
 
@@ -417,28 +528,36 @@ class GenericFallbackLLMClient:
         primary_model: str,
         config: ModelFallbackConfig,
         *,
-        client_factory: AdapterFactory,
+        client_factory: ClientFactory,
         cooldown_store: CooldownStore | None = None,
         default_api_key: str | None = None,
-        **client_kwargs: Any,
+        **client_kwargs: object,
     ) -> None:
-        self._executor = _FallbackExecutor(primary_model, config, cooldown_store=cooldown_store)
+        """Wrap ``primary_model`` clients with failover across ``config``."""
+        self._executor = _FallbackExecutor(
+            primary_model, config, cooldown_store=cooldown_store
+        )
         self._client_factory = client_factory
         self._default_api_key = default_api_key
         self._client_kwargs = client_kwargs
-        self._clients: dict[Entry, Any] = {}
+        self._clients: dict[Entry, JSONLLMClient] = {}
 
     @property
     def model(self) -> str:
+        """The primary model identifier."""
         return self._executor.model
 
-    def _client(self, entry: Entry) -> Any:
+    def _client(self, entry: Entry) -> JSONLLMClient:
         cached = self._clients.get(entry)
         if cached is not None:
             return cached
         model, key_index = entry
-        api_key = self._executor.resolve_api_key(key_index, self._default_api_key)
-        client = self._client_factory(model, api_key=api_key, **self._client_kwargs)
+        api_key = self._executor.resolve_api_key(
+            key_index, self._default_api_key
+        )
+        client = self._client_factory(
+            model, api_key=api_key, **self._client_kwargs
+        )
         self._clients[entry] = client
         return client
 
@@ -450,7 +569,8 @@ class GenericFallbackLLMClient:
         stream: bool = False,
         on_stream_chunk: Callable[[str, bool], None] | None = None,
         on_reasoning_chunk: Callable[[str, bool], None] | None = None,
-    ) -> Any:
+    ) -> str | tuple[str, float]:
+        """Run a JSON completion, failing over to fallback models on 429."""
         chunks_emitted = 0
 
         def wrapped_stream_chunk(text: str, done: bool) -> None:
@@ -460,7 +580,7 @@ class GenericFallbackLLMClient:
             if on_stream_chunk is not None:
                 on_stream_chunk(text, done)
 
-        async def call(entry: Entry) -> Any:
+        async def call(entry: Entry) -> str | tuple[str, float]:
             client = self._client(entry)
             kwargs: dict[str, Any] = {
                 "messages": messages,
@@ -472,7 +592,9 @@ class GenericFallbackLLMClient:
                 kwargs["on_reasoning_chunk"] = on_reasoning_chunk
             return await client.complete(**kwargs)
 
-        return await self._executor.run(call, streamed_output_emitted=lambda: chunks_emitted > 0)
+        return await self._executor.run(
+            call, streamed_output_emitted=lambda: chunks_emitted > 0
+        )
 
 
 class FallbackProvider(Provider):
@@ -486,28 +608,35 @@ class FallbackProvider(Provider):
         provider_factory: ProviderFactory,
         cooldown_store: CooldownStore | None = None,
         default_api_key: str | None = None,
-        **provider_kwargs: Any,
+        **provider_kwargs: object,
     ) -> None:
-        self._executor = _FallbackExecutor(primary_model, config, cooldown_store=cooldown_store)
+        """Wrap ``primary_model`` providers with failover across ``config``."""
+        self._executor = _FallbackExecutor(
+            primary_model, config, cooldown_store=cooldown_store
+        )
         self._provider_factory = provider_factory
         self._default_api_key = default_api_key
         self._provider_kwargs = provider_kwargs
         self._providers: dict[Entry, Provider] = {}
         self._primary_entry: Entry = (primary_model, 0)
-        # The model actually used by the most recent attempt. Drives pricing and
-        # telemetry above this seam (e.g. ``call_with_retry`` reads ``provider.model``
-        # to attribute cost), so it must reflect the failover target, not the primary.
+        # The model actually used by the most recent attempt. Drives pricing
+        # and telemetry above this seam (e.g. ``call_with_retry`` reads
+        # ``provider.model`` to attribute cost), so it must reflect the
+        # failover target, not the primary.
         self._active_model = primary_model
 
     @property
+    @override
     def provider_name(self) -> str:
         return self._provider(self._primary_entry).provider_name
 
     @property
-    def profile(self) -> Any:
+    @override
+    def profile(self) -> ModelProfile:
         return self._provider(self._primary_entry).profile
 
     @property
+    @override
     def model(self) -> str:
         return self._active_model
 
@@ -516,32 +645,39 @@ class FallbackProvider(Provider):
         if cached is not None:
             return cached
         model, key_index = entry
-        api_key = self._executor.resolve_api_key(key_index, self._default_api_key)
-        provider = self._provider_factory(model, api_key=api_key, **self._provider_kwargs)
+        api_key = self._executor.resolve_api_key(
+            key_index, self._default_api_key
+        )
+        provider = self._provider_factory(
+            model, api_key=api_key, **self._provider_kwargs
+        )
         self._providers[entry] = provider
         return provider
 
+    @override
     async def complete(
         self,
-        request: Any,
+        request: LLMRequest,
         *,
         timeout_s: float | None = None,
-        cancel: Any = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_event: Any = None,
-    ) -> Any:
+        on_stream_event: StreamCallback | None = None,
+    ) -> CompletionResponse:
         chunks_emitted = 0
 
-        def wrapped_stream_event(event: Any) -> None:
+        def wrapped_stream_event(event: StreamEvent) -> None:
             nonlocal chunks_emitted
             if isinstance(event, StreamEvent) and (
-                event.delta_text or event.delta_reasoning or event.delta_tool_call is not None
+                event.delta_text
+                or event.delta_reasoning
+                or event.delta_tool_call is not None
             ):
                 chunks_emitted += 1
             if on_stream_event is not None:
                 on_stream_event(event)
 
-        async def call(entry: Entry) -> Any:
+        async def call(entry: Entry) -> CompletionResponse:
             self._active_model = entry[0]
             provider = self._provider(entry)
             return await provider.complete(
@@ -549,16 +685,20 @@ class FallbackProvider(Provider):
                 timeout_s=timeout_s,
                 cancel=cancel,
                 stream=stream,
-                on_stream_event=wrapped_stream_event if stream else on_stream_event,
+                on_stream_event=wrapped_stream_event
+                if stream
+                else on_stream_event,
             )
 
-        return await self._executor.run(call, streamed_output_emitted=lambda: chunks_emitted > 0)
+        return await self._executor.run(
+            call, streamed_output_emitted=lambda: chunks_emitted > 0
+        )
 
 
 __all__ = [
     "CooldownStore",
-    "FallbackProvider",
-    "ModelFallbackConfig",
     "FallbackLLMClient",
+    "FallbackProvider",
     "GenericFallbackLLMClient",
+    "ModelFallbackConfig",
 ]

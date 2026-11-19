@@ -30,7 +30,8 @@ class ToolNodeError(Exception):
         status_code: int | None = None,
         category: ErrorCategory | None = None,
         cause: Exception | None = None,
-    ):
+    ) -> None:
+        """Store the error details; infer the category from the status code."""
         super().__init__(message)
         self.status_code = status_code
         self.category = category or self._infer_category(status_code)
@@ -51,6 +52,7 @@ class ToolNodeError(Exception):
 
     @property
     def is_retryable(self) -> bool:
+        """Whether the error is worth retrying (server errors, rate limits)."""
         return self.category in (
             ErrorCategory.RETRYABLE_SERVER,
             ErrorCategory.RETRYABLE_RATE_LIMIT,
@@ -65,6 +67,7 @@ class ToolNodeError(Exception):
         return None
 
     def to_dict(self) -> dict[str, str | int | bool | None]:
+        """Return a JSON-ready description of the error."""
         return {
             "type": self.__class__.__name__,
             "message": str(self),

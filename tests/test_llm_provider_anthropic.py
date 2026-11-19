@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any, Never
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,6 +13,7 @@ from penguiflow.llm.errors import (
     LLMCancelledError,
     LLMTimeoutError,
 )
+from penguiflow.llm.providers.anthropic import _to_anthropic_messages
 from penguiflow.llm.types import (
     ImagePart,
     LLMMessage,
@@ -25,9 +26,13 @@ from penguiflow.llm.types import (
     ToolSpec,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from typing import Self
+
 
 @pytest.fixture
-def mock_anthropic_sdk() -> Any:
+def mock_anthropic_sdk() -> MagicMock:
     """Mock the Anthropic SDK."""
     mock_sdk = MagicMock()
     mock_client = MagicMock()
@@ -43,7 +48,9 @@ class TestAnthropicProviderInit:
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
 
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test-api-key")
+            provider = AnthropicProvider(
+                "claude-sonnet-4-5", api_key="test-api-key"
+            )
 
             assert provider.model == "claude-sonnet-4-5"
             assert provider.provider_name == "anthropic"
@@ -56,9 +63,11 @@ class TestAnthropicProviderInit:
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
 
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test", timeout=120.0)
+            provider = AnthropicProvider(
+                "claude-sonnet-4-5", api_key="test", timeout=120.0
+            )
 
-            assert provider._timeout == 120.0
+            assert provider.timeout == 120.0
             call_kwargs = mock_anthropic_sdk.AsyncAnthropic.call_args[1]
             assert call_kwargs["timeout"] == 120.0
 
@@ -67,9 +76,11 @@ class TestAnthropicProviderInit:
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
 
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test", max_tokens=4096)
+            provider = AnthropicProvider(
+                "claude-sonnet-4-5", api_key="test", max_tokens=4096
+            )
 
-            assert provider._default_max_tokens == 4096
+            assert provider.default_max_tokens == 4096
 
     def test_init_uses_env_var(self, mock_anthropic_sdk: MagicMock) -> None:
         """Test initialization uses ANTHROPIC_API_KEY env var."""
@@ -82,7 +93,9 @@ class TestAnthropicProviderInit:
                 call_kwargs = mock_anthropic_sdk.AsyncAnthropic.call_args[1]
                 assert call_kwargs["api_key"] == "env-api-key"
 
-    def test_init_with_custom_profile(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_init_with_custom_profile(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test initialization with custom model profile."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.profiles import ModelProfile
@@ -93,7 +106,9 @@ class TestAnthropicProviderInit:
                 supports_schema_guided_output=True,
                 max_output_tokens=4096,
             )
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test", profile=custom_profile)
+            provider = AnthropicProvider(
+                "claude-sonnet-4-5", api_key="test", profile=custom_profile
+            )
 
             assert provider.profile is custom_profile
 
@@ -112,31 +127,29 @@ class TestAnthropicProviderInit:
 class TestAnthropicProviderMessageConversion:
     """Test Anthropic provider message conversion."""
 
-    def test_convert_messages_basic(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_convert_messages_basic(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test basic message conversion."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
-            from penguiflow.llm.providers.anthropic import AnthropicProvider
-
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
-
             messages = [
-                LLMMessage(role="system", parts=[TextPart(text="You are helpful.")]),
+                LLMMessage(
+                    role="system", parts=[TextPart(text="You are helpful.")]
+                ),
                 LLMMessage(role="user", parts=[TextPart(text="Hello")]),
             ]
 
-            system_text, result = provider._to_anthropic_messages(messages)
+            system_text, result = _to_anthropic_messages(messages)
 
             assert system_text == "You are helpful."
             assert len(result) == 1
             assert result[0]["role"] == "user"
 
-    def test_convert_messages_with_tool_call(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_convert_messages_with_tool_call(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test message conversion with tool calls."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
-            from penguiflow.llm.providers.anthropic import AnthropicProvider
-
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
-
             messages = [
                 LLMMessage(
                     role="assistant",
@@ -150,18 +163,16 @@ class TestAnthropicProviderMessageConversion:
                 ),
             ]
 
-            _, result = provider._to_anthropic_messages(messages)
+            _, result = _to_anthropic_messages(messages)
 
             assert len(result) == 1
             assert result[0]["content"][0]["type"] == "tool_use"
 
-    def test_convert_messages_with_tool_result(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_convert_messages_with_tool_result(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test message conversion with tool results."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
-            from penguiflow.llm.providers.anthropic import AnthropicProvider
-
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
-
             messages = [
                 LLMMessage(
                     role="tool",
@@ -176,29 +187,29 @@ class TestAnthropicProviderMessageConversion:
                 ),
             ]
 
-            _, result = provider._to_anthropic_messages(messages)
+            _, result = _to_anthropic_messages(messages)
 
             assert len(result) == 1
             assert result[0]["content"][0]["type"] == "tool_result"
 
-    def test_convert_messages_with_image(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_convert_messages_with_image(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test message conversion with images."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
-            from penguiflow.llm.providers.anthropic import AnthropicProvider
-
-            provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
-
             messages = [
                 LLMMessage(
                     role="user",
                     parts=[
-                        ImagePart(data=b"fake_image_data", media_type="image/png"),
+                        ImagePart(
+                            data=b"fake_image_data", media_type="image/png"
+                        ),
                         TextPart(text="What is this?"),
                     ],
                 ),
             ]
 
-            _, result = provider._to_anthropic_messages(messages)
+            _, result = _to_anthropic_messages(messages)
 
             assert len(result) == 1
             assert len(result[0]["content"]) == 2
@@ -217,17 +228,21 @@ class TestAnthropicProviderBuildParams:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 temperature=0.7,
             )
 
-            _, messages = provider._to_anthropic_messages(request.messages)
-            params = provider._build_params(request, None, messages)
+            _, messages = _to_anthropic_messages(request.messages)
+            params = provider.build_params(request, None, messages)
 
             assert params["model"] == "claude-sonnet-4-5"
             assert params["temperature"] == 0.7
 
-    def test_build_params_with_system(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_build_params_with_system(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test parameter building with system message."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -235,7 +250,9 @@ class TestAnthropicProviderBuildParams:
             provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
 
             messages = [
-                LLMMessage(role="system", parts=[TextPart(text="Be helpful.")]),
+                LLMMessage(
+                    role="system", parts=[TextPart(text="Be helpful.")]
+                ),
                 LLMMessage(role="user", parts=[TextPart(text="Hello")]),
             ]
 
@@ -244,12 +261,14 @@ class TestAnthropicProviderBuildParams:
                 messages=tuple(messages),
             )
 
-            system_text, converted = provider._to_anthropic_messages(request.messages)
-            params = provider._build_params(request, system_text, converted)
+            system_text, converted = _to_anthropic_messages(request.messages)
+            params = provider.build_params(request, system_text, converted)
 
             assert params["system"] == "Be helpful."
 
-    def test_build_params_with_tools(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_build_params_with_tools(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test parameter building with tools."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -258,7 +277,9 @@ class TestAnthropicProviderBuildParams:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 tools=(
                     ToolSpec(
                         name="get_weather",
@@ -269,13 +290,15 @@ class TestAnthropicProviderBuildParams:
                 tool_choice="get_weather",
             )
 
-            _, messages = provider._to_anthropic_messages(request.messages)
-            params = provider._build_params(request, None, messages)
+            _, messages = _to_anthropic_messages(request.messages)
+            params = provider.build_params(request, None, messages)
 
             assert "tools" in params
             assert params["tool_choice"]["name"] == "get_weather"
 
-    def test_build_params_with_structured_output(self, mock_anthropic_sdk: MagicMock) -> None:
+    def test_build_params_with_structured_output(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test parameter building with structured output."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -284,7 +307,9 @@ class TestAnthropicProviderBuildParams:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 structured_output=StructuredOutputSpec(
                     name="MySchema",
                     json_schema={"type": "object"},
@@ -292,8 +317,8 @@ class TestAnthropicProviderBuildParams:
                 ),
             )
 
-            _, messages = provider._to_anthropic_messages(request.messages)
-            params = provider._build_params(request, None, messages)
+            _, messages = _to_anthropic_messages(request.messages)
+            params = provider.build_params(request, None, messages)
 
             # Anthropic uses tool_choice for structured output
             assert params["tool_choice"]["name"] == "MySchema"
@@ -338,7 +363,9 @@ class TestAnthropicProviderComplete:
         return mock_response
 
     @pytest.mark.asyncio
-    async def test_complete_simple(self, mock_anthropic_sdk: MagicMock) -> None:
+    async def test_complete_simple(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test simple completion."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -352,7 +379,9 @@ class TestAnthropicProviderComplete:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -362,7 +391,9 @@ class TestAnthropicProviderComplete:
             assert response.usage.output_tokens == 5
 
     @pytest.mark.asyncio
-    async def test_complete_with_tool_calls(self, mock_anthropic_sdk: MagicMock) -> None:
+    async def test_complete_with_tool_calls(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test completion with tool calls."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -370,7 +401,11 @@ class TestAnthropicProviderComplete:
             mock_response = self._create_mock_response(
                 content="",
                 tool_calls=[
-                    {"id": "call_123", "name": "get_weather", "input": {"city": "NYC"}}
+                    {
+                        "id": "call_123",
+                        "name": "get_weather",
+                        "input": {"city": "NYC"},
+                    }
                 ],
             )
             mock_client = MagicMock()
@@ -381,7 +416,9 @@ class TestAnthropicProviderComplete:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Weather?")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Weather?")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -391,7 +428,9 @@ class TestAnthropicProviderComplete:
             assert response.message.parts[0].name == "get_weather"
 
     @pytest.mark.asyncio
-    async def test_complete_timeout(self, mock_anthropic_sdk: MagicMock) -> None:
+    async def test_complete_timeout(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test timeout handling."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -404,34 +443,44 @@ class TestAnthropicProviderComplete:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMTimeoutError):
                 await provider.complete(request)
 
     @pytest.mark.asyncio
-    async def test_complete_cancelled(self, mock_anthropic_sdk: MagicMock) -> None:
+    async def test_complete_cancelled(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test cancellation handling."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
 
             mock_client = MagicMock()
-            mock_client.messages.create = AsyncMock(side_effect=asyncio.CancelledError())
+            mock_client.messages.create = AsyncMock(
+                side_effect=asyncio.CancelledError()
+            )
             mock_anthropic_sdk.AsyncAnthropic.return_value = mock_client
 
             provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
                 await provider.complete(request)
 
     @pytest.mark.asyncio
-    async def test_complete_with_cancel_token(self, mock_anthropic_sdk: MagicMock) -> None:
+    async def test_complete_with_cancel_token(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
         """Test early cancellation via cancel token."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -445,7 +494,9 @@ class TestAnthropicProviderComplete:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
@@ -505,12 +556,12 @@ class TestAnthropicProviderStreaming:
             events.append(msg_stop)
 
             # Create async context manager mock
-            async def async_gen():
+            async def async_gen() -> AsyncIterator[object]:
                 for event in events:
                     yield event
 
             mock_stream = MagicMock()
-            mock_stream.__aiter__ = lambda self: async_gen()
+            mock_stream.__aiter__ = lambda _self: async_gen()
 
             # Mock get_final_message
             final_msg = MagicMock()
@@ -520,10 +571,10 @@ class TestAnthropicProviderStreaming:
             mock_stream.get_final_message = AsyncMock(return_value=final_msg)
 
             class MockStreamContext:
-                async def __aenter__(self):
+                async def __aenter__(self) -> Self:
                     return mock_stream
 
-                async def __aexit__(self, *args):
+                async def __aexit__(self, *args: object) -> None:
                     pass
 
             mock_client = MagicMock()
@@ -540,7 +591,9 @@ class TestAnthropicProviderStreaming:
 
             request = LLMRequest(
                 model="claude-sonnet-4-5",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(
@@ -556,8 +609,10 @@ class TestAnthropicProviderStreaming:
 class TestAnthropicProviderErrorMapping:
     """Test Anthropic provider error mapping."""
 
-    def test_map_unknown_error_without_sdk_imports(self, mock_anthropic_sdk: MagicMock) -> None:
-        """Test error mapping falls back to generic error when SDK classes unavailable."""
+    def test_map_unknown_error_without_sdk_imports(
+        self, mock_anthropic_sdk: MagicMock
+    ) -> None:
+        """Errors map to a generic error when SDK classes are missing."""
         with patch.dict("sys.modules", {"anthropic": mock_anthropic_sdk}):
             from penguiflow.llm.errors import LLMError
             from penguiflow.llm.providers.anthropic import AnthropicProvider
@@ -565,11 +620,13 @@ class TestAnthropicProviderErrorMapping:
             provider = AnthropicProvider("claude-sonnet-4-5", api_key="test")
 
             # Force ImportError when trying to import exception classes
-            def raise_import_error():
-                raise ImportError("mocked")
+            def raise_import_error() -> Never:
+                msg = "mocked"
+                raise ImportError(msg)
 
-            with patch.object(provider, "_map_error") as mock_map:
-                # Test that when error mapping returns LLMError for unknown errors
+            with patch.object(provider, "map_error") as mock_map:
+                # Test that when error mapping returns LLMError for unknown
+                # errors
                 mock_map.return_value = LLMError(
                     message="Unknown error", provider="anthropic"
                 )

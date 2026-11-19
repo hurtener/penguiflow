@@ -1,8 +1,10 @@
+"""Tests for A2A HTTP."""
+
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi import FastAPI
@@ -29,7 +31,18 @@ from penguiflow_a2a.models import (
     TaskState,
 )
 
-from .planner_doubles import ScriptedPlanner, ScriptedRun, echo_planner, slow_planner, streaming_planner
+from .planner_doubles import (
+    ScriptedPlanner,
+    ScriptedRun,
+    echo_planner,
+    slow_planner,
+    streaming_planner,
+)
+
+if TYPE_CHECKING:
+    from asyncio.queues import Queue
+
+    from penguiflow_a2a.models import StreamResponse
 
 
 def _agent_card(*, push_notifications: bool = False) -> AgentCard:
@@ -37,7 +50,11 @@ def _agent_card(*, push_notifications: bool = False) -> AgentCard:
         protocol_versions=["0.3"],
         name="Test Agent",
         description="Test",
-        supported_interfaces=[AgentInterface(url="https://example.com/a2a", protocol_binding="HTTP+JSON")],
+        supported_interfaces=[
+            AgentInterface(
+                url="https://example.com/a2a", protocol_binding="HTTP+JSON"
+            )
+        ],
         version="1.0.0",
         capabilities=AgentCapabilities(
             streaming=True,
@@ -59,25 +76,33 @@ def _agent_card(*, push_notifications: bool = False) -> AgentCard:
 
 
 def _build_client() -> TestClient:
-    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(
+        echo_planner(), agent_card=_agent_card(), config=A2AConfig()
+    )
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_stream_client() -> TestClient:
-    service = A2AService(streaming_planner(), agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(
+        streaming_planner(), agent_card=_agent_card(), config=A2AConfig()
+    )
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_slow_client(delay: float = 0.5) -> TestClient:
-    service = A2AService(slow_planner(delay), agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(
+        slow_planner(delay), agent_card=_agent_card(), config=A2AConfig()
+    )
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_router_client() -> tuple[TestClient, A2AService]:
-    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(
+        echo_planner(), agent_card=_agent_card(), config=A2AConfig()
+    )
     app = FastAPI()
     app.include_router(create_a2a_http_router(service))
     return TestClient(app, raise_server_exceptions=False), service
@@ -112,6 +137,7 @@ def _message_payload(
 
 
 def test_send_message_blocking_and_get_task() -> None:
+    """Send message blocking and get task."""
     with _build_client() as client:
         response = client.post(
             "/message:send",
@@ -141,6 +167,7 @@ def test_send_message_blocking_and_get_task() -> None:
 
 
 def test_agent_card_endpoint() -> None:
+    """Agent card endpoint."""
     with _build_client() as client:
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
@@ -150,6 +177,7 @@ def test_agent_card_endpoint() -> None:
 
 
 def test_send_message_non_blocking_returns_active_task() -> None:
+    """Send message non blocking returns active task."""
     with _build_slow_client() as client:
         response = client.post(
             "/message:send",
@@ -158,14 +186,20 @@ def test_send_message_non_blocking_returns_active_task() -> None:
         )
         assert response.status_code == 200
         task = response.json()["task"]
-        assert task["status"]["state"] in {TaskState.SUBMITTED.value, TaskState.WORKING.value}
+        assert task["status"]["state"] in {
+            TaskState.SUBMITTED.value,
+            TaskState.WORKING.value,
+        }
 
 
 def test_send_message_history_length_semantics() -> None:
+    """Send message history length semantics."""
     with _build_client() as client:
         response = client.post(
             "/message:send",
-            json=_message_payload("hello", blocking=True, history_length=0, message_id="msg-0"),
+            json=_message_payload(
+                "hello", blocking=True, history_length=0, message_id="msg-0"
+            ),
             headers=_base_headers(),
         )
         assert response.status_code == 200
@@ -174,7 +208,9 @@ def test_send_message_history_length_semantics() -> None:
 
         response = client.post(
             "/message:send",
-            json=_message_payload("hello", blocking=True, history_length=1, message_id="msg-1"),
+            json=_message_payload(
+                "hello", blocking=True, history_length=1, message_id="msg-1"
+            ),
             headers=_base_headers(),
         )
         assert response.status_code == 200
@@ -192,10 +228,13 @@ def test_send_message_history_length_semantics() -> None:
 
 
 def test_send_message_reuses_context_with_distinct_tasks() -> None:
+    """Send message reuses context with distinct tasks."""
     with _build_client() as client:
         first_response = client.post(
             "/message:send",
-            json=_message_payload("first", blocking=True, message_id="msg-context-1"),
+            json=_message_payload(
+                "first", blocking=True, message_id="msg-context-1"
+            ),
             headers=_base_headers(),
         )
         assert first_response.status_code == 200
@@ -225,10 +264,14 @@ def test_send_message_reuses_context_with_distinct_tasks() -> None:
         )
         assert list_response.status_code == 200
         tasks = list_response.json()["tasks"]
-        assert {task["id"] for task in tasks} == {first_task["id"], second_task["id"]}
+        assert {task["id"] for task in tasks} == {
+            first_task["id"],
+            second_task["id"],
+        }
 
 
 def test_stream_message_emits_task_and_final_status() -> None:
+    """Stream message emits task and final status."""
     with _build_stream_client() as client:
         events: list[dict[str, Any]] = []
         with client.stream(
@@ -246,13 +289,16 @@ def test_stream_message_emits_task_and_final_status() -> None:
         assert "task" in events[0]
         assert all("task" not in event for event in events[1:])
         final_events = [event for event in events if "statusUpdate" in event]
-        artifact_events = [event for event in events if "artifactUpdate" in event]
+        artifact_events = [
+            event for event in events if "artifactUpdate" in event
+        ]
         assert artifact_events
         assert final_events
         assert final_events[-1]["statusUpdate"]["final"] is True
 
 
 def test_subscribe_task_first_event_is_snapshot() -> None:
+    """Subscribe task first event is snapshot."""
     with _build_slow_client() as client:
         response = client.post(
             "/message:send",
@@ -278,6 +324,7 @@ def test_subscribe_task_first_event_is_snapshot() -> None:
 
 
 def test_list_tasks_pagination_and_ordering() -> None:
+    """List tasks pagination and ordering."""
     with _build_client() as client:
         task_ids = []
         for idx in range(3):
@@ -323,6 +370,7 @@ def test_list_tasks_pagination_and_ordering() -> None:
 
 
 def test_version_not_supported() -> None:
+    """Version not supported."""
     with _build_client() as client:
         response = client.post(
             "/message:send",
@@ -334,11 +382,12 @@ def test_version_not_supported() -> None:
 
 
 def test_router_direct_include_starts_service_via_lifespan() -> None:
+    """Router direct include starts service via lifespan."""
     client, service = _build_router_client()
-    assert service._started is False
+    started = [service.started]
 
     with client:
-        assert service._started is True
+        started.append(service.started)
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
         assert response.json()["name"] == "Test Agent"
@@ -349,16 +398,24 @@ def test_router_direct_include_starts_service_via_lifespan() -> None:
             headers=_base_headers(),
         )
         assert response.status_code == 200
-        assert response.json()["task"]["status"]["state"] == TaskState.COMPLETED.value
+        assert (
+            response.json()["task"]["status"]["state"]
+            == TaskState.COMPLETED.value
+        )
 
-    assert service._started is False
+    started.append(service.started)
+    assert started == [False, True, False]
 
 
 def test_router_include_does_not_change_unrelated_validation_errors() -> None:
+    """Router include does not change unrelated validation errors."""
+
     class EchoPayload(BaseModel):
         count: int
 
-    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(
+        echo_planner(), agent_card=_agent_card(), config=A2AConfig()
+    )
     app = FastAPI()
 
     @app.post("/echo")
@@ -382,7 +439,10 @@ def test_router_include_does_not_change_unrelated_validation_errors() -> None:
 
 
 def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
-    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
+    """Install helper mounts aliases and agent card once."""
+    service = A2AService(
+        echo_planner(), agent_card=_agent_card(), config=A2AConfig()
+    )
     app = FastAPI()
     install_a2a_http(app, service)
 
@@ -398,9 +458,16 @@ def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
         assert response.status_code == 200
 
         assert client.get("/v1/.well-known/agent-card.json").status_code == 404
-        assert client.get("/tenant-a/v1/.well-known/agent-card.json").status_code == 404
+        assert (
+            client.get("/tenant-a/v1/.well-known/agent-card.json").status_code
+            == 404
+        )
 
-        for path in ("/message:send", "/v1/message:send", "/tenant-a/v1/message:send"):
+        for path in (
+            "/message:send",
+            "/v1/message:send",
+            "/tenant-a/v1/message:send",
+        ):
             response = client.post(
                 path,
                 json=_message_payload("hello", blocking=True),
@@ -410,13 +477,19 @@ def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_task_multiple_subscribers_receive_same_events() -> None:
+async def test_subscribe_task_multiple_subscribers_receive_same_events() -> (
+    None
+):
+    """Subscribe task multiple subscribers receive same events."""
+
     async def streamer(run: ScriptedRun) -> str:
         await asyncio.sleep(0.1)
         run.emit_chunk("hello", done=True)
         return "hello"
 
-    service = A2AService(ScriptedPlanner(streamer), agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(
+        ScriptedPlanner(streamer), agent_card=_agent_card(), config=A2AConfig()
+    )
     await service.start()
     try:
         request = SendMessageRequest(
@@ -427,24 +500,32 @@ async def test_subscribe_task_multiple_subscribers_receive_same_events() -> None
             ),
             configuration=SendMessageConfiguration(blocking=False),
         )
-        response = await service.send_message(request, tenant=None, requested_extensions=[])
+        response = await service.send_message(
+            request, tenant=None, requested_extensions=[]
+        )
         assert response.task is not None
         task_id = response.task.id
 
         _, queue_a, unsub_a = await service.subscribe_task(task_id)
         _, queue_b, unsub_b = await service.subscribe_task(task_id)
 
-        async def _collect(queue):
+        async def _collect(
+            queue: Queue[StreamResponse],
+        ) -> list[dict[str, object]]:
             events = []
             while True:
                 event = await asyncio.wait_for(queue.get(), timeout=2)
-                events.append(event.model_dump(by_alias=True, exclude_none=True))
+                events.append(
+                    event.model_dump(by_alias=True, exclude_none=True)
+                )
                 if event.status_update and event.status_update.final:
                     break
             return events
 
         try:
-            events_a, events_b = await asyncio.gather(_collect(queue_a), _collect(queue_b))
+            events_a, events_b = await asyncio.gather(
+                _collect(queue_a), _collect(queue_b)
+            )
         finally:
             await unsub_a()
             await unsub_b()

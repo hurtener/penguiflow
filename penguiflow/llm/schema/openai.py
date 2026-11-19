@@ -5,7 +5,7 @@ Handles OpenAI's strict mode requirements for structured outputs.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from .transformer import JsonSchemaTransformer
 
@@ -22,22 +22,24 @@ class OpenAIJsonSchemaTransformer(JsonSchemaTransformer):
     Reference: https://platform.openai.com/docs/guides/structured-outputs
     """
 
-    UNSUPPORTED_KEYWORDS = {
-        "minLength",
-        "maxLength",
-        "pattern",
-        "format",
-        "minimum",
-        "maximum",
-        "exclusiveMinimum",
-        "exclusiveMaximum",
-        "minItems",
-        "maxItems",
-        "uniqueItems",
-        "minProperties",
-        "maxProperties",
-        "patternProperties",
-    }
+    UNSUPPORTED_KEYWORDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "minLength",
+            "maxLength",
+            "pattern",
+            "format",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "minItems",
+            "maxItems",
+            "uniqueItems",
+            "minProperties",
+            "maxProperties",
+            "patternProperties",
+        }
+    )
 
     def _transform_node(self, node: dict[str, Any]) -> dict[str, Any]:
         """Apply OpenAI-specific transformations."""

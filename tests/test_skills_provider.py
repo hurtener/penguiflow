@@ -1,18 +1,34 @@
+"""Tests for skills provider."""
+
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from penguiflow.skills import SkillsConfig
 from penguiflow.skills.local_store import LocalSkillStore
-from penguiflow.skills.models import SkillDefinition, SkillListRequest, SkillQuery, SkillSearchQuery
-from penguiflow.skills.provider import LocalSkillProvider, build_skill_capability_context
+from penguiflow.skills.models import (
+    SkillDefinition,
+    SkillListRequest,
+    SkillQuery,
+    SkillSearchQuery,
+)
+from penguiflow.skills.provider import (
+    LocalSkillProvider,
+    build_skill_capability_context,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio
 async def test_provider_search_and_get_relevant(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), max_tokens=240, redact_pii=False)
+    """Provider search and get relevant."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), max_tokens=240, redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
     skill = SkillDefinition(
@@ -20,7 +36,9 @@ async def test_provider_search_and_get_relevant(tmp_path: Path) -> None:
         trigger="Log into a site",
         steps=["Use browser.open to navigate", "Enter credentials"],
     )
-    store.upsert_pack_skill(skill, pack_name="core", scope_mode="project", update_existing=True)
+    store.upsert_pack_skill(
+        skill, pack_name="core", scope_mode="project", update_existing=True
+    )
 
     capability_context = build_skill_capability_context(
         all_tool_names={"browser.open", "tool_search"},
@@ -47,7 +65,10 @@ async def test_provider_search_and_get_relevant(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_provider_list_returns_entries(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+    """Provider list returns entries."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
     skill = SkillDefinition(
@@ -55,11 +76,15 @@ async def test_provider_list_returns_entries(tmp_path: Path) -> None:
         trigger="Handle cursor pagination",
         steps=["Call endpoint", "Follow cursor"],
     )
-    store.upsert_pack_skill(skill, pack_name="core", scope_mode="project", update_existing=True)
+    store.upsert_pack_skill(
+        skill, pack_name="core", scope_mode="project", update_existing=True
+    )
     response = await provider.list(
         SkillListRequest(page=1, page_size=10),
         tool_context={"project_id": "proj"},
-        capability_context=build_skill_capability_context(all_tool_names=set(), allowed_tool_names=set()),
+        capability_context=build_skill_capability_context(
+            all_tool_names=set(), allowed_tool_names=set()
+        ),
     )
     assert response.total >= 1
     assert response.skills[0].name.startswith("pack.core")
@@ -67,7 +92,10 @@ async def test_provider_list_returns_entries(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_provider_filters_by_skill_applicability(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+    """Provider filters by skill applicability."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
     store.upsert_pack_skill(
@@ -110,12 +138,19 @@ async def test_provider_filters_by_skill_applicability(tmp_path: Path) -> None:
         capability_context=visible,
     )
     assert blocked_search.skills == []
-    assert [item.name for item in visible_search.skills] == ["pack.core.mail_triage"]
+    assert [item.name for item in visible_search.skills] == [
+        "pack.core.mail_triage"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_provider_hides_inapplicable_skills_from_get_relevant_get_by_name_and_directory(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+async def test_provider_hides_inapplicable_skills(
+    tmp_path: Path,
+) -> None:
+    """Inapplicable skills are hidden from lookups and the directory."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
     store.upsert_pack_skill(
@@ -174,15 +209,24 @@ async def test_provider_hides_inapplicable_skills_from_get_relevant_get_by_name_
 
     assert blocked_relevant.skills == []
     assert blocked_relevant.formatted_context == ""
-    assert [skill.name for skill in allowed_relevant.skills] == ["pack.core.mail_triage"]
+    assert [skill.name for skill in allowed_relevant.skills] == [
+        "pack.core.mail_triage"
+    ]
     assert blocked_get == []
     assert blocked_directory == []
-    assert [entry.name for entry in allowed_directory] == ["pack.core.mail_triage"]
+    assert [entry.name for entry in allowed_directory] == [
+        "pack.core.mail_triage"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_provider_list_total_reflects_applicability_even_when_page_is_full(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+async def test_provider_list_total_reflects_applicability(
+    tmp_path: Path,
+) -> None:
+    """Provider list total reflects applicability even when page is full."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
     store.upsert_pack_skill(
@@ -210,7 +254,8 @@ async def test_provider_list_total_reflects_applicability_even_when_page_is_full
     assert response.total == 0
 
 
-def test_build_skill_capability_context_preserves_explicit_empty_allowlist() -> None:
+def test_capability_context_keeps_empty_allowlist() -> None:
+    """Build skill capability context preserves explicit empty allowlist."""
     context = build_skill_capability_context(
         execution_specs={
             "mail.search": type("Spec", (), {"tags": ("email",)})(),
@@ -224,7 +269,8 @@ def test_build_skill_capability_context_preserves_explicit_empty_allowlist() -> 
     assert context.allowed_tool_tags == set()
 
 
-def test_build_skill_capability_context_maps_bare_tools_to_core_namespace() -> None:
+def test_capability_context_bare_tools_to_core() -> None:
+    """Build skill capability context maps bare tools to core namespace."""
     context = build_skill_capability_context(
         execution_specs={
             "tool_search": type("Spec", (), {"tags": ()})(),
@@ -237,8 +283,13 @@ def test_build_skill_capability_context_maps_bare_tools_to_core_namespace() -> N
 
 
 @pytest.mark.asyncio
-async def test_provider_get_relevant_fetches_past_inapplicable_top_k(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+async def test_provider_get_relevant_fetches_past_inapplicable_top_k(
+    tmp_path: Path,
+) -> None:
+    """Provider get relevant fetches past inapplicable top k."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
     store.upsert_pack_skill(
@@ -289,16 +340,30 @@ async def test_provider_get_relevant_fetches_past_inapplicable_top_k(tmp_path: P
         capability_context=capability_context,
     )
 
-    assert [skill.name for skill in response.skills] == ["alpha.applicable.three"]
+    assert [skill.name for skill in response.skills] == [
+        "alpha.applicable.three"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_provider_list_paginates_after_applicability_filtering(tmp_path: Path) -> None:
-    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+async def test_provider_list_paginates_after_applicability_filtering(
+    tmp_path: Path,
+) -> None:
+    """Provider list paginates after applicability filtering."""
+    config = SkillsConfig(
+        enabled=True, cache_dir=str(tmp_path), redact_pii=False
+    )
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     provider = LocalSkillProvider(config, store=store)
-    for name in ("alpha.inapplicable.one", "alpha.inapplicable.two", "beta.applicable.one", "beta.applicable.two"):
-        required_tool_names = ["tool_search"] if name.startswith("beta") else ["mail.search"]
+    for name in (
+        "alpha.inapplicable.one",
+        "alpha.inapplicable.two",
+        "beta.applicable.one",
+        "beta.applicable.two",
+    ):
+        required_tool_names = (
+            ["tool_search"] if name.startswith("beta") else ["mail.search"]
+        )
         store.upsert_pack_skill(
             SkillDefinition(
                 name=name,
@@ -330,6 +395,9 @@ async def test_provider_list_paginates_after_applicability_filtering(tmp_path: P
         capability_context=capability_context,
     )
 
-    assert [entry.name for entry in page_one.skills] == ["beta.applicable.one", "beta.applicable.two"]
+    assert [entry.name for entry in page_one.skills] == [
+        "beta.applicable.one",
+        "beta.applicable.two",
+    ]
     assert page_one.total == 2
     assert [entry.name for entry in page_two.skills] == ["beta.applicable.two"]

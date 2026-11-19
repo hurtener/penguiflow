@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import contextlib
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+from typing_extensions import override
 
-from penguiflow.planner.models import BackgroundTasksConfig
-from penguiflow.sessions import StreamingSession, TaskResult, TaskType, UpdateType
+from penguiflow.planner.models import BackgroundTasksConfig, JSONLLMClient
+from penguiflow.sessions import (
+    StreamingSession,
+    TaskResult,
+    TaskType,
+    UpdateType,
+)
 from penguiflow.sessions.models import (
     ContextPatch,
     MergeStrategy,
     ProactiveReportRequest,
 )
+from penguiflow.sessions.task_service import SpawnGuard
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from penguiflow.sessions.session import TaskRuntime
+    from penguiflow.sessions.task_service import InProcessTaskService
 
 
 @pytest.fixture
@@ -39,13 +54,17 @@ class TestConfigureProactiveReporting:
     """Tests for configure_proactive_reporting method."""
 
     @pytest.mark.asyncio
-    async def test_configure_with_defaults(self, session: StreamingSession) -> None:
+    async def test_configure_with_defaults(
+        self, session: StreamingSession
+    ) -> None:
         """Test configuration with default values."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
 
-        assert session._proactive_generator is generator
-        config = session._proactive_config
+        assert session.proactive_generator is generator
+        config = session.proactive_config
         assert config is not None
         assert config["enabled"] is True
         assert config["strategies"] == ["APPEND", "REPLACE"]
@@ -55,15 +74,12 @@ class TestConfigureProactiveReporting:
         assert config["fallback_notification"] is True
 
         # Clean up reporter task
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
-    async def test_configure_with_custom_values(self, session: StreamingSession) -> None:
+    async def test_configure_with_custom_values(
+        self, session: StreamingSession
+    ) -> None:
         """Test configuration with custom values."""
         generator = AsyncMock()
         session.configure_proactive_reporting(
@@ -76,7 +92,7 @@ class TestConfigureProactiveReporting:
             fallback_notification=False,
         )
 
-        config = session._proactive_config
+        config = session.proactive_config
         assert config is not None
         assert config["strategies"] == ["APPEND"]
         assert config["max_queued"] == 10
@@ -85,45 +101,46 @@ class TestConfigureProactiveReporting:
         assert config["fallback_notification"] is False
 
         # Clean up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
-    async def test_configure_disabled_does_not_start_task(self, session: StreamingSession) -> None:
+    async def test_configure_disabled_does_not_start_task(
+        self, session: StreamingSession
+    ) -> None:
         """Test that disabled config doesn't start reporter task."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=False)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=False
+        )
 
-        assert session._proactive_task is None
+        assert session.proactive_task is None
 
     @pytest.mark.asyncio
-    async def test_configure_enabled_starts_reporter_task(self, session: StreamingSession) -> None:
+    async def test_configure_enabled_starts_reporter_task(
+        self, session: StreamingSession
+    ) -> None:
         """Test that enabled config starts reporter task."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
 
-        assert session._proactive_task is not None
-        assert not session._proactive_task.done()
+        assert session.proactive_task is not None
+        assert not session.proactive_task.done()
 
         # Clean up
-        session._proactive_task.cancel()
-        try:
-            await session._proactive_task
-        except asyncio.CancelledError:
-            pass
+        await session.stop_proactive_reporter()
 
 
 class TestEnqueueProactiveReport:
-    """Tests for _enqueue_proactive_report method."""
+    """Tests for enqueue_proactive_report."""
 
     @pytest.mark.asyncio
-    async def test_enqueue_when_disabled(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_enqueue_when_disabled(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test that enqueueing does nothing when disabled."""
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-1",
             trace_id="trace-1",
             description="Test task",
@@ -132,15 +149,19 @@ class TestEnqueueProactiveReport:
             merge_strategy=MergeStrategy.APPEND,
         )
 
-        assert session._proactive_queue.qsize() == 0
+        assert session.proactive_queue.qsize() == 0
 
     @pytest.mark.asyncio
-    async def test_enqueue_when_enabled(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_enqueue_when_enabled(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test successful enqueueing when enabled."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
 
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-1",
             trace_id="trace-1",
             description="Test task",
@@ -149,8 +170,8 @@ class TestEnqueueProactiveReport:
             merge_strategy=MergeStrategy.APPEND,
         )
 
-        assert session._proactive_queue.qsize() == 1
-        request = session._proactive_queue.get_nowait()
+        assert session.proactive_queue.qsize() == 1
+        request = session.proactive_queue.get_nowait()
         assert request.task_id == "task-1"
         assert request.trace_id == "trace-1"
         assert request.task_description == "Test task"
@@ -159,24 +180,24 @@ class TestEnqueueProactiveReport:
         assert request.proactive_hops_remaining == 2
 
         # Clean up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
 
 class TestProactiveSuppression:
     """Tests for proactive suppression behavior."""
 
     @pytest.mark.asyncio
-    async def test_suppressed_task_not_enqueued(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_suppressed_task_not_enqueued(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
+        """Suppressed task not enqueued."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
         session.suppress_proactive_reports(task_ids=["task-1"])
 
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-1",
             trace_id="trace-1",
             description="Test task",
@@ -185,25 +206,23 @@ class TestProactiveSuppression:
             merge_strategy=MergeStrategy.APPEND,
         )
 
-        assert session._proactive_queue.qsize() == 0
+        assert session.proactive_queue.qsize() == 0
 
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
     async def test_suppressed_request_skips_generation(
         self, session: StreamingSession, sample_patch: ContextPatch
     ) -> None:
+        """Suppressed request skips generation."""
         called: list[str] = []
 
         async def generator(request: ProactiveReportRequest) -> None:
             called.append(request.task_id)
 
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
         session.suppress_proactive_reports(task_ids=["task-1"])
         request = ProactiveReportRequest(
             task_id="task-1",
@@ -215,19 +234,16 @@ class TestProactiveSuppression:
             merge_strategy=MergeStrategy.APPEND,
         )
 
-        await session._generate_proactive_message(request)
+        await session.generate_proactive_message(request)
 
         assert called == []
 
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
-    async def test_enqueue_filters_by_strategy(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_enqueue_filters_by_strategy(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test that only configured strategies trigger enqueue."""
         generator = AsyncMock()
         session.configure_proactive_reporting(
@@ -237,7 +253,7 @@ class TestProactiveSuppression:
         )
 
         # This should not be enqueued (REPLACE not in strategies)
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-1",
             trace_id="trace-1",
             description="Test task",
@@ -245,10 +261,10 @@ class TestProactiveSuppression:
             patch=sample_patch,
             merge_strategy=MergeStrategy.REPLACE,
         )
-        assert session._proactive_queue.qsize() == 0
+        assert session.proactive_queue.qsize() == 0
 
         # This should be enqueued (APPEND in strategies)
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-2",
             trace_id="trace-2",
             description="Test task 2",
@@ -256,15 +272,10 @@ class TestProactiveSuppression:
             patch=sample_patch,
             merge_strategy=MergeStrategy.APPEND,
         )
-        assert session._proactive_queue.qsize() == 1
+        assert session.proactive_queue.qsize() == 1
 
         # Clean up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
     async def test_enqueue_human_gated_never_enqueued(
@@ -275,11 +286,15 @@ class TestProactiveSuppression:
         session.configure_proactive_reporting(
             generator=generator,
             enabled=True,
-            strategies=["APPEND", "REPLACE", "HUMAN_GATED"],  # Even if included
+            strategies=[
+                "APPEND",
+                "REPLACE",
+                "HUMAN_GATED",
+            ],  # Even if included
         )
 
         # HUMAN_GATED uses notification panel, not proactive reports
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-1",
             trace_id="trace-1",
             description="Test task",
@@ -287,20 +302,17 @@ class TestProactiveSuppression:
             patch=sample_patch,
             merge_strategy=MergeStrategy.HUMAN_GATED,
         )
-        # Should be enqueued since HUMAN_GATED is in strategies list
-        # (the filtering is based on config, not hard-coded)
-        assert session._proactive_queue.qsize() == 1
+        # Should be enqueued since HUMAN_GATED is in strategies list (the
+        # filtering is based on config, not hard-coded)
+        assert session.proactive_queue.qsize() == 1
 
         # Clean up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
-    async def test_enqueue_respects_max_queued(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_enqueue_respects_max_queued(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test that queue respects max_queued limit."""
         generator = AsyncMock()
         session.configure_proactive_reporting(
@@ -310,17 +322,11 @@ class TestProactiveSuppression:
         )
 
         # Stop the reporter task so queue fills up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
-            session._proactive_task = None
+        await session.stop_proactive_reporter()
 
         # Enqueue 3 items (max is 2)
         for i in range(3):
-            session._enqueue_proactive_report(
+            session.enqueue_proactive_report(
                 task_id=f"task-{i}",
                 trace_id=f"trace-{i}",
                 description=f"Test task {i}",
@@ -330,28 +336,27 @@ class TestProactiveSuppression:
             )
 
         # Should only have 2 items (oldest dropped)
-        assert session._proactive_queue.qsize() == 2
+        assert session.proactive_queue.qsize() == 2
         # First item should be task-1 (task-0 was dropped)
-        request = session._proactive_queue.get_nowait()
+        request = session.proactive_queue.get_nowait()
         assert request.task_id == "task-1"
 
 
 class TestGenerateProactiveMessage:
-    """Tests for _generate_proactive_message method."""
+    """Tests for generate_proactive_message."""
 
     @pytest.mark.asyncio
-    async def test_generate_calls_generator(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_generate_calls_generator(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test that generator is called with request."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
 
         # Stop the automatic reporter to test manually
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
         request = ProactiveReportRequest(
             task_id="task-1",
@@ -363,15 +368,17 @@ class TestGenerateProactiveMessage:
             merge_strategy=MergeStrategy.APPEND,
         )
 
-        await session._generate_proactive_message(request)
+        await session.generate_proactive_message(request)
 
         generator.assert_called_once_with(request)
 
     @pytest.mark.asyncio
-    async def test_generate_timeout_with_fallback(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_generate_timeout_with_fallback(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test timeout falls back to notification."""
 
-        async def slow_generator(request: ProactiveReportRequest) -> None:
+        async def slow_generator(_request: ProactiveReportRequest) -> None:
             await asyncio.sleep(10)  # Will timeout
 
         session.configure_proactive_reporting(
@@ -382,12 +389,7 @@ class TestGenerateProactiveMessage:
         )
 
         # Stop the automatic reporter
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
         request = ProactiveReportRequest(
             task_id="task-1",
@@ -410,24 +412,27 @@ class TestGenerateProactiveMessage:
 
         collect_task = asyncio.create_task(collect())
 
-        await session._generate_proactive_message(request)
+        await session.generate_proactive_message(request)
 
         # Wait for collection with timeout
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(collect_task, timeout=1.0)
-        except TimeoutError:
-            pass
 
         # Should have notification fallback
-        notification_updates = [u for u in updates if u.update_type == UpdateType.NOTIFICATION]
+        notification_updates = [
+            u for u in updates if u.update_type == UpdateType.NOTIFICATION
+        ]
         assert len(notification_updates) >= 1
 
     @pytest.mark.asyncio
-    async def test_generate_error_with_fallback(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_generate_error_with_fallback(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test error falls back to notification."""
 
-        async def error_generator(request: ProactiveReportRequest) -> None:
-            raise ValueError("Generator error")
+        async def error_generator(_request: ProactiveReportRequest) -> None:
+            msg = "Generator error"
+            raise ValueError(msg)
 
         session.configure_proactive_reporting(
             generator=error_generator,
@@ -436,12 +441,7 @@ class TestGenerateProactiveMessage:
         )
 
         # Stop the automatic reporter
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
         request = ProactiveReportRequest(
             task_id="task-1",
@@ -464,48 +464,62 @@ class TestGenerateProactiveMessage:
 
         collect_task = asyncio.create_task(collect())
 
-        await session._generate_proactive_message(request)
+        await session.generate_proactive_message(request)
 
         # Wait for collection
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(collect_task, timeout=1.0)
-        except TimeoutError:
-            pass
 
         # Should have notification fallback
-        notification_updates = [u for u in updates if u.update_type == UpdateType.NOTIFICATION]
+        notification_updates = [
+            u for u in updates if u.update_type == UpdateType.NOTIFICATION
+        ]
         assert len(notification_updates) >= 1
 
 
 class TestDefaultProactiveGenerator:
     """Tests for library default proactive generator."""
 
-    class MockJSONLLMClient:
-        async def complete(  # type: ignore[no-untyped-def]
+    class MockJSONLLMClient(JSONLLMClient):
+        """LLM client that replays scripted responses."""
+
+        @override
+        async def complete(
             self,
             *,
-            messages,
-            response_format=None,
-            stream=False,
-            on_stream_chunk=None,
-        ):
-            _ = messages, response_format, stream, on_stream_chunk
-            return '{"thought":"done","next_node":null,"args":{"raw_answer":"proactive"}}'
+            messages: Sequence[Mapping[str, Any]],
+            response_format: Mapping[str, Any] | None = None,
+            stream: bool = False,
+            on_stream_chunk: Callable[[str, bool], None] | None = None,
+        ) -> str:
+            return (
+                '{"thought":"done","next_node":null,'
+                '"args":{"raw_answer":"proactive"}}'
+            )
 
     @pytest.mark.asyncio
     async def test_default_generator_emits_and_cleans(
         self, session: StreamingSession, sample_patch: ContextPatch
     ) -> None:
+        """Default generator emits and cleans."""
         from penguiflow.catalog import build_catalog
         from penguiflow.planner import ReactPlanner
         from penguiflow.registry import ModelRegistry
-        from penguiflow.sessions.proactive import create_default_proactive_generator
+        from penguiflow.sessions.proactive import (
+            create_default_proactive_generator,
+        )
 
         def _planner_factory() -> ReactPlanner:
             catalog = build_catalog([], ModelRegistry())
-            return ReactPlanner(llm_client=self.MockJSONLLMClient(), catalog=catalog, max_iters=1)
+            return ReactPlanner(
+                llm_client=self.MockJSONLLMClient(),
+                catalog=catalog,
+                max_iters=1,
+            )
 
-        await session.apply_context_patch(patch=sample_patch, strategy=MergeStrategy.APPEND)
+        await session.apply_context_patch(
+            patch=sample_patch, strategy=MergeStrategy.APPEND
+        )
         request = ProactiveReportRequest(
             task_id=sample_patch.task_id,
             session_id=session.session_id,
@@ -518,7 +532,9 @@ class TestDefaultProactiveGenerator:
             tool_context={},
             proactive_hops_remaining=1,
         )
-        generator = create_default_proactive_generator(_planner_factory, session, max_hops=2)
+        generator = create_default_proactive_generator(
+            _planner_factory, session, max_hops=2
+        )
 
         updates: list[Any] = []
         subscriber = await session.subscribe(update_types=[UpdateType.RESULT])
@@ -540,11 +556,16 @@ class TestDefaultProactiveGenerator:
         assert sample_patch.task_id not in background
 
     @pytest.mark.asyncio
-    async def test_default_generator_includes_artifacts(self, session: StreamingSession) -> None:
+    async def test_default_generator_includes_artifacts(
+        self, session: StreamingSession
+    ) -> None:
+        """Default generator includes artifacts."""
         from penguiflow.catalog import build_catalog
         from penguiflow.planner import ReactPlanner
         from penguiflow.registry import ModelRegistry
-        from penguiflow.sessions.proactive import create_default_proactive_generator
+        from penguiflow.sessions.proactive import (
+            create_default_proactive_generator,
+        )
 
         patch = ContextPatch(
             task_id="artifact-task",
@@ -591,9 +612,15 @@ class TestDefaultProactiveGenerator:
 
         def _planner_factory() -> ReactPlanner:
             catalog = build_catalog([], ModelRegistry())
-            return ReactPlanner(llm_client=self.MockJSONLLMClient(), catalog=catalog, max_iters=1)
+            return ReactPlanner(
+                llm_client=self.MockJSONLLMClient(),
+                catalog=catalog,
+                max_iters=1,
+            )
 
-        await session.apply_context_patch(patch=patch, strategy=MergeStrategy.APPEND)
+        await session.apply_context_patch(
+            patch=patch, strategy=MergeStrategy.APPEND
+        )
         request = ProactiveReportRequest(
             task_id=patch.task_id,
             session_id=session.session_id,
@@ -606,7 +633,9 @@ class TestDefaultProactiveGenerator:
             tool_context={},
             proactive_hops_remaining=1,
         )
-        generator = create_default_proactive_generator(_planner_factory, session, max_hops=2)
+        generator = create_default_proactive_generator(
+            _planner_factory, session, max_hops=2
+        )
 
         updates: list[Any] = []
         subscriber = await session.subscribe(update_types=[UpdateType.RESULT])
@@ -630,14 +659,16 @@ class TestDefaultProactiveGenerator:
 
 
 class TestRunProactiveReporter:
-    """Tests for _run_proactive_reporter background task."""
+    """Tests for the background proactive reporter."""
 
     @pytest.mark.asyncio
-    async def test_reporter_waits_for_idle(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+    async def test_reporter_waits_for_idle(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
         """Test that reporter waits for foreground to be idle."""
         call_times: list[float] = []
 
-        async def tracking_generator(request: ProactiveReportRequest) -> None:
+        async def tracking_generator(_request: ProactiveReportRequest) -> None:
             import time
 
             call_times.append(time.time())
@@ -648,10 +679,10 @@ class TestRunProactiveReporter:
         )
 
         # Set foreground as busy
-        session._foreground_busy.clear()
+        session.set_foreground_busy(busy=True)
 
         # Enqueue a request
-        session._enqueue_proactive_report(
+        session.enqueue_proactive_report(
             task_id="task-1",
             trace_id="trace-1",
             description="Test task",
@@ -665,19 +696,14 @@ class TestRunProactiveReporter:
         assert len(call_times) == 0
 
         # Set foreground as idle
-        session._foreground_busy.set()
+        session.set_foreground_busy(busy=False)
 
         # Wait for reporter to process
         await asyncio.sleep(0.1)
         assert len(call_times) == 1
 
         # Clean up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
     @pytest.mark.asyncio
     async def test_reporter_processes_queue_in_order(
@@ -686,7 +712,9 @@ class TestRunProactiveReporter:
         """Test that reporter processes queue in FIFO order."""
         processed_tasks: list[str] = []
 
-        async def order_tracking_generator(request: ProactiveReportRequest) -> None:
+        async def order_tracking_generator(
+            request: ProactiveReportRequest,
+        ) -> None:
             processed_tasks.append(request.task_id)
 
         session.configure_proactive_reporting(
@@ -695,17 +723,11 @@ class TestRunProactiveReporter:
         )
 
         # Stop automatic reporter first
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
-            session._proactive_task = None
+        await session.stop_proactive_reporter()
 
         # Enqueue multiple requests
         for i in range(3):
-            session._enqueue_proactive_report(
+            session.enqueue_proactive_report(
                 task_id=f"task-{i}",
                 trace_id=f"trace-{i}",
                 description=f"Test task {i}",
@@ -715,7 +737,7 @@ class TestRunProactiveReporter:
             )
 
         # Start reporter manually
-        session._proactive_task = asyncio.create_task(session._run_proactive_reporter())
+        session.start_proactive_reporter()
 
         # Wait for processing
         await asyncio.sleep(0.2)
@@ -723,12 +745,7 @@ class TestRunProactiveReporter:
         assert processed_tasks == ["task-0", "task-1", "task-2"]
 
         # Clean up
-        if session._proactive_task:
-            session._proactive_task.cancel()
-            try:
-                await session._proactive_task
-            except asyncio.CancelledError:
-                pass
+        await session.stop_proactive_reporter()
 
 
 class TestIdleDetection:
@@ -737,15 +754,17 @@ class TestIdleDetection:
     @pytest.mark.asyncio
     async def test_initially_idle(self, session: StreamingSession) -> None:
         """Test that session starts as idle."""
-        assert session._foreground_busy.is_set()
+        assert session.foreground_idle
 
     @pytest.mark.asyncio
-    async def test_run_task_clears_idle(self, session: StreamingSession) -> None:
+    async def test_run_task_clears_idle(
+        self, session: StreamingSession
+    ) -> None:
         """Test that running foreground task clears idle flag."""
         idle_during_task: list[bool] = []
 
-        async def check_idle_pipeline(runtime: Any) -> TaskResult:
-            idle_during_task.append(session._foreground_busy.is_set())
+        async def check_idle_pipeline(_runtime: TaskRuntime) -> TaskResult:
+            idle_during_task.append(session.foreground_idle)
             return TaskResult(payload={"ok": True})
 
         await session.run_task(
@@ -759,32 +778,38 @@ class TestIdleDetection:
         assert idle_during_task[0] is False
 
         # Should be idle after task
-        assert session._foreground_busy.is_set()
+        assert session.foreground_idle
 
 
 class TestSessionCleanup:
     """Tests for session cleanup with proactive reporting."""
 
     @pytest.mark.asyncio
-    async def test_close_cancels_reporter_task(self, session: StreamingSession) -> None:
+    async def test_close_cancels_reporter_task(
+        self, session: StreamingSession
+    ) -> None:
         """Test that closing session cancels reporter task."""
         generator = AsyncMock()
-        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.configure_proactive_reporting(
+            generator=generator, enabled=True
+        )
 
-        assert session._proactive_task is not None
-        proactive_task = session._proactive_task
+        assert session.proactive_task is not None
+        proactive_task = session.proactive_task
 
         await session.close()
 
         # Reporter task should be cancelled (either done or set to None)
-        assert proactive_task.done() or session._proactive_task is None
+        assert proactive_task.done() or session.proactive_task is None
 
 
 class TestTaskGroups:
     """Tests for task group functionality."""
 
     @pytest.mark.asyncio
-    async def test_resolve_or_create_group_creates_new(self, session: StreamingSession) -> None:
+    async def test_resolve_or_create_group_creates_new(
+        self, session: StreamingSession
+    ) -> None:
         """Test that resolve_or_create_group creates a new group."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -798,7 +823,9 @@ class TestTaskGroups:
         assert len(group.task_ids) == 0
 
     @pytest.mark.asyncio
-    async def test_resolve_or_create_group_joins_existing(self, session: StreamingSession) -> None:
+    async def test_resolve_or_create_group_joins_existing(
+        self, session: StreamingSession
+    ) -> None:
         """Test that resolve_or_create_group joins an existing open group."""
         # Create initial group
         group1 = await session.resolve_or_create_group(
@@ -815,7 +842,9 @@ class TestTaskGroups:
         assert group2.group_id == group1.group_id
 
     @pytest.mark.asyncio
-    async def test_resolve_or_create_group_new_turn_creates_new(self, session: StreamingSession) -> None:
+    async def test_resolve_or_create_group_new_turn_creates_new(
+        self, session: StreamingSession
+    ) -> None:
         """Test that different turn creates a new group even with same name."""
         # Create initial group
         group1 = await session.resolve_or_create_group(
@@ -833,7 +862,7 @@ class TestTaskGroups:
 
     @pytest.mark.asyncio
     async def test_seal_group(self, session: StreamingSession) -> None:
-        """Test sealing a group with tasks stays sealed until tasks complete."""
+        """A sealed group with tasks stays sealed until they complete."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
             turn_id="turn-1",
@@ -851,7 +880,9 @@ class TestTaskGroups:
         assert sealed_group.status == "sealed"
 
     @pytest.mark.asyncio
-    async def test_seal_empty_group_completes(self, session: StreamingSession) -> None:
+    async def test_seal_empty_group_completes(
+        self, session: StreamingSession
+    ) -> None:
         """Test sealing an empty group immediately completes it."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -883,7 +914,9 @@ class TestTaskGroups:
         assert "task-1" in updated_group.task_ids
 
     @pytest.mark.asyncio
-    async def test_add_task_to_sealed_group_fails(self, session: StreamingSession) -> None:
+    async def test_add_task_to_sealed_group_fails(
+        self, session: StreamingSession
+    ) -> None:
         """Test that adding task to sealed group fails."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -921,7 +954,9 @@ class TestTaskGroups:
         assert len(all_groups) == 2
 
     @pytest.mark.asyncio
-    async def test_auto_seal_open_groups(self, session: StreamingSession) -> None:
+    async def test_auto_seal_open_groups(
+        self, session: StreamingSession
+    ) -> None:
         """Test auto-sealing open groups for a turn."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -940,21 +975,28 @@ class TestTaskGroups:
         assert sealed_group.status == "sealed"
 
     @pytest.mark.asyncio
-    async def test_foreground_yield_respects_auto_seal_config(self, session: StreamingSession) -> None:
+    async def test_foreground_yield_respects_auto_seal_config(
+        self, session: StreamingSession
+    ) -> None:
+        """Foreground yield respects auto seal config."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
             turn_id="turn-1",
         )
         await session.add_task_to_group(group.group_id, "task-1")
 
-        session.configure_background_tasks(BackgroundTasksConfig(auto_seal_groups_on_foreground_yield=False))
+        session.configure_background_tasks(
+            BackgroundTasksConfig(auto_seal_groups_on_foreground_yield=False)
+        )
         sealed_count = await session.on_foreground_yield(turn_id="turn-1")
         assert sealed_count == 0
         open_group = await session.get_group(group_id=group.group_id)
         assert open_group is not None
         assert open_group.status == "open"
 
-        session.configure_background_tasks(BackgroundTasksConfig(auto_seal_groups_on_foreground_yield=True))
+        session.configure_background_tasks(
+            BackgroundTasksConfig(auto_seal_groups_on_foreground_yield=True)
+        )
         sealed_count = await session.on_foreground_yield(turn_id="turn-1")
         assert sealed_count == 1
         sealed_group = await session.get_group(group_id=group.group_id)
@@ -969,7 +1011,9 @@ class TestTaskGroups:
             turn_id="turn-1",
         )
 
-        result = await session.cancel_group(group.group_id, reason="test cancel")
+        result = await session.cancel_group(
+            group.group_id, reason="test cancel"
+        )
         assert result is True
 
         cancelled_group = await session.get_group(group_id=group.group_id)
@@ -981,7 +1025,9 @@ class TestTaskGroupCompletion:
     """Tests for task group completion and waiting."""
 
     @pytest.mark.asyncio
-    async def test_wait_for_group_completion_already_complete(self, session: StreamingSession) -> None:
+    async def test_wait_for_group_completion_already_complete(
+        self, session: StreamingSession
+    ) -> None:
         """Test waiting for an already complete group returns immediately."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -989,7 +1035,9 @@ class TestTaskGroupCompletion:
         )
         await session.seal_group(group.group_id)
         # Manually mark as complete (no tasks means it completes immediately)
-        session._groups[group.group_id].status = "complete"
+        sealed = await session.get_group(group.group_id)
+        assert sealed is not None
+        sealed.status = "complete"
 
         result, timed_out = await session.wait_for_group_completion(
             group.group_id,
@@ -1001,7 +1049,9 @@ class TestTaskGroupCompletion:
         assert timed_out is False
 
     @pytest.mark.asyncio
-    async def test_wait_for_group_completion_timeout(self, session: StreamingSession) -> None:
+    async def test_wait_for_group_completion_timeout(
+        self, session: StreamingSession
+    ) -> None:
         """Test waiting for group completion with timeout."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -1010,7 +1060,8 @@ class TestTaskGroupCompletion:
         await session.add_task_to_group(group.group_id, "task-1")
         await session.seal_group(group.group_id)
 
-        # Wait with very short timeout - should timeout since task never completes
+        # Wait with very short timeout - should timeout since task never
+        # completes
         result, timed_out = await session.wait_for_group_completion(
             group.group_id,
             timeout_s=0.01,
@@ -1021,7 +1072,9 @@ class TestTaskGroupCompletion:
         assert result.status == "sealed"  # Still sealed, not complete
 
     @pytest.mark.asyncio
-    async def test_wait_for_nonexistent_group(self, session: StreamingSession) -> None:
+    async def test_wait_for_nonexistent_group(
+        self, session: StreamingSession
+    ) -> None:
         """Test waiting for nonexistent group returns None."""
         result, timed_out = await session.wait_for_group_completion(
             "nonexistent-group",
@@ -1032,7 +1085,9 @@ class TestTaskGroupCompletion:
         assert timed_out is False
 
     @pytest.mark.asyncio
-    async def test_get_group_results_empty(self, session: StreamingSession) -> None:
+    async def test_get_group_results_empty(
+        self, session: StreamingSession
+    ) -> None:
         """Test getting results from empty group."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
@@ -1043,7 +1098,9 @@ class TestTaskGroupCompletion:
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_get_group_results_nonexistent(self, session: StreamingSession) -> None:
+    async def test_get_group_results_nonexistent(
+        self, session: StreamingSession
+    ) -> None:
         """Test getting results from nonexistent group."""
         results = await session.get_group_results("nonexistent-group")
         assert results == []
@@ -1053,8 +1110,10 @@ class TestTaskGroupReporting:
     """Tests for task group proactive reporting."""
 
     @pytest.mark.asyncio
-    async def test_group_report_strategy_all(self, session: StreamingSession) -> None:
-        """Test that group with report_strategy='all' only reports on completion."""
+    async def test_group_report_strategy_all(
+        self, session: StreamingSession
+    ) -> None:
+        """report_strategy='all' reports only when the group completes."""
         group = await session.resolve_or_create_group(
             group_name="test-group",
             turn_id="turn-1",
@@ -1062,10 +1121,13 @@ class TestTaskGroupReporting:
         )
 
         assert group.report_strategy == "all"
-        # Per-task reports should be suppressed (tested via _enqueue_proactive_report)
+        # Per-task reports should be suppressed (tested via
+        # _enqueue_proactive_report)
 
     @pytest.mark.asyncio
-    async def test_group_merge_strategy_human_gated(self, session: StreamingSession) -> None:
+    async def test_group_merge_strategy_human_gated(
+        self, session: StreamingSession
+    ) -> None:
         """Test HUMAN_GATED group requires bundled approval."""
         from penguiflow.sessions.models import MergeStrategy
 
@@ -1093,14 +1155,15 @@ class TestInProcessTaskServiceGroups:
     """Tests for InProcessTaskService group methods."""
 
     @pytest.fixture
-    def task_service(self) -> Any:
+    def task_service(self) -> InProcessTaskService:
         """Create an InProcessTaskService with required dependencies."""
         from penguiflow.sessions import SessionManager
         from penguiflow.sessions.task_service import InProcessTaskService
 
-        class DummySpawnGuard:
+        class DummySpawnGuard(SpawnGuard):
             """Always-allow spawn guard."""
 
+            @override
             async def decide(self, request: Any) -> Any:
                 from penguiflow.sessions.task_service import SpawnDecision
 
@@ -1115,10 +1178,14 @@ class TestInProcessTaskServiceGroups:
         )
 
     @pytest.mark.asyncio
-    async def test_seal_group_success(self, task_service: Any) -> None:
+    async def test_seal_group_success(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test sealing a group through the service."""
-        session = await task_service._sessions.get_or_create("s1")
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         await session.add_task_to_group(group.group_id, "task-1")
 
         result = await task_service.seal_group(
@@ -1130,7 +1197,9 @@ class TestInProcessTaskServiceGroups:
         assert result["group_id"] == group.group_id
 
     @pytest.mark.asyncio
-    async def test_seal_group_not_found(self, task_service: Any) -> None:
+    async def test_seal_group_not_found(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test sealing nonexistent group."""
         result = await task_service.seal_group(
             session_id="s1",
@@ -1141,10 +1210,14 @@ class TestInProcessTaskServiceGroups:
         assert result["error"] == "group_not_found"
 
     @pytest.mark.asyncio
-    async def test_seal_group_already_sealed(self, task_service: Any) -> None:
+    async def test_seal_group_already_sealed(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test sealing an already sealed group."""
-        session = await task_service._sessions.get_or_create("s1")
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         await session.add_task_to_group(group.group_id, "task-1")
         await session.seal_group(group.group_id)
 
@@ -1157,10 +1230,14 @@ class TestInProcessTaskServiceGroups:
         assert result["error"] == "group_not_open"
 
     @pytest.mark.asyncio
-    async def test_cancel_group_success(self, task_service: Any) -> None:
+    async def test_cancel_group_success(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test cancelling a group through the service."""
-        session = await task_service._sessions.get_or_create("s1")
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
 
         result = await task_service.cancel_group(
             session_id="s1",
@@ -1172,7 +1249,9 @@ class TestInProcessTaskServiceGroups:
         assert result["group_id"] == group.group_id
 
     @pytest.mark.asyncio
-    async def test_cancel_group_not_found(self, task_service: Any) -> None:
+    async def test_cancel_group_not_found(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test cancelling nonexistent group."""
         result = await task_service.cancel_group(
             session_id="s1",
@@ -1183,10 +1262,14 @@ class TestInProcessTaskServiceGroups:
         assert result["error"] == "group_not_found"
 
     @pytest.mark.asyncio
-    async def test_apply_group_not_complete(self, task_service: Any) -> None:
+    async def test_apply_group_not_complete(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test applying patches from incomplete group fails."""
-        session = await task_service._sessions.get_or_create("s1")
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         await session.add_task_to_group(group.group_id, "task-1")
 
         result = await task_service.apply_group(
@@ -1199,7 +1282,9 @@ class TestInProcessTaskServiceGroups:
         assert result["error"] == "group_not_complete"
 
     @pytest.mark.asyncio
-    async def test_apply_group_not_found(self, task_service: Any) -> None:
+    async def test_apply_group_not_found(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test applying patches from nonexistent group."""
         result = await task_service.apply_group(
             session_id="s1",
@@ -1211,10 +1296,14 @@ class TestInProcessTaskServiceGroups:
         assert result["error"] == "group_not_found"
 
     @pytest.mark.asyncio
-    async def test_apply_group_empty_complete(self, task_service: Any) -> None:
+    async def test_apply_group_empty_complete(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test applying patches from empty completed group."""
-        session = await task_service._sessions.get_or_create("s1")
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         # Seal empty group - completes immediately
         await session.seal_group(group.group_id)
 
@@ -1228,11 +1317,17 @@ class TestInProcessTaskServiceGroups:
         assert result["applied_patch_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_list_groups(self, task_service: Any) -> None:
+    async def test_list_groups(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test listing groups through the service."""
-        session = await task_service._sessions.get_or_create("s1")
-        await session.resolve_or_create_group(group_name="group-1", turn_id="turn-1")
-        await session.resolve_or_create_group(group_name="group-2", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        await session.resolve_or_create_group(
+            group_name="group-1", turn_id="turn-1"
+        )
+        await session.resolve_or_create_group(
+            group_name="group-2", turn_id="turn-1"
+        )
 
         groups = await task_service.list_groups(session_id="s1")
 
@@ -1242,16 +1337,26 @@ class TestInProcessTaskServiceGroups:
         assert "group-2" in names
 
     @pytest.mark.asyncio
-    async def test_list_groups_by_status(self, task_service: Any) -> None:
+    async def test_list_groups_by_status(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test listing groups filtered by status."""
-        session = await task_service._sessions.get_or_create("s1")
-        g1 = await session.resolve_or_create_group(group_name="group-1", turn_id="turn-1")
-        await session.resolve_or_create_group(group_name="group-2", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        g1 = await session.resolve_or_create_group(
+            group_name="group-1", turn_id="turn-1"
+        )
+        await session.resolve_or_create_group(
+            group_name="group-2", turn_id="turn-1"
+        )
         # Seal group-1 (empty, will complete)
         await session.seal_group(g1.group_id)
 
-        open_groups = await task_service.list_groups(session_id="s1", status="open")
-        complete_groups = await task_service.list_groups(session_id="s1", status="complete")
+        open_groups = await task_service.list_groups(
+            session_id="s1", status="open"
+        )
+        complete_groups = await task_service.list_groups(
+            session_id="s1", status="complete"
+        )
 
         assert len(open_groups) == 1
         assert open_groups[0].name == "group-2"
@@ -1259,10 +1364,14 @@ class TestInProcessTaskServiceGroups:
         assert complete_groups[0].name == "group-1"
 
     @pytest.mark.asyncio
-    async def test_get_group_by_id(self, task_service: Any) -> None:
+    async def test_get_group_by_id(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test getting a specific group by ID."""
-        session = await task_service._sessions.get_or_create("s1")
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
 
         result = await task_service.get_group(
             session_id="s1",
@@ -1274,10 +1383,14 @@ class TestInProcessTaskServiceGroups:
         assert result.name == "test-group"
 
     @pytest.mark.asyncio
-    async def test_get_group_by_name_and_turn(self, task_service: Any) -> None:
+    async def test_get_group_by_name_and_turn(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test getting a group by name and turn ID."""
-        session = await task_service._sessions.get_or_create("s1")
-        await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        session = await task_service.sessions.get_or_create("s1")
+        await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
 
         result = await task_service.get_group(
             session_id="s1",
@@ -1289,7 +1402,9 @@ class TestInProcessTaskServiceGroups:
         assert result.name == "test-group"
 
     @pytest.mark.asyncio
-    async def test_get_group_not_found(self, task_service: Any) -> None:
+    async def test_get_group_not_found(
+        self, task_service: InProcessTaskService
+    ) -> None:
         """Test getting a nonexistent group."""
         result = await task_service.get_group(
             session_id="s1",
@@ -1317,7 +1432,7 @@ class TestTaskGroupIsComplete:
         assert group.is_complete is False
 
     def test_is_complete_sealed_with_pending(self) -> None:
-        """Test is_complete returns False for sealed group with pending tasks."""
+        """is_complete is false for a sealed group with pending tasks."""
         from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
@@ -1334,7 +1449,7 @@ class TestTaskGroupIsComplete:
         assert group.is_complete is False
 
     def test_is_complete_sealed_all_complete(self) -> None:
-        """Test is_complete returns True for sealed group with all tasks done."""
+        """is_complete is true for a sealed group with all tasks done."""
         from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
@@ -1440,10 +1555,14 @@ class TestSessionCancelGroup:
     @pytest.mark.asyncio
     async def test_cancel_open_group(self, session: StreamingSession) -> None:
         """Test cancelling an open group."""
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         await session.add_task_to_group(group.group_id, "task-1")
 
-        result = await session.cancel_group(group.group_id, reason="test cancel")
+        result = await session.cancel_group(
+            group.group_id, reason="test cancel"
+        )
         assert result is True
 
         cancelled_group = await session.get_group(group_id=group.group_id)
@@ -1451,15 +1570,21 @@ class TestSessionCancelGroup:
         assert cancelled_group.status == "failed"
 
     @pytest.mark.asyncio
-    async def test_cancel_nonexistent_group(self, session: StreamingSession) -> None:
+    async def test_cancel_nonexistent_group(
+        self, session: StreamingSession
+    ) -> None:
         """Test cancelling nonexistent group returns False."""
         result = await session.cancel_group("nonexistent", reason="test")
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_cancel_group_already_complete(self, session: StreamingSession) -> None:
+    async def test_cancel_group_already_complete(
+        self, session: StreamingSession
+    ) -> None:
         """Test cancelling already complete group."""
-        group = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        group = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         # Empty group completes immediately when sealed
         await session.seal_group(group.group_id)
 
@@ -1478,20 +1603,34 @@ class TestSessionGroupMethods:
         assert groups == []
 
     @pytest.mark.asyncio
-    async def test_list_groups_multiple(self, session: StreamingSession) -> None:
+    async def test_list_groups_multiple(
+        self, session: StreamingSession
+    ) -> None:
         """Test listing multiple groups."""
-        await session.resolve_or_create_group(group_name="group-1", turn_id="turn-1")
-        await session.resolve_or_create_group(group_name="group-2", turn_id="turn-1")
-        await session.resolve_or_create_group(group_name="group-3", turn_id="turn-2")
+        await session.resolve_or_create_group(
+            group_name="group-1", turn_id="turn-1"
+        )
+        await session.resolve_or_create_group(
+            group_name="group-2", turn_id="turn-1"
+        )
+        await session.resolve_or_create_group(
+            group_name="group-3", turn_id="turn-2"
+        )
 
         groups = await session.list_groups()
         assert len(groups) == 3
 
     @pytest.mark.asyncio
-    async def test_list_groups_filter_by_status(self, session: StreamingSession) -> None:
+    async def test_list_groups_filter_by_status(
+        self, session: StreamingSession
+    ) -> None:
         """Test listing groups filtered by status."""
-        g1 = await session.resolve_or_create_group(group_name="open-group", turn_id="turn-1")
-        g2 = await session.resolve_or_create_group(group_name="complete-group", turn_id="turn-1")
+        g1 = await session.resolve_or_create_group(
+            group_name="open-group", turn_id="turn-1"
+        )
+        g2 = await session.resolve_or_create_group(
+            group_name="complete-group", turn_id="turn-1"
+        )
         # Add task to keep open
         await session.add_task_to_group(g1.group_id, "task-1")
         # Seal empty group to complete
@@ -1506,23 +1645,35 @@ class TestSessionGroupMethods:
         assert complete_groups[0].name == "complete-group"
 
     @pytest.mark.asyncio
-    async def test_get_group_by_name_without_turn(self, session: StreamingSession) -> None:
-        """Test getting group by name without turn ID returns None if no match."""
-        await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+    async def test_get_group_by_name_without_turn(
+        self, session: StreamingSession
+    ) -> None:
+        """Looking up a group by name only returns None on no match."""
+        await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
 
         # Different turn should not match
-        result = await session.get_group(group_name="test-group", turn_id="turn-2")
+        result = await session.get_group(
+            group_name="test-group", turn_id="turn-2"
+        )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_resolve_sealed_group_creates_new(self, session: StreamingSession) -> None:
-        """Test that resolving by name when existing is sealed creates new group."""
-        g1 = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+    async def test_resolve_sealed_group_creates_new(
+        self, session: StreamingSession
+    ) -> None:
+        """Resolving a name whose group is sealed creates a new group."""
+        g1 = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
         await session.add_task_to_group(g1.group_id, "task-1")
         await session.seal_group(g1.group_id)
 
         # Resolving same name in same turn should create new group
-        g2 = await session.resolve_or_create_group(group_name="test-group", turn_id="turn-1")
+        g2 = await session.resolve_or_create_group(
+            group_name="test-group", turn_id="turn-1"
+        )
 
         assert g2.group_id != g1.group_id
         assert g2.status == "open"

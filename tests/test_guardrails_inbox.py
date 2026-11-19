@@ -1,6 +1,9 @@
+"""Tests for guardrails inbox."""
+
 from __future__ import annotations
 
 import pytest
+from typing_extensions import override
 
 from penguiflow.planner.guardrails import (
     AsyncRuleEvaluator,
@@ -11,10 +14,11 @@ from penguiflow.planner.guardrails import (
     RuleCost,
     RuleRegistry,
 )
+from penguiflow.planner.guardrails.protocols import GuardrailRule
 from penguiflow.steering import InMemoryGuardInbox, SteeringGuardEvent
 
 
-class _AsyncRedactRule:
+class _AsyncRedactRule(GuardrailRule):
     rule_id = "async-redact"
     version = "1"
     supports_event_types = frozenset({"tool_call_result"})
@@ -22,7 +26,10 @@ class _AsyncRedactRule:
     enabled = True
     severity = GuardrailSeverity.MEDIUM
 
-    async def evaluate(self, event: GuardrailEvent, context_snapshot: object) -> GuardrailDecision | None:
+    @override
+    async def evaluate(
+        self, event: GuardrailEvent, context_snapshot: object
+    ) -> GuardrailDecision | None:
         return GuardrailDecision(
             action=GuardrailAction.REDACT,
             rule_id=self.rule_id,
@@ -32,6 +39,7 @@ class _AsyncRedactRule:
 
 @pytest.mark.asyncio
 async def test_inmemory_guard_inbox_roundtrip() -> None:
+    """Inmemory guard inbox roundtrip."""
     registry = RuleRegistry()
     registry.register(_AsyncRedactRule())
     inbox = InMemoryGuardInbox(AsyncRuleEvaluator(registry))

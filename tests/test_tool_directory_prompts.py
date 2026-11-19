@@ -1,11 +1,22 @@
+"""Tests for tool directory prompts."""
+
+from __future__ import annotations
+
 from penguiflow.planner import prompts
 
 
 def test_render_tool_hints() -> None:
+    """Render tool hints."""
     rendered = prompts.render_tool_hints(
         [
-            {"name": "charting.start_chart_analysis", "description": "Start chart analysis"},
-            {"name": "charting.get_chart_config", "description": "Get chart config"},
+            {
+                "name": "charting.start_chart_analysis",
+                "description": "Start chart analysis",
+            },
+            {
+                "name": "charting.get_chart_config",
+                "description": "Get chart config",
+            },
         ],
         query="start_analysis charting",
     )
@@ -15,13 +26,17 @@ def test_render_tool_hints() -> None:
 
 
 def test_render_tool_directory() -> None:
+    """Render tool directory."""
     rendered = prompts.render_tool_directory(
         [
             {
                 "name": "charting",
                 "trigger": "Charting MCP tools",
                 "tool_count": 3,
-                "tools": ["charting.start_chart_analysis", "charting.get_chart_config"],
+                "tools": [
+                    "charting.start_chart_analysis",
+                    "charting.get_chart_config",
+                ],
             }
         ]
     )

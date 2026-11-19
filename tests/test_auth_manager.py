@@ -1,5 +1,7 @@
 """Tests for penguiflow/tools/auth.py OAuth manager."""
 
+from __future__ import annotations
+
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,7 +17,7 @@ from penguiflow.tools.auth import (
 
 
 @pytest.mark.asyncio
-async def test_token_store_store_and_get():
+async def test_token_store_store_and_get() -> None:
     """Token store should store and retrieve tokens."""
     store = InMemoryTokenStore()
     await store.store("user1", "github", "token123", None)
@@ -24,7 +26,7 @@ async def test_token_store_store_and_get():
 
 
 @pytest.mark.asyncio
-async def test_token_store_get_nonexistent():
+async def test_token_store_get_nonexistent() -> None:
     """Token store should return None for nonexistent tokens."""
     store = InMemoryTokenStore()
     token = await store.get("user1", "github")
@@ -32,7 +34,7 @@ async def test_token_store_get_nonexistent():
 
 
 @pytest.mark.asyncio
-async def test_token_store_delete():
+async def test_token_store_delete() -> None:
     """Token store should delete tokens."""
     store = InMemoryTokenStore()
     await store.store("user1", "github", "token123", None)
@@ -42,14 +44,14 @@ async def test_token_store_delete():
 
 
 @pytest.mark.asyncio
-async def test_token_store_delete_nonexistent():
+async def test_token_store_delete_nonexistent() -> None:
     """Token store should handle delete of nonexistent token."""
     store = InMemoryTokenStore()
     await store.delete("user1", "github")  # Should not raise
 
 
 @pytest.mark.asyncio
-async def test_token_store_expired_token():
+async def test_token_store_expired_token() -> None:
     """Token store should return None for expired tokens."""
     store = InMemoryTokenStore()
     # Store with expired timestamp
@@ -57,11 +59,11 @@ async def test_token_store_expired_token():
     token = await store.get("user1", "github")
     assert token is None
     # Token should be deleted after expiration check
-    assert ("user1", "github") not in store._tokens
+    assert len(store) == 0
 
 
 @pytest.mark.asyncio
-async def test_token_store_not_expired_token():
+async def test_token_store_not_expired_token() -> None:
     """Token store should return token if not expired."""
     store = InMemoryTokenStore()
     # Store with future expiration
@@ -73,7 +75,7 @@ async def test_token_store_not_expired_token():
 # ─── OAuthProviderConfig tests ───────────────────────────────────────────────
 
 
-def test_oauth_provider_config_defaults():
+def test_oauth_provider_config_defaults() -> None:
     """OAuthProviderConfig should have correct defaults."""
     config = OAuthProviderConfig(
         name="github",
@@ -87,7 +89,7 @@ def test_oauth_provider_config_defaults():
     assert config.scopes == []
 
 
-def test_oauth_provider_config_with_scopes():
+def test_oauth_provider_config_with_scopes() -> None:
     """OAuthProviderConfig should accept scopes."""
     config = OAuthProviderConfig(
         name="github",
@@ -105,7 +107,8 @@ def test_oauth_provider_config_with_scopes():
 # ─── OAuthManager tests ──────────────────────────────────────────────────────
 
 
-def build_provider():
+def build_provider() -> OAuthProviderConfig:
+    """Build a GitHub OAuth provider config."""
     return OAuthProviderConfig(
         name="github",
         display_name="GitHub",
@@ -119,16 +122,18 @@ def build_provider():
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_get_token():
+async def test_oauth_manager_get_token() -> None:
     """OAuthManager should delegate to token store."""
     store = InMemoryTokenStore()
     await store.store("user1", "github", "stored_token", None)
-    manager = OAuthManager(providers={"github": build_provider()}, token_store=store)
+    manager = OAuthManager(
+        providers={"github": build_provider()}, token_store=store
+    )
     token = await manager.get_token("user1", "github")
     assert token == "stored_token"
 
 
-def test_oauth_manager_get_auth_request():
+def test_oauth_manager_get_auth_request() -> None:
     """OAuthManager should generate auth request with state."""
     manager = OAuthManager(providers={"github": build_provider()})
     request = manager.get_auth_request("github", "user1", "trace1")
@@ -140,53 +145,48 @@ def test_oauth_manager_get_auth_request():
     assert "state" in request
     assert request["scopes"] == ["repo", "user"]
     # State should be stored in pending
-    assert request["state"] in manager._pending
+    assert request["state"] in manager.pending_states
 
 
-def test_oauth_manager_get_auth_request_unknown_provider():
+def test_oauth_manager_get_auth_request_unknown_provider() -> None:
     """OAuthManager should raise for unknown provider."""
     manager = OAuthManager(providers={"github": build_provider()})
     with pytest.raises(ValueError, match="Unknown OAuth provider"):
         manager.get_auth_request("slack", "user1", "trace1")
 
 
-def test_oauth_manager_cleanup_pending():
+def test_oauth_manager_cleanup_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OAuthManager should cleanup expired pending states."""
     manager = OAuthManager(providers={"github": build_provider()})
+    now = time.time()
 
-    # Add expired state
-    old_state = "expired_state"
-    manager._pending[old_state] = {
-        "user_id": "user1",
-        "trace_id": "trace1",
-        "provider": "github",
-        "created_at": time.time() - 700,  # > 600s TTL
-    }
-
-    # Add valid state
-    valid_state = "valid_state"
-    manager._pending[valid_state] = {
-        "user_id": "user2",
-        "trace_id": "trace2",
-        "provider": "github",
-        "created_at": time.time(),
-    }
+    # A request made 700s ago is past the 600s TTL.
+    monkeypatch.setattr(time, "time", lambda: now - 700)
+    old_state = manager.get_auth_request("github", "user1", "trace1")["state"]
+    monkeypatch.setattr(time, "time", lambda: now)
+    valid_state = manager.get_auth_request("github", "user2", "trace2")[
+        "state"
+    ]
 
     # New auth request triggers cleanup
     manager.get_auth_request("github", "user3", "trace3")
 
-    assert old_state not in manager._pending
-    assert valid_state in manager._pending
+    assert old_state not in manager.pending_states
+    assert valid_state in manager.pending_states
 
 
-def test_oauth_manager_cleanup_empty_pending():
-    """OAuthManager cleanup should handle empty pending dict."""
+def test_oauth_manager_first_request_with_no_pending_states() -> None:
+    """The first request prunes an empty pending set without failing."""
     manager = OAuthManager(providers={"github": build_provider()})
-    manager._cleanup_pending()  # Should not raise
+    assert manager.pending_states == frozenset()
+    request = manager.get_auth_request("github", "user1", "trace1")
+    assert manager.pending_states == {request["state"]}
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_handle_callback_invalid_state():
+async def test_oauth_manager_handle_callback_invalid_state() -> None:
     """OAuthManager should reject invalid state."""
     manager = OAuthManager(providers={"github": build_provider()})
     with pytest.raises(ValueError, match="Invalid or expired OAuth state"):
@@ -194,22 +194,23 @@ async def test_oauth_manager_handle_callback_invalid_state():
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_handle_callback_expired_state():
+async def test_oauth_manager_handle_callback_expired_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OAuthManager should reject expired state."""
     manager = OAuthManager(providers={"github": build_provider()})
-    state = "expired_state"
-    manager._pending[state] = {
-        "user_id": "user1",
-        "trace_id": "trace1",
-        "provider": "github",
-        "created_at": time.time() - 700,  # > 600s TTL
-    }
+    now = time.time()
+    # A request made 700s ago is past the 600s TTL.
+    monkeypatch.setattr(time, "time", lambda: now - 700)
+    state = manager.get_auth_request("github", "user1", "trace1")["state"]
+    assert isinstance(state, str)
+    monkeypatch.setattr(time, "time", lambda: now)
     with pytest.raises(ValueError, match="OAuth request expired"):
         await manager.handle_callback("code123", state)
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_handle_callback_success():
+async def test_oauth_manager_handle_callback_success() -> None:
     """OAuthManager should exchange code for token."""
     pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
@@ -217,6 +218,7 @@ async def test_oauth_manager_handle_callback_success():
     # Generate auth request to get valid state
     request = manager.get_auth_request("github", "user1", "trace1")
     state = request["state"]
+    assert isinstance(state, str)
 
     # Mock aiohttp response
     mock_response = AsyncMock()
@@ -247,13 +249,14 @@ async def test_oauth_manager_handle_callback_success():
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_handle_callback_oauth_error():
+async def test_oauth_manager_handle_callback_oauth_error() -> None:
     """OAuthManager should handle OAuth error response."""
     pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     request = manager.get_auth_request("github", "user1", "trace1")
     state = request["state"]
+    assert isinstance(state, str)
 
     mock_response = AsyncMock()
     mock_response.json = AsyncMock(
@@ -270,19 +273,24 @@ async def test_oauth_manager_handle_callback_oauth_error():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("aiohttp.ClientSession", return_value=mock_session):
-        with pytest.raises(ValueError, match="OAuth error: User denied access"):
-            await manager.handle_callback("auth_code", state)
+    with (
+        patch("aiohttp.ClientSession", return_value=mock_session),
+        pytest.raises(ValueError, match="OAuth error: User denied access"),
+    ):
+        await manager.handle_callback("auth_code", state)
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_handle_callback_error_without_description():
+async def test_oauth_manager_handle_callback_error_without_description() -> (
+    None
+):
     """OAuthManager should handle OAuth error without description."""
     pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     request = manager.get_auth_request("github", "user1", "trace1")
     state = request["state"]
+    assert isinstance(state, str)
 
     mock_response = AsyncMock()
     mock_response.json = AsyncMock(return_value={"error": "server_error"})
@@ -294,19 +302,22 @@ async def test_oauth_manager_handle_callback_error_without_description():
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("aiohttp.ClientSession", return_value=mock_session):
-        with pytest.raises(ValueError, match="OAuth error: server_error"):
-            await manager.handle_callback("auth_code", state)
+    with (
+        patch("aiohttp.ClientSession", return_value=mock_session),
+        pytest.raises(ValueError, match="OAuth error: server_error"),
+    ):
+        await manager.handle_callback("auth_code", state)
 
 
 @pytest.mark.asyncio
-async def test_oauth_manager_handle_callback_no_expires():
+async def test_oauth_manager_handle_callback_no_expires() -> None:
     """OAuthManager should handle token without expires_in."""
     pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     request = manager.get_auth_request("github", "user1", "trace1")
     state = request["state"]
+    assert isinstance(state, str)
 
     mock_response = AsyncMock()
     mock_response.json = AsyncMock(
@@ -324,7 +335,7 @@ async def test_oauth_manager_handle_callback_no_expires():
     mock_session.__aexit__ = AsyncMock(return_value=None)
 
     with patch("aiohttp.ClientSession", return_value=mock_session):
-        user_id, trace_id = await manager.handle_callback("auth_code", state)
+        user_id, _trace_id = await manager.handle_callback("auth_code", state)
 
     assert user_id == "user1"
     token = await manager.get_token("user1", "github")

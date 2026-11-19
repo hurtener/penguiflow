@@ -10,11 +10,14 @@ auto-alias any colliding tool names when building the LLM-visible catalog.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..catalog import NodeSpec
 from .models import RESERVED_NEXT_NODES
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from ..catalog import NodeSpec
 
 _ALIAS_SUFFIX = "__tool"
 
@@ -24,8 +27,11 @@ def build_aliased_tool_catalog(
     *,
     reserved: set[str] | frozenset[str] = RESERVED_NEXT_NODES,
 ) -> tuple[dict[str, NodeSpec], list[dict[str, Any]], dict[str, str]]:
-    """Return (spec_by_name, catalog_records, alias_to_real) with collision handling."""
+    """Build the aliased tool catalog, handling alias collisions.
 
+    Returns:
+        ``(spec_by_name, catalog_records, alias_to_real)``.
+    """
     used_names = {spec.name for spec in specs} | set(reserved)
     spec_by_name: dict[str, NodeSpec] = {}
     catalog_records: list[dict[str, Any]] = []
@@ -33,7 +39,9 @@ def build_aliased_tool_catalog(
 
     for spec in specs:
         name = spec.name
-        alias = _alias_tool_name(name, used_names=used_names, reserved=reserved)
+        alias = _alias_tool_name(
+            name, used_names=used_names, reserved=reserved
+        )
         used_names.add(alias)
         spec_by_name[alias] = spec
         record = spec.to_tool_record()
@@ -68,7 +76,5 @@ def rewrite_action_node(
     *,
     alias_to_real: Mapping[str, str],
 ) -> str:
-    """Resolve an LLM-selected tool alias to its real spec name, if applicable."""
-
+    """Resolve an LLM-selected tool alias to its real spec name, if any."""
     return alias_to_real.get(node_name, node_name)
-

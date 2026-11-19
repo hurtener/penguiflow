@@ -1,7 +1,7 @@
 """OpenAI provider implementation.
 
-Uses the official openai SDK (v2.x) for direct API access.
-Supports both the Chat Completions API and newer Responses API patterns.
+Uses the official openai SDK (v2.x) for direct API access. Supports both the
+Chat Completions API and newer Responses API patterns.
 
 SDK Reference: https://github.com/openai/openai-python
 """
@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import TYPE_CHECKING, Any
+
+from typing_extensions import override
 
 from ..errors import (
     LLMAuthError,
@@ -26,18 +28,28 @@ from ..errors import (
 from ..profiles import ModelProfile, get_profile
 from ..types import (
     CompletionResponse,
-    LLMMessage,
     LLMRequest,
-    StreamEvent,
-    TextPart,
-    ToolCallPart,
-    Usage,
 )
 from ._params import resolve_temperature
-from .base import OpenAICompatibleProvider
+from .base import (
+    OpenAICompatibleProvider,
+    OpenAIStreamAccumulator,
+    _from_openai_response,
+    _to_openai_messages,
+    _to_openai_response_format,
+    _to_openai_tools,
+)
 
 if TYPE_CHECKING:
+    from openai import AsyncOpenAI
+
     from ..types import CancelToken, StreamCallback
+
+
+def _delta_reasoning_content(delta: object) -> str | None:
+    """Return a delta's non-empty ``reasoning_content`` attribute."""
+    value = getattr(delta, "reasoning_content", None)
+    return value if isinstance(value, str) and value else None
 
 
 class OpenAIProvider(OpenAICompatibleProvider):
@@ -53,8 +65,8 @@ class OpenAIProvider(OpenAICompatibleProvider):
     - Function/tool calling
     - Realtime API (via separate client)
 
-    Reference: https://platform.openai.com/docs/api-reference/chat
-    SDK: https://github.com/openai/openai-python (v2.15.0+)
+    Reference: https://platform.openai.com/docs/api-reference/chat SDK:
+    https://github.com/openai/openai-python (v2.15.0+)
     """
 
     def __init__(
@@ -66,46 +78,71 @@ class OpenAIProvider(OpenAICompatibleProvider):
         profile: ModelProfile | None = None,
         organization: str | None = None,
         timeout: float = 360.0,
-    ):
+        client: AsyncOpenAI | None = None,
+    ) -> None:
         """Initialize the OpenAI provider.
 
         Args:
             model: Model identifier (e.g., "gpt-4o").
-            api_key: OpenAI API key (uses OPENAI_API_KEY env var if not provided).
+            api_key: OpenAI API key (uses OPENAI_API_KEY env var if not
+                provided).
             base_url: Base URL override for OpenAI-compatible APIs.
             profile: Model profile override.
             organization: OpenAI organization ID.
             timeout: Default timeout in seconds.
+            client: Pre-built SDK client to use instead of creating one.
         """
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
-            raise ImportError("OpenAI SDK not installed. Install with: pip install openai>=2.0.0") from e
+            msg = (
+                "OpenAI SDK not installed. Install with: pip install "
+                "openai>=2.0.0"
+            )
+            raise ImportError(msg) from e
 
         self._model = model
         self._profile = profile or get_profile(model)
         self._timeout = timeout
 
         api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            organization=organization,
-            timeout=timeout,
+        self._client = (
+            client
+            if client is not None
+            else AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                organization=organization,
+                timeout=timeout,
+            )
         )
 
     @property
+    @override
     def provider_name(self) -> str:
         return "openai"
 
     @property
+    @override
     def profile(self) -> ModelProfile:
         return self._profile
 
     @property
+    @override
     def model(self) -> str:
         return self._model
 
+    @property
+    def client(self) -> AsyncOpenAI:
+        """The SDK client the provider sends requests with."""
+        return self._client
+
+    @property
+    def timeout(self) -> float:
+        """The default request timeout, in seconds."""
+        return self._timeout
+
+    @override
     async def complete(
         self,
         request: LLMRequest,
@@ -117,25 +154,39 @@ class OpenAIProvider(OpenAICompatibleProvider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="openai", retryable=False)
+            raise LLMCancelledError(
+                message="Request cancelled", provider="openai", retryable=False
+            )
 
-        params = self._build_params(request)
+        params = self.build_params(request)
         timeout = timeout_s or self._timeout
 
         try:
             if stream and on_stream_event:
-                return await self._stream_completion(params, on_stream_event, timeout, cancel)
+                try:
+                    async with asyncio.timeout(timeout):
+                        return await self.stream_completion(
+                            params, on_stream_event, cancel
+                        )
+                except TimeoutError as e:
+                    raise LLMTimeoutError(
+                        message=f"Stream timed out after {timeout}s",
+                        provider="openai",
+                        raw=e,
+                    ) from e
 
             async with asyncio.timeout(timeout):
                 response = await self._client.chat.completions.create(**params)
 
-            message, usage = self._from_openai_response(response)
+            message, usage = _from_openai_response(response)
 
             return CompletionResponse(
                 message=message,
                 usage=usage,
                 raw_response=response,
-                reasoning_content=getattr(response.choices[0].message, "reasoning_content", None),
+                reasoning_content=getattr(
+                    response.choices[0].message, "reasoning_content", None
+                ),
                 finish_reason=response.choices[0].finish_reason,
             )
 
@@ -146,113 +197,42 @@ class OpenAIProvider(OpenAICompatibleProvider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(message="Request cancelled", provider="openai") from None
+            raise LLMCancelledError(
+                message="Request cancelled", provider="openai"
+            ) from None
         except Exception as e:
-            raise self._map_error(e) from e
+            raise self.map_error(e) from e
 
-    async def _stream_completion(
+    async def stream_completion(
         self,
         params: dict[str, Any],
         on_stream_event: StreamCallback,
-        timeout: float,
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
         params["stream"] = True
         params["stream_options"] = {"include_usage": True}
-
-        text_acc: list[str] = []
-        tool_calls_acc: dict[int, dict[str, Any]] = {}
-        usage: Usage | None = None
-        finish_reason: str | None = None
-        reasoning_content: str | None = None
-
-        try:
-            async with asyncio.timeout(timeout):
-                stream = await self._client.chat.completions.create(**params)
-                async for chunk in stream:
-                    if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="openai", retryable=False)
-
-                    if not chunk.choices:
-                        # Usage chunk at the end
-                        if hasattr(chunk, "usage") and chunk.usage:
-                            usage = Usage(
-                                input_tokens=chunk.usage.prompt_tokens,
-                                output_tokens=chunk.usage.completion_tokens,
-                                total_tokens=chunk.usage.total_tokens,
-                            )
-                        continue
-
-                    delta = chunk.choices[0].delta
-                    finish_reason = chunk.choices[0].finish_reason
-
-                    # Handle text content
-                    if delta.content:
-                        text_acc.append(delta.content)
-                        on_stream_event(StreamEvent(delta_text=delta.content))
-
-                    # Handle reasoning content
-                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                        if reasoning_content is None:
-                            reasoning_content = ""
-                        reasoning_content += delta.reasoning_content
-                        on_stream_event(StreamEvent(delta_reasoning=delta.reasoning_content))
-
-                    # Handle tool calls
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = tc.index
-                            if idx not in tool_calls_acc:
-                                tool_calls_acc[idx] = {
-                                    "id": tc.id or "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            if tc.function:
-                                if tc.function.name:
-                                    tool_calls_acc[idx]["name"] = tc.function.name
-                                if tc.function.arguments:
-                                    tool_calls_acc[idx]["arguments"] += tc.function.arguments
-
-        except TimeoutError as e:
-            raise LLMTimeoutError(
-                message=f"Stream timed out after {timeout}s",
-                provider="openai",
-                raw=e,
-            ) from e
-
-        # Build final message
-        parts: list[Any] = []
-        full_text = "".join(text_acc)
-        if full_text:
-            parts.append(TextPart(text=full_text))
-
-        for idx in sorted(tool_calls_acc.keys()):
-            tc = tool_calls_acc[idx]
-            parts.append(
-                ToolCallPart(
-                    name=tc["name"],
-                    arguments_json=tc["arguments"],
-                    call_id=tc["id"],
-                )
-            )
-
-        on_stream_event(StreamEvent(done=True, usage=usage, finish_reason=finish_reason))
-
-        return CompletionResponse(
-            message=LLMMessage(role="assistant", parts=parts),
-            usage=usage or Usage.zero(),
-            raw_response=None,
-            reasoning_content=reasoning_content,
-            finish_reason=finish_reason,
+        accumulator = OpenAIStreamAccumulator(
+            on_stream_event, reasoning_of=_delta_reasoning_content
         )
 
-    def _build_params(self, request: LLMRequest) -> dict[str, Any]:
+        stream = await self._client.chat.completions.create(**params)
+        async for chunk in stream:
+            if cancel and cancel.is_cancelled():
+                raise LLMCancelledError(
+                    message="Request cancelled",
+                    provider="openai",
+                    retryable=False,
+                )
+            accumulator.add(chunk)
+
+        return accumulator.response()
+
+    def build_params(self, request: LLMRequest) -> dict[str, Any]:
         """Build OpenAI API parameters from request."""
         params: dict[str, Any] = {
             "model": self._model,
-            "messages": self._to_openai_messages(request.messages),
+            "messages": _to_openai_messages(request.messages),
         }
 
         # Temperature is opt-in and dropped for models that reject it.
@@ -269,7 +249,7 @@ class OpenAIProvider(OpenAICompatibleProvider):
             params["max_tokens"] = request.max_tokens
 
         if request.tools:
-            params["tools"] = self._to_openai_tools(request.tools)
+            params["tools"] = _to_openai_tools(request.tools)
 
         if request.tool_choice:
             params["tool_choice"] = {
@@ -278,19 +258,26 @@ class OpenAIProvider(OpenAICompatibleProvider):
             }
 
         if request.structured_output:
-            params["response_format"] = self._to_openai_response_format(request.structured_output)
+            params["response_format"] = _to_openai_response_format(
+                request.structured_output
+            )
 
         # Handle extra parameters
         if request.extra:
             extra = dict(request.extra)
             # Handle reasoning_effort for reasoning models
-            if self._profile.reasoning_effort_param and self._profile.reasoning_effort_param in extra:
-                params[self._profile.reasoning_effort_param] = extra.pop(self._profile.reasoning_effort_param)
+            if (
+                self._profile.reasoning_effort_param
+                and self._profile.reasoning_effort_param in extra
+            ):
+                params[self._profile.reasoning_effort_param] = extra.pop(
+                    self._profile.reasoning_effort_param
+                )
             params.update(extra)
 
         return params
 
-    def _map_error(self, exc: Exception) -> LLMError:
+    def map_error(self, exc: Exception) -> LLMError:
         """Map OpenAI SDK exceptions to LLMError."""
         try:
             from openai import (
@@ -305,7 +292,9 @@ class OpenAIProvider(OpenAICompatibleProvider):
                 return LLMAuthError(
                     message=str(exc),
                     provider="openai",
-                    status_code=exc.status_code if hasattr(exc, "status_code") else 401,
+                    status_code=exc.status_code
+                    if hasattr(exc, "status_code")
+                    else 401,
                     raw=exc,
                 )
 
@@ -313,7 +302,9 @@ class OpenAIProvider(OpenAICompatibleProvider):
                 return LLMRateLimitError(
                     message=str(exc),
                     provider="openai",
-                    status_code=exc.status_code if hasattr(exc, "status_code") else 429,
+                    status_code=exc.status_code
+                    if hasattr(exc, "status_code")
+                    else 429,
                     raw=exc,
                 )
 
@@ -322,18 +313,24 @@ class OpenAIProvider(OpenAICompatibleProvider):
                     return LLMContextLengthError(
                         message=str(exc),
                         provider="openai",
-                        status_code=exc.status_code if hasattr(exc, "status_code") else 400,
+                        status_code=exc.status_code
+                        if hasattr(exc, "status_code")
+                        else 400,
                         raw=exc,
                     )
                 return LLMInvalidRequestError(
                     message=str(exc),
                     provider="openai",
-                    status_code=exc.status_code if hasattr(exc, "status_code") else 400,
+                    status_code=exc.status_code
+                    if hasattr(exc, "status_code")
+                    else 400,
                     raw=exc,
                 )
 
             if isinstance(exc, APIStatusError):
-                status = exc.status_code if hasattr(exc, "status_code") else 500
+                status = (
+                    exc.status_code if hasattr(exc, "status_code") else 500
+                )
                 if status >= 500:
                     return LLMServerError(
                         message=str(exc),

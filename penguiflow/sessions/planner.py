@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard
 
 from pydantic import BaseModel
 
 from penguiflow.artifacts import ArtifactRef
-from penguiflow.planner import PlannerEvent, PlannerFinish, PlannerPause, ReactPlanner
+from penguiflow.planner import (
+    PlannerEvent,
+    PlannerFinish,
+    PlannerPause,
+)
 from penguiflow.steering import SteeringCancelled, SteeringEventType
 
 from .models import (
@@ -23,11 +27,49 @@ from .models import (
 from .projections import PlannerEventProjector
 from .session import TaskResult, TaskRuntime
 
-PlannerFactory = Callable[[], ReactPlanner]
+if TYPE_CHECKING:
+    from penguiflow.planner import PlannerEventCallback
+    from penguiflow.steering import SteeringInbox
+
+
+class TaskPlanner(Protocol):
+    """The planner surface :class:`PlannerTaskPipeline` drives.
+
+    :class:`~penguiflow.planner.ReactPlanner` provides it. The pipeline
+    sets ``event_callback`` to project planner events onto the session, then
+    runs the planner and resumes it after each approval pause.
+    """
+
+    event_callback: PlannerEventCallback | None
+
+    async def run(
+        self,
+        query: str,
+        *,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> PlannerFinish | PlannerPause:
+        """Run the planner on ``query`` until it finishes or pauses."""
+        ...
+
+    async def resume(
+        self,
+        token: str,
+        user_input: str | None = None,
+        *,
+        tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> PlannerFinish | PlannerPause:
+        """Resume the paused run identified by ``token``."""
+        ...
+
+
+PlannerFactory = Callable[[], TaskPlanner]
 PlannerEventSink = Callable[[PlannerEvent, str | None], None]
 
 
-def _is_artifact_ref_dict(value: Any) -> bool:
+def _is_artifact_ref_dict(value: object) -> TypeGuard[dict[str, Any]]:
     """Check if a dict looks like a serialized ArtifactRef."""
     if not isinstance(value, dict):
         return False
@@ -35,7 +77,7 @@ def _is_artifact_ref_dict(value: Any) -> bool:
     return "id" in value and isinstance(value.get("id"), str)
 
 
-def _serialize_artifact_value(value: Any) -> dict[str, Any] | None:
+def _serialize_artifact_value(value: object) -> dict[str, Any] | None:
     """Serialize an artifact value to a dict, preserving ArtifactRef semantics.
 
     Returns None for non-artifact values that should be skipped.
@@ -56,19 +98,20 @@ def _serialize_artifact_value(value: Any) -> dict[str, Any] | None:
 
 
 def _normalize_artifacts_for_patch(
-    artifacts: dict[str, Any] | list[Any] | None,
+    artifacts: object,
 ) -> list[dict[str, Any]]:
     """Convert trajectory artifacts dict to ContextPatch list format.
 
-    The ReactPlanner stores artifacts as a dict: {node_name: {field_name: value}}.
-    ContextPatch.artifacts expects a list[dict[str, Any]].
+    The ReactPlanner stores artifacts as a dict: {node_name: {field_name:
+    value}}. ContextPatch.artifacts expects a list[dict[str, Any]].
 
     This function normalizes the structure while preserving ArtifactRef objects
     (either as Pydantic objects or already-serialized dicts). Raw binary data
     should never appear here - only references to ArtifactStore.
 
     Args:
-        artifacts: Either a dict from trajectory.artifacts or an already-normalized list.
+        artifacts: Either a dict from trajectory.artifacts or an
+            already-normalized list.
 
     Returns:
         List of artifact dicts suitable for ContextPatch.artifacts.
@@ -97,16 +140,18 @@ def _normalize_artifacts_for_patch(
         for field_name, value in fields.items():
             serialized = _serialize_artifact_value(value)
             if serialized is not None:
-                result.append({
-                    "node": node_name,
-                    "field": field_name,
-                    "artifact": serialized,
-                })
+                result.append(
+                    {
+                        "node": node_name,
+                        "field": field_name,
+                        "artifact": serialized,
+                    }
+                )
 
     return result
 
 
-def _extract_answer(payload: Any) -> str | None:
+def _extract_answer(payload: object) -> str | None:
     if payload is None:
         return None
     if isinstance(payload, str):
@@ -126,7 +171,7 @@ def _extract_answer(payload: Any) -> str | None:
 def _build_context_patch(
     *,
     task_id: str,
-    payload: Any,
+    payload: object,
     metadata: Mapping[str, Any] | None,
     context_version: int | None,
     context_hash: str | None,
@@ -136,8 +181,12 @@ def _build_context_patch(
     answer = _extract_answer(payload)
     if answer:
         digest = [answer[:5000]]
-    artifacts = metadata.get("artifacts") if isinstance(metadata, Mapping) else None
-    sources = metadata.get("sources") if isinstance(metadata, Mapping) else None
+    artifacts = (
+        metadata.get("artifacts") if isinstance(metadata, Mapping) else None
+    )
+    sources = (
+        metadata.get("sources") if isinstance(metadata, Mapping) else None
+    )
     return ContextPatch(
         task_id=task_id,
         spawned_from_event_id=spawned_from_event_id,
@@ -149,6 +198,73 @@ def _build_context_patch(
     )
 
 
+def _task_tool_context(runtime: TaskRuntime, trace_id: str) -> dict[str, Any]:
+    """Build the tool context for a task, scoping subagents to the task."""
+    tool_context = dict(runtime.context_snapshot.tool_context or {})
+    if runtime.state.task_type == TaskType.BACKGROUND:
+        tool_context["session_id"] = (
+            f"{runtime.state.session_id}:{runtime.state.task_id}"
+        )
+        tool_context["parent_session_id"] = runtime.state.session_id
+        tool_context["is_subagent"] = True
+    else:
+        tool_context["session_id"] = runtime.state.session_id
+        tool_context["is_subagent"] = False
+    tool_context["trace_id"] = trace_id
+    tool_context["task_id"] = runtime.state.task_id
+    return tool_context
+
+
+async def _announce_pause(runtime: TaskRuntime, pause: PlannerPause) -> None:
+    """Mark the task paused and ask the client for approval."""
+    await runtime.session.registry.update_status(
+        runtime.state.task_id, TaskStatus.PAUSED
+    )
+    runtime.emit_update(
+        UpdateType.STATUS_CHANGE,
+        {"status": "PAUSED", "reason": "checkpoint"},
+    )
+    runtime.emit_update(
+        UpdateType.CHECKPOINT,
+        {
+            "kind": "approval_required",
+            "resume_token": pause.resume_token,
+            "prompt": "Approval required to continue.",
+            "options": ["approve", "reject"],
+        },
+    )
+
+
+async def _await_resume_decision(
+    runtime: TaskRuntime, resume_token: str
+) -> str | None:
+    """Wait for approval of ``resume_token``; return the user's decision.
+
+    Raises:
+        SteeringCancelled: If the task is cancelled or the pause rejected.
+    """
+    while True:
+        if runtime.steering.cancelled:
+            raise SteeringCancelled(runtime.steering.cancel_reason)
+        event = await runtime.steering.next()
+        if event.event_type == SteeringEventType.CANCEL:
+            raise SteeringCancelled(
+                str(event.payload.get("reason") or "cancelled")
+            )
+        if event.event_type not in {
+            SteeringEventType.APPROVE,
+            SteeringEventType.REJECT,
+        } or (event.payload.get("resume_token") != resume_token):
+            continue
+        if event.event_type == SteeringEventType.REJECT:
+            msg = "pause_rejected"
+            raise SteeringCancelled(msg)
+        decision = event.payload.get("decision") or event.payload.get(
+            "user_input"
+        )
+        return None if decision is None else str(decision)
+
+
 class PlannerTaskPipeline:
     """Run a ReactPlanner inside a StreamingSession task."""
 
@@ -158,10 +274,12 @@ class PlannerTaskPipeline:
         planner_factory: PlannerFactory,
         event_sink: PlannerEventSink | None = None,
     ) -> None:
+        """Configure the planner factory and an optional event sink."""
         self._planner_factory = planner_factory
         self._event_sink = event_sink
 
     async def __call__(self, runtime: TaskRuntime) -> TaskResult:
+        """Run a planner for the task, handling approval pauses."""
         planner = self._planner_factory()
         trace_id = runtime.context_snapshot.trace_id or secrets.token_hex(8)
         runtime.state.trace_id = trace_id
@@ -174,25 +292,20 @@ class PlannerTaskPipeline:
         def _event_callback(event: PlannerEvent) -> None:
             updates = projector.project(event)
             for update in updates:
-                runtime.session._publish(update)
+                runtime.session.publish(update)
             if self._event_sink is not None:
                 self._event_sink(event, trace_id)
 
-        planner._event_callback = _event_callback
+        planner.event_callback = _event_callback
 
         llm_context = dict(runtime.context_snapshot.llm_context or {})
-        tool_context = dict(runtime.context_snapshot.tool_context or {})
-        if runtime.state.task_type == TaskType.BACKGROUND:
-            tool_context["session_id"] = f"{runtime.state.session_id}:{runtime.state.task_id}"
-            tool_context["parent_session_id"] = runtime.state.session_id
-            tool_context["is_subagent"] = True
-        else:
-            tool_context["session_id"] = runtime.state.session_id
-            tool_context["is_subagent"] = False
-        tool_context["trace_id"] = trace_id
-        tool_context["task_id"] = runtime.state.task_id
+        tool_context = _task_tool_context(runtime, trace_id)
 
-        query = runtime.context_snapshot.query or runtime.context_snapshot.spawn_reason or ""
+        query = (
+            runtime.context_snapshot.query
+            or runtime.context_snapshot.spawn_reason
+            or ""
+        )
         result: PlannerFinish | PlannerPause = await planner.run(
             query=query,
             llm_context=llm_context,
@@ -201,45 +314,23 @@ class PlannerTaskPipeline:
         )
 
         while isinstance(result, PlannerPause):
-            await runtime.session.registry.update_status(runtime.state.task_id, TaskStatus.PAUSED)
+            await _announce_pause(runtime, result)
+            user_input = await _await_resume_decision(
+                runtime, result.resume_token
+            )
+            await runtime.session.registry.update_status(
+                runtime.state.task_id, TaskStatus.RUNNING
+            )
             runtime.emit_update(
                 UpdateType.STATUS_CHANGE,
-                {"status": "PAUSED", "reason": "checkpoint"},
+                {"status": "RUNNING", "reason": "resume"},
             )
-            runtime.emit_update(
-                UpdateType.CHECKPOINT,
-                {
-                    "kind": "approval_required",
-                    "resume_token": result.resume_token,
-                    "prompt": "Approval required to continue.",
-                    "options": ["approve", "reject"],
-                },
+            result = await planner.resume(
+                result.resume_token,
+                user_input=user_input,
+                tool_context=tool_context,
+                steering=runtime.steering,
             )
-            # Wait for approval or cancellation
-            while True:
-                if runtime.steering.cancelled:
-                    raise SteeringCancelled(runtime.steering.cancel_reason)
-                event = await runtime.steering.next()
-                if event.event_type == SteeringEventType.CANCEL:
-                    raise SteeringCancelled(str(event.payload.get("reason") or "cancelled"))
-                if event.event_type in {SteeringEventType.APPROVE, SteeringEventType.REJECT}:
-                    token = event.payload.get("resume_token")
-                    if token == result.resume_token:
-                        if event.event_type == SteeringEventType.REJECT:
-                            raise SteeringCancelled("pause_rejected")
-                        user_input = event.payload.get("decision") or event.payload.get("user_input")
-                        await runtime.session.registry.update_status(runtime.state.task_id, TaskStatus.RUNNING)
-                        runtime.emit_update(
-                            UpdateType.STATUS_CHANGE,
-                            {"status": "RUNNING", "reason": "resume"},
-                        )
-                        result = await planner.resume(
-                            result.resume_token,
-                            user_input=user_input,
-                            tool_context=tool_context,
-                            steering=runtime.steering,
-                        )
-                        break
 
         metadata = result.metadata if isinstance(result, PlannerFinish) else {}
         patch = _build_context_patch(
@@ -256,7 +347,10 @@ class PlannerTaskPipeline:
             notification = NotificationPayload(
                 severity="info",
                 title="Background task ready",
-                body="A background task completed and can be applied to the conversation.",
+                body=(
+                    "A background task completed and can be applied to "
+                    "the conversation."
+                ),
                 actions=[
                     NotificationAction(
                         id="apply_to_chat",
@@ -270,12 +364,16 @@ class PlannerTaskPipeline:
             context_patch=patch,
             digest=digest,
             artifacts=_normalize_artifacts_for_patch(
-                metadata.get("artifacts") if isinstance(metadata, Mapping) else None
+                metadata.get("artifacts")
+                if isinstance(metadata, Mapping)
+                else None
             ),
-            sources=list(metadata.get("sources", [])) if isinstance(metadata, Mapping) else [],
+            sources=list(metadata.get("sources", []))
+            if isinstance(metadata, Mapping)
+            else [],
             notification=notification,
             metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
         )
 
 
-__all__ = ["PlannerFactory", "PlannerTaskPipeline"]
+__all__ = ["PlannerFactory", "PlannerTaskPipeline", "TaskPlanner"]

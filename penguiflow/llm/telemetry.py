@@ -9,8 +9,11 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 logger = logging.getLogger("penguiflow.llm.telemetry")
 
@@ -19,7 +22,9 @@ logger = logging.getLogger("penguiflow.llm.telemetry")
 class LLMEvent:
     """Event emitted during LLM operations for observability."""
 
-    event_type: str  # "request_start", "request_end", "stream_chunk", "retry", "error"
+    event_type: (
+        str  # "request_start", "request_end", "stream_chunk", "retry", "error"
+    )
     timestamp: datetime
     provider: str
     model: str
@@ -34,12 +39,12 @@ class LLMEvent:
         model: str,
         *,
         trace_id: str | None = None,
-        **extra: Any,
+        **extra: object,
     ) -> LLMEvent:
         """Create an event with current timestamp."""
         return cls(
             event_type=event_type,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(tz=UTC),
             provider=provider,
             model=model,
             trace_id=trace_id,
@@ -66,8 +71,14 @@ class TelemetryHooks:
     """
 
     def __init__(self) -> None:
+        """Create an enabled hook registry with no callbacks."""
         self._callbacks: list[TelemetryCallback] = []
         self._enabled = True
+
+    @property
+    def callbacks(self) -> tuple[TelemetryCallback, ...]:
+        """The registered callbacks, in registration order."""
+        return tuple(self._callbacks)
 
     def register(self, callback: TelemetryCallback) -> None:
         """Register a telemetry callback.
@@ -88,9 +99,9 @@ class TelemetryHooks:
         """
         try:
             self._callbacks.remove(callback)
-            return True
         except ValueError:
             return False
+        return True
 
     def emit(self, event: LLMEvent) -> None:
         """Emit event to all registered callbacks (non-blocking).
@@ -165,7 +176,9 @@ def default_logger_callback(event: LLMEvent) -> None:
         extra = event.extra or {}
         attempt = extra.get("attempt", 0)
         reason = extra.get("reason", "unknown")
-        logger.debug(f"LLM {event.provider}/{event.model} retry {attempt}: {reason}")
+        logger.debug(
+            f"LLM {event.provider}/{event.model} retry {attempt}: {reason}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -180,10 +193,14 @@ def create_mlflow_callback() -> TelemetryCallback:
         Callback function for MLflow integration.
 
     Example:
-        from penguiflow.llm.telemetry import get_telemetry_hooks, create_mlflow_callback
+        from penguiflow.llm.telemetry import (
+            create_mlflow_callback,
+            get_telemetry_hooks,
+        )
         hooks = get_telemetry_hooks()
         hooks.register(create_mlflow_callback())
     """
+
     def mlflow_callback(event: LLMEvent) -> None:
         try:
             import mlflow
@@ -191,12 +208,22 @@ def create_mlflow_callback() -> TelemetryCallback:
             return
 
         if event.event_type == "request_end" and event.extra:
-            mlflow.log_metrics({
-                f"llm.{event.provider}.latency_ms": event.extra.get("latency_ms", 0),
-                f"llm.{event.provider}.input_tokens": event.extra.get("input_tokens", 0),
-                f"llm.{event.provider}.output_tokens": event.extra.get("output_tokens", 0),
-                f"llm.{event.provider}.cost_usd": event.extra.get("cost", 0),
-            })
+            mlflow.log_metrics(
+                {
+                    f"llm.{event.provider}.latency_ms": event.extra.get(
+                        "latency_ms", 0
+                    ),
+                    f"llm.{event.provider}.input_tokens": event.extra.get(
+                        "input_tokens", 0
+                    ),
+                    f"llm.{event.provider}.output_tokens": event.extra.get(
+                        "output_tokens", 0
+                    ),
+                    f"llm.{event.provider}.cost_usd": event.extra.get(
+                        "cost", 0
+                    ),
+                }
+            )
 
     return mlflow_callback
 
@@ -208,63 +235,56 @@ def create_prometheus_callback() -> TelemetryCallback:
         Callback function for Prometheus integration.
 
     Example:
-        from penguiflow.llm.telemetry import get_telemetry_hooks, create_prometheus_callback
+        from penguiflow.llm.telemetry import (
+            create_prometheus_callback,
+            get_telemetry_hooks,
+        )
         hooks = get_telemetry_hooks()
         hooks.register(create_prometheus_callback())
     """
     try:
         from prometheus_client import Counter, Histogram
 
-        REQUEST_COUNT = Counter(
+        request_count = Counter(
             "llm_requests_total",
             "Total LLM requests",
-            ["provider", "model", "status"]
+            ["provider", "model", "status"],
         )
-        REQUEST_LATENCY = Histogram(
-            "llm_request_latency_seconds",
-            "LLM request latency",
-            ["provider"]
+        request_latency = Histogram(
+            "llm_request_latency_seconds", "LLM request latency", ["provider"]
         )
-        TOKEN_COUNTER = Counter(
-            "llm_tokens_total",
-            "Total tokens used",
-            ["provider", "direction"]
+        token_counter = Counter(
+            "llm_tokens_total", "Total tokens used", ["provider", "direction"]
         )
     except ImportError:
-        REQUEST_COUNT = None
-        REQUEST_LATENCY = None
-        TOKEN_COUNTER = None
+        request_count = None
+        request_latency = None
+        token_counter = None
 
     def prometheus_callback(event: LLMEvent) -> None:
-        if REQUEST_COUNT is None:
+        if request_count is None:
             return
 
         if event.event_type == "request_end" and event.extra:
-            REQUEST_COUNT.labels(
-                provider=event.provider,
-                model=event.model,
-                status="success"
+            request_count.labels(
+                provider=event.provider, model=event.model, status="success"
             ).inc()
 
-            REQUEST_LATENCY.labels(
-                provider=event.provider
-            ).observe(event.extra.get("latency_ms", 0) / 1000)
+            request_latency.labels(provider=event.provider).observe(
+                event.extra.get("latency_ms", 0) / 1000
+            )
 
-            TOKEN_COUNTER.labels(
-                provider=event.provider,
-                direction="input"
+            token_counter.labels(
+                provider=event.provider, direction="input"
             ).inc(event.extra.get("input_tokens", 0))
 
-            TOKEN_COUNTER.labels(
-                provider=event.provider,
-                direction="output"
+            token_counter.labels(
+                provider=event.provider, direction="output"
             ).inc(event.extra.get("output_tokens", 0))
 
         elif event.event_type == "error":
-            REQUEST_COUNT.labels(
-                provider=event.provider,
-                model=event.model,
-                status="error"
+            request_count.labels(
+                provider=event.provider, model=event.model, status="error"
             ).inc()
 
     return prometheus_callback
@@ -278,7 +298,10 @@ def create_prometheus_callback() -> TelemetryCallback:
 class TimingContext:
     """Context manager for timing LLM operations."""
 
-    def __init__(self, provider: str, model: str, trace_id: str | None = None):
+    def __init__(
+        self, provider: str, model: str, trace_id: str | None = None
+    ) -> None:
+        """Configure the provider, model and trace id to report."""
         self.provider = provider
         self.model = model
         self.trace_id = trace_id
@@ -286,6 +309,7 @@ class TimingContext:
         self.end_time: float = 0
 
     def __enter__(self) -> TimingContext:
+        """Start timing and emit ``request_start``."""
         self.start_time = time.perf_counter()
         get_telemetry_hooks().emit(
             LLMEvent.create(
@@ -297,7 +321,13 @@ class TimingContext:
         )
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Stop timing and emit ``request_end`` or ``error``."""
         self.end_time = time.perf_counter()
         latency_ms = (self.end_time - self.start_time) * 1000
 

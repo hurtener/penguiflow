@@ -1,6 +1,9 @@
+"""Tests for state unified store."""
+
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -24,12 +27,30 @@ from penguiflow.state.adapters import (
     save_update_compat,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 
 @pytest.mark.asyncio
 async def test_inmemory_statestore_events_idempotent_and_ordered() -> None:
+    """Inmemory statestore events idempotent and ordered."""
     store = InMemoryStateStore(max_events_per_trace=10)
-    event_a = StoredEvent(trace_id="t", ts=1.0, kind="k", node_name=None, node_id=None, payload={"x": 1})
-    event_b = StoredEvent(trace_id="t", ts=1.0, kind="k2", node_name=None, node_id=None, payload={"x": 2})
+    event_a = StoredEvent(
+        trace_id="t",
+        ts=1.0,
+        kind="k",
+        node_name=None,
+        node_id=None,
+        payload={"x": 1},
+    )
+    event_b = StoredEvent(
+        trace_id="t",
+        ts=1.0,
+        kind="k2",
+        node_name=None,
+        node_id=None,
+        payload={"x": 2},
+    )
 
     await store.save_event(event_a)
     await store.save_event(event_a)  # idempotent
@@ -41,19 +62,34 @@ async def test_inmemory_statestore_events_idempotent_and_ordered() -> None:
 
 @pytest.mark.asyncio
 async def test_inmemory_statestore_remote_binding_upsert() -> None:
+    """Inmemory statestore remote binding upsert."""
     store = InMemoryStateStore()
-    binding = RemoteBinding(trace_id="t", context_id=None, task_id="x", agent_url="a")
+    binding = RemoteBinding(
+        trace_id="t", context_id=None, task_id="x", agent_url="a"
+    )
     await store.save_remote_binding(binding)
-    await store.save_remote_binding(RemoteBinding(trace_id="t", context_id=None, task_id="x", agent_url="b"))
+    await store.save_remote_binding(
+        RemoteBinding(
+            trace_id="t", context_id=None, task_id="x", agent_url="b"
+        )
+    )
     # No public read API; this just ensures upserts don't crash.
 
 
 @pytest.mark.asyncio
-async def test_inmemory_statestore_conversation_binding_lookup_and_terminal() -> None:
+async def test_inmemory_conversation_binding_lookup() -> None:
+    """Inmemory statestore conversation binding lookup and terminal."""
     store = InMemoryStateStore()
-    unscoped = RemoteBinding(trace_id="t0", context_id="ctx-0", task_id="task-0", agent_url="agent")
+    unscoped = RemoteBinding(
+        trace_id="t0", context_id="ctx-0", task_id="task-0", agent_url="agent"
+    )
     await store.save_remote_binding(unscoped)
-    assert await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo") is None
+    assert (
+        await store.find_binding(
+            router_session_id="session", agent_url="agent", remote_skill="echo"
+        )
+        is None
+    )
 
     binding = RemoteBinding(
         trace_id="t1",
@@ -68,34 +104,46 @@ async def test_inmemory_statestore_conversation_binding_lookup_and_terminal() ->
     )
     await store.save_remote_binding(binding)
 
-    assert await store.find_binding(
-        router_session_id="session",
-        agent_url="agent",
-        remote_skill="echo",
-        tenant_id="tenant-a",
-        user_id=None,
-    ) is None
-    assert await store.find_binding(
-        router_session_id="session",
-        agent_url="agent",
-        remote_skill="echo",
-        tenant_id=None,
-        user_id="user-a",
-    ) is None
-    assert await store.find_binding(
-        router_session_id="other-session",
-        agent_url="agent",
-        remote_skill="echo",
-        tenant_id="tenant-a",
-        user_id="user-a",
-    ) is None
-    assert await store.find_binding(
-        router_session_id="session",
-        agent_url="agent",
-        remote_skill="echo",
-        tenant_id="tenant-b",
-        user_id="user-a",
-    ) is None
+    assert (
+        await store.find_binding(
+            router_session_id="session",
+            agent_url="agent",
+            remote_skill="echo",
+            tenant_id="tenant-a",
+            user_id=None,
+        )
+        is None
+    )
+    assert (
+        await store.find_binding(
+            router_session_id="session",
+            agent_url="agent",
+            remote_skill="echo",
+            tenant_id=None,
+            user_id="user-a",
+        )
+        is None
+    )
+    assert (
+        await store.find_binding(
+            router_session_id="other-session",
+            agent_url="agent",
+            remote_skill="echo",
+            tenant_id="tenant-a",
+            user_id="user-a",
+        )
+        is None
+    )
+    assert (
+        await store.find_binding(
+            router_session_id="session",
+            agent_url="agent",
+            remote_skill="echo",
+            tenant_id="tenant-b",
+            user_id="user-a",
+        )
+        is None
+    )
     found = await store.find_binding(
         router_session_id="session",
         agent_url="agent",
@@ -125,25 +173,40 @@ async def test_inmemory_statestore_conversation_binding_lookup_and_terminal() ->
         )
         == binding
     )
-    assert await store.find_binding(
-        router_session_id="session",
-        agent_url="agent",
-        remote_skill="echo",
-        tenant_id="tenant-b",
-        user_id="user-a",
-    ) is None
     assert (
-        await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo")
+        await store.find_binding(
+            router_session_id="session",
+            agent_url="agent",
+            remote_skill="echo",
+            tenant_id="tenant-b",
+            user_id="user-a",
+        )
+        is None
+    )
+    assert (
+        await store.find_binding(
+            router_session_id="session", agent_url="agent", remote_skill="echo"
+        )
         == unscoped_latest
     )
 
-    await store.mark_binding_terminal(trace_id="t1", context_id="ctx-1", task_id="task-1")
-    await store.mark_binding_terminal(trace_id="t2", context_id="ctx-2", task_id="task-2")
-    assert await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo") is None
+    await store.mark_binding_terminal(
+        trace_id="t1", context_id="ctx-1", task_id="task-1"
+    )
+    await store.mark_binding_terminal(
+        trace_id="t2", context_id="ctx-2", task_id="task-2"
+    )
+    assert (
+        await store.find_binding(
+            router_session_id="session", agent_url="agent", remote_skill="echo"
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
-async def test_inmemory_statestore_terminal_old_binding_preserves_latest_binding() -> None:
+async def test_inmemory_terminal_old_binding_keeps_latest() -> None:
+    """Inmemory statestore terminal old binding preserves latest binding."""
     store = InMemoryStateStore()
     first = RemoteBinding(
         trace_id="t1",
@@ -164,14 +227,21 @@ async def test_inmemory_statestore_terminal_old_binding_preserves_latest_binding
     await store.save_remote_binding(first)
     await store.save_remote_binding(second)
 
-    await store.mark_binding_terminal(trace_id="t1", context_id="ctx", task_id="task-1")
+    await store.mark_binding_terminal(
+        trace_id="t1", context_id="ctx", task_id="task-1"
+    )
 
-    found = await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo")
+    found = await store.find_binding(
+        router_session_id="session", agent_url="agent", remote_skill="echo"
+    )
     assert found == second
 
 
 @pytest.mark.asyncio
-async def test_inmemory_statestore_saved_terminal_binding_is_not_active() -> None:
+async def test_inmemory_statestore_saved_terminal_binding_is_not_active() -> (
+    None
+):
+    """Inmemory statestore saved terminal binding is not active."""
     store = InMemoryStateStore()
     binding = RemoteBinding(
         trace_id="t1",
@@ -184,12 +254,20 @@ async def test_inmemory_statestore_saved_terminal_binding_is_not_active() -> Non
     )
     await store.save_remote_binding(binding)
 
-    assert await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo") is None
+    assert (
+        await store.find_binding(
+            router_session_id="session", agent_url="agent", remote_skill="echo"
+        )
+        is None
+    )
     assert await store.list_bindings(router_session_id="session") == [binding]
 
 
 @pytest.mark.asyncio
-async def test_inmemory_statestore_planner_and_memory_state_roundtrip() -> None:
+async def test_inmemory_statestore_planner_and_memory_state_roundtrip() -> (
+    None
+):
+    """Inmemory statestore planner and memory state roundtrip."""
     store = InMemoryStateStore()
     await store.save_planner_state("token", {"a": 1})
     assert await store.load_planner_state("token") == {"a": 1}
@@ -202,8 +280,11 @@ async def test_inmemory_statestore_planner_and_memory_state_roundtrip() -> None:
 
 @pytest.mark.asyncio
 async def test_inmemory_statestore_tasks_updates_and_aliases() -> None:
+    """Inmemory statestore tasks updates and aliases."""
     store = InMemoryStateStore()
-    snapshot = TaskContextSnapshot(session_id="s", task_id="t", llm_context={"x": 1})
+    snapshot = TaskContextSnapshot(
+        session_id="s", task_id="t", llm_context={"x": 1}
+    )
     task = TaskState(
         task_id="t",
         session_id="s",
@@ -217,9 +298,19 @@ async def test_inmemory_statestore_tasks_updates_and_aliases() -> None:
     assert len(tasks) == 1
     assert tasks[0].task_id == "t"
 
-    update1 = StateUpdate(session_id="s", task_id="t", update_type=UpdateType.RESULT, content={"ok": True})
+    update1 = StateUpdate(
+        session_id="s",
+        task_id="t",
+        update_type=UpdateType.RESULT,
+        content={"ok": True},
+    )
     await store.save_update(update1)
-    update2 = StateUpdate(session_id="s", task_id="t", update_type=UpdateType.PROGRESS, content={"n": 1})
+    update2 = StateUpdate(
+        session_id="s",
+        task_id="t",
+        update_type=UpdateType.PROGRESS,
+        content={"n": 1},
+    )
     await store.save_task_update(update2)
 
     updates = await store.list_updates("s")
@@ -230,6 +321,7 @@ async def test_inmemory_statestore_tasks_updates_and_aliases() -> None:
 
 @pytest.mark.asyncio
 async def test_inmemory_statestore_steering_sanitised_and_cursor() -> None:
+    """Inmemory statestore steering sanitised and cursor."""
     store = InMemoryStateStore(max_steering_events_per_session=10)
     large_payload = {"items": list(range(10_000))}
     event1 = SteeringEvent(
@@ -238,7 +330,12 @@ async def test_inmemory_statestore_steering_sanitised_and_cursor() -> None:
         event_type=SteeringEventType.USER_MESSAGE,
         payload=large_payload,
     )
-    event2 = SteeringEvent(session_id="s", task_id="t", event_type=SteeringEventType.CANCEL, payload={"reason": "x"})
+    event2 = SteeringEvent(
+        session_id="s",
+        task_id="t",
+        event_type=SteeringEventType.CANCEL,
+        payload={"reason": "x"},
+    )
     await store.save_steering(event1)
     await store.save_steering(event2)
 
@@ -254,6 +351,7 @@ async def test_inmemory_statestore_steering_sanitised_and_cursor() -> None:
 
 @pytest.mark.asyncio
 async def test_inmemory_statestore_trajectory_isolation_and_traces() -> None:
+    """Inmemory statestore trajectory isolation and traces."""
     store = InMemoryStateStore()
     await store.save_trajectory("trace-1", "s", Trajectory(query="hello"))
     await store.save_trajectory("trace-2", "s", Trajectory(query="world"))
@@ -266,27 +364,41 @@ async def test_inmemory_statestore_trajectory_isolation_and_traces() -> None:
 
 @pytest.mark.asyncio
 async def test_inmemory_statestore_planner_events() -> None:
+    """Inmemory statestore planner events."""
     store = InMemoryStateStore()
-    event = PlannerEvent(event_type="step_start", ts=time.time(), trajectory_step=0)
+    event = PlannerEvent(
+        event_type="step_start", ts=time.time(), trajectory_step=0
+    )
     await store.save_planner_event("trace", event)
     assert await store.list_planner_events("trace") == [event]
 
 
 def test_require_capabilities_raises() -> None:
+    """Require capabilities raises."""
     store = object()
     with pytest.raises(TypeError):
-        require_capabilities(store, feature="tasks", methods=("save_task", "list_tasks"))
+        require_capabilities(
+            store, feature="tasks", methods=("save_task", "list_tasks")
+        )
 
 
 class _LegacyTaskStore:
     def __init__(self) -> None:
         self._updates: list[StateUpdate] = []
+        self.update_queries: list[tuple[str, str | None]] = []
 
     async def save_task_update(self, update: StateUpdate) -> None:
         self._updates.append(update)
 
-    async def list_task_updates(self, session_id: str, *, task_id=None, since_id=None, limit=500):  # type: ignore[no-untyped-def]
-        del session_id, task_id
+    async def list_task_updates(
+        self,
+        session_id: str,
+        *,
+        task_id: str | None = None,
+        since_id: str | None = None,
+        limit: int = 500,
+    ) -> Sequence[StateUpdate]:
+        self.update_queries.append((session_id, task_id))
         updates = list(self._updates)
         if since_id:
             for idx, update in enumerate(updates):
@@ -298,9 +410,20 @@ class _LegacyTaskStore:
 
 @pytest.mark.asyncio
 async def test_adapters_update_compat_uses_legacy_names() -> None:
+    """Adapters update compat uses legacy names."""
     store = _LegacyTaskStore()
-    update1 = StateUpdate(session_id="s", task_id="t", update_type=UpdateType.RESULT, content={"ok": True})
-    update2 = StateUpdate(session_id="s", task_id="t", update_type=UpdateType.RESULT, content={"ok": True})
+    update1 = StateUpdate(
+        session_id="s",
+        task_id="t",
+        update_type=UpdateType.RESULT,
+        content={"ok": True},
+    )
+    update2 = StateUpdate(
+        session_id="s",
+        task_id="t",
+        update_type=UpdateType.RESULT,
+        content={"ok": True},
+    )
     await save_update_compat(store, update1)
     await save_update_compat(store, update2)
 

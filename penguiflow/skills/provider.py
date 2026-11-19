@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol, TypeVar, cast
+from typing import Protocol, TypeVar
 
 from .local_store import LocalSkillStore
 from .models import (
@@ -35,11 +35,12 @@ from .redaction import redact_pii, redact_tool_references
 class SkillProvider(Protocol):
     """Extension point for retrieving, searching, and formatting skills.
 
-    Implementations back the skill-related tools (retrieval, search, listing, directory)
-    exposed to agents. Built-in implementations are :class:`LocalSkillProvider` (backed
-    by a local SQLite store) and :class:`CompositeSkillProvider` (fans out to multiple
-    providers). Custom implementations may wrap remote skill catalogs, alternate storage
-    backends, or additional filtering/ranking logic; they must implement every method
+    Implementations back the skill-related tools (retrieval, search, listing,
+    directory) exposed to agents. Built-in implementations are
+    :class:`LocalSkillProvider` (backed by a local SQLite store) and
+    :class:`CompositeSkillProvider` (fans out to multiple providers). Custom
+    implementations may wrap remote skill catalogs, alternate storage backends,
+    or additional filtering/ranking logic; they must implement every method
     below since callers do not duck-type around missing methods.
     """
 
@@ -50,14 +51,16 @@ class SkillProvider(Protocol):
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> RetrievalResponse:
-        """Retrieve skills relevant to a task query, ranked and token-budgeted for injection.
+        """Retrieve skills for a task query, ranked and token-budgeted.
 
         Args:
-            query: Task description and retrieval parameters (search type, top_k, filters).
-            tool_context: Caller-scoped context (e.g. tenant_id, project_id) used to filter
-                skills by scope.
-            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
-                filter out and redact skills the caller cannot use.
+            query: Task description and retrieval parameters (search type,
+                top_k, filters).
+            tool_context: Caller-scoped context (e.g. tenant_id, project_id)
+                used to filter skills by scope.
+            capability_context: Optional snapshot of allowed
+                tools/namespaces/tags used to filter out and redact skills the
+                caller cannot use.
 
         Returns:
             The ranked skills plus pre-formatted, token-budgeted context text.
@@ -71,13 +74,14 @@ class SkillProvider(Protocol):
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> SkillSearchResponse:
-        """Search skills by free-text query, returning lightweight ranked matches.
+        """Search skills by free-text query; return lightweight ranked matches.
 
         Args:
             query: Search text and parameters (search type, limit, filters).
             tool_context: Caller-scoped context used to filter skills by scope.
-            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
-                filter out results the caller cannot use.
+            capability_context: Optional snapshot of allowed
+                tools/namespaces/tags used to filter out results the caller
+                cannot use.
 
         Returns:
             Ranked, lightweight search results (name/title/trigger/score).
@@ -96,12 +100,14 @@ class SkillProvider(Protocol):
         Args:
             names: Skill names to fetch.
             tool_context: Caller-scoped context used to filter skills by scope.
-            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
-                filter out and redact skills the caller cannot use.
+            capability_context: Optional snapshot of allowed
+                tools/namespaces/tags used to filter out and redact skills the
+                caller cannot use.
 
         Returns:
-            Detailed skill records for the requested names that are applicable and found;
-            names that do not exist or are filtered out are silently omitted.
+            Detailed skill records for the requested names that are applicable
+            and found; names that do not exist or are filtered out are silently
+            omitted.
         """
         ...
 
@@ -115,14 +121,16 @@ class SkillProvider(Protocol):
         """List skills with pagination, independent of any search query.
 
         Args:
-            req: Pagination and filter parameters (page, page_size, task_type, origin,
-                tags, namespace).
+            req: Pagination and filter parameters (page, page_size, task_type,
+                origin, tags, namespace).
             tool_context: Caller-scoped context used to filter skills by scope.
-            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
-                filter out skills the caller cannot use.
+            capability_context: Optional snapshot of allowed
+                tools/namespaces/tags used to filter out skills the caller
+                cannot use.
 
         Returns:
-            A page of lightweight skill entries plus the total applicable count.
+            A page of lightweight skill entries plus the total applicable
+            count.
         """
         ...
 
@@ -133,18 +141,19 @@ class SkillProvider(Protocol):
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> Sequence[SkillDirectoryEntry]:
-        """Build the always-available skills directory listing (pinned plus recent/top).
+        """Build the always-on skills directory (pinned plus recent/top).
 
         Args:
-            config: Directory configuration (enabled flag, max entries, selection
-                strategy).
+            config: Directory configuration (enabled flag, max entries,
+                selection strategy).
             tool_context: Caller-scoped context used to filter skills by scope.
-            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
-                filter out skills the caller cannot use.
+            capability_context: Optional snapshot of allowed
+                tools/namespaces/tags used to filter out skills the caller
+                cannot use.
 
         Returns:
-            Directory entries in priority order (pinned first), or an empty sequence
-            when the directory is disabled.
+            Directory entries in priority order (pinned first), or an empty
+            sequence when the directory is disabled.
         """
         ...
 
@@ -162,15 +171,15 @@ class SkillProvider(Protocol):
 
         Returns:
             A tuple of ``(formatted_text, raw_tokens_est, final_tokens_est,
-            was_summarized)`` where ``was_summarized`` indicates content was trimmed to
-            fit the budget.
+            was_summarized)`` where ``was_summarized`` indicates content was
+            trimmed to fit the budget.
         """
         ...
 
 
-# Factory signature for constructing a SkillProvider from a SkillsConfig. Implementations
-# typically use this to lazily build a LocalSkillProvider (or composite) once
-# configuration is available, e.g. at flow/agent startup.
+# Factory signature for constructing a SkillProvider from a SkillsConfig.
+# Implementations typically use this to lazily build a LocalSkillProvider (or
+# composite) once configuration is available, e.g. at flow/agent startup.
 SkillProviderFactory = Callable[[SkillsConfig], SkillProvider]
 
 
@@ -178,18 +187,26 @@ def _estimate_tokens(text: str) -> int:
     return int(len(text) / 4)
 
 
-def _build_scope_filter(tool_context: Mapping[str, object]) -> tuple[str, list[object]]:
+def _build_scope_filter(
+    tool_context: Mapping[str, object],
+) -> tuple[str, list[object]]:
     tenant_id = tool_context.get("tenant_id")
     project_id = tool_context.get("project_id")
     parts: list[str] = ["scope_mode = 'global'"]
     params: list[object] = []
     if tenant_id:
-        parts.append("(scope_mode = 'tenant' AND (scope_tenant_id IS NULL OR scope_tenant_id = ?))")
+        parts.append(
+            "(scope_mode = 'tenant' AND (scope_tenant_id IS NULL OR "
+            "scope_tenant_id = ?))"
+        )
         params.append(str(tenant_id))
     else:
         parts.append("(scope_mode = 'tenant' AND scope_tenant_id IS NULL)")
     if project_id:
-        parts.append("(scope_mode = 'project' AND (scope_project_id IS NULL OR scope_project_id = ?))")
+        parts.append(
+            "(scope_mode = 'project' AND (scope_project_id IS NULL OR "
+            "scope_project_id = ?))"
+        )
         params.append(str(project_id))
     else:
         parts.append("(scope_mode = 'project' AND scope_project_id IS NULL)")
@@ -206,29 +223,36 @@ def build_skill_capability_context(
     all_tool_names: Iterable[str] | None = None,
     allowed_tool_names: Iterable[str] | None = None,
 ) -> SkillCapabilityContext:
-    """Build a :class:`SkillCapabilityContext` snapshot from tool execution specs and names.
+    """Build a :class:`SkillCapabilityContext` from tool execution specs.
 
     Args:
-        execution_specs: Optional mapping of tool name to tool spec, used to derive
-            `all_tool_names` when not given explicitly, and to read each tool's `tags`
-            attribute for `allowed_tool_tags`.
-        all_tool_names: Optional explicit set of every known tool name. Falls back to
-            the keys of `execution_specs` when omitted.
-        allowed_tool_names: Optional explicit set of tool names the caller may invoke.
-            Defaults to all known tool names when omitted (i.e. nothing is restricted).
+        execution_specs: Optional mapping of tool name to tool spec, used to
+            derive `all_tool_names` when not given explicitly, and to read each
+            tool's `tags` attribute for `allowed_tool_tags`.
+        all_tool_names: Optional explicit set of every known tool name. Falls
+            back to the keys of `execution_specs` when omitted.
+        allowed_tool_names: Optional explicit set of tool names the caller may
+            invoke. Defaults to all known tool names when omitted (i.e. nothing
+            is restricted).
 
     Returns:
-        A capability context with derived `allowed_namespaces` and `allowed_tool_tags`
-        computed from `allowed_tool_names`.
+        A capability context with derived `allowed_namespaces` and
+        `allowed_tool_tags` computed from `allowed_tool_names`.
     """
-    all_names = set(str(name) for name in (all_tool_names or ()) if str(name).strip())
+    all_names = {
+        str(name) for name in (all_tool_names or ()) if str(name).strip()
+    }
     if not all_names and execution_specs is not None:
-        all_names = {str(name) for name in execution_specs.keys() if str(name).strip()}
+        all_names = {
+            str(name) for name in execution_specs if str(name).strip()
+        }
 
     if allowed_tool_names is None:
         allowed_names = set(all_names)
     else:
-        allowed_names = {str(name) for name in allowed_tool_names if str(name).strip()}
+        allowed_names = {
+            str(name) for name in allowed_tool_names if str(name).strip()
+        }
 
     allowed_namespaces: set[str] = set()
     allowed_tool_tags: set[str] = set()
@@ -253,21 +277,35 @@ def _tool_redaction_sets(
 ) -> tuple[set[str], bool]:
     if capability_context is None or not capability_context.all_tool_names:
         return set(), False
-    disallowed = capability_context.all_tool_names - capability_context.allowed_tool_names
-    tool_search_allowed = "tool_search" in capability_context.allowed_tool_names
+    disallowed = (
+        capability_context.all_tool_names
+        - capability_context.allowed_tool_names
+    )
+    tool_search_allowed = (
+        "tool_search" in capability_context.allowed_tool_names
+    )
     return disallowed, tool_search_allowed
 
 
-def _skill_is_applicable(skill: SkillRecord, capability_context: SkillCapabilityContext | None) -> bool:
+def _skill_is_applicable(
+    skill: SkillRecord, capability_context: SkillCapabilityContext | None
+) -> bool:
     if capability_context is None:
         return True
-    if skill.required_tool_names and not set(skill.required_tool_names).issubset(capability_context.allowed_tool_names):
+    if skill.required_tool_names and not set(
+        skill.required_tool_names
+    ).issubset(capability_context.allowed_tool_names):
         return False
-    if skill.required_namespaces and not set(skill.required_namespaces).issubset(capability_context.allowed_namespaces):
+    if skill.required_namespaces and not set(
+        skill.required_namespaces
+    ).issubset(capability_context.allowed_namespaces):
         return False
-    if skill.required_tags and not set(skill.required_tags).issubset(capability_context.allowed_tool_tags):
-        return False
-    return True
+    return not (
+        skill.required_tags
+        and not set(skill.required_tags).issubset(
+            capability_context.allowed_tool_tags
+        )
+    )
 
 
 def _redact_text(
@@ -350,6 +388,67 @@ def _redact_skill(
     )
 
 
+def _bullets(label: str, items: Sequence[str]) -> list[str]:
+    """Render ``items`` as an indented YAML-style list under ``label``."""
+    return [f"  {label}:", *(f"    - {item}" for item in items)]
+
+
+def _skill_block(
+    skill: SkillResultDetailed,
+    *,
+    include_optional: bool,
+    max_steps: int | None,
+) -> list[str]:
+    """Render one skill as YAML-style lines for the skills context."""
+    block = [f"- name: {skill.name}"]
+    if skill.title:
+        block.append(f"  title: {skill.title}")
+    block.append(f"  trigger: {skill.trigger}")
+    for label, values in (
+        ("required_tool_names", skill.required_tool_names),
+        ("required_namespaces", skill.required_namespaces),
+        ("required_tags", skill.required_tags),
+    ):
+        if values:
+            block.append(f"  {label}: {', '.join(values)}")
+    steps = skill.steps if max_steps is None else skill.steps[:max_steps]
+    block.extend(_bullets("steps", steps))
+    if include_optional:
+        if skill.preconditions:
+            block.extend(_bullets("preconditions", skill.preconditions))
+        if skill.failure_modes:
+            block.extend(_bullets("failure_modes", skill.failure_modes))
+    return block
+
+
+def _fitting_skill_block(
+    skill: SkillResultDetailed,
+    *,
+    lines: list[str],
+    header: list[str],
+    footer: list[str],
+    max_tokens: int,
+) -> tuple[list[str], bool] | None:
+    """Return the fullest block that fits the budget, and if it was trimmed.
+
+    Tries the full block, then without optional sections, then with at most
+    three steps. Returns ``None`` when none of them fits.
+    """
+    attempts: list[tuple[bool, int | None]] = [
+        (True, None),
+        (False, None),
+        (False, min(3, len(skill.steps))),
+    ]
+    for include_optional, max_steps in attempts:
+        block = _skill_block(
+            skill, include_optional=include_optional, max_steps=max_steps
+        )
+        candidate_text = "\n".join(header + lines + block + footer)
+        if _estimate_tokens(candidate_text) <= max_tokens:
+            return block, not include_optional or max_steps is not None
+    return None
+
+
 def _format_skills_for_injection(
     skills: Sequence[SkillResultDetailed],
     *,
@@ -357,75 +456,33 @@ def _format_skills_for_injection(
 ) -> tuple[str, int, int, bool]:
     if not skills:
         return "", 0, 0, False
-    header = ["<skills_context>", "Relevant skills (use skill_get for full details):"]
+    header = [
+        "<skills_context>",
+        "Relevant skills (use skill_get for full details):",
+    ]
     footer = ["</skills_context>"]
     lines: list[str] = []
     was_summarized = False
 
-    def _skill_block(
-        skill: SkillResultDetailed,
-        *,
-        include_optional: bool,
-        max_steps: int | None,
-    ) -> list[str]:
-        block = [f"- name: {skill.name}"]
-        if skill.title:
-            block.append(f"  title: {skill.title}")
-        block.append(f"  trigger: {skill.trigger}")
-        if skill.required_tool_names:
-            block.append(f"  required_tool_names: {', '.join(skill.required_tool_names)}")
-        if skill.required_namespaces:
-            block.append(f"  required_namespaces: {', '.join(skill.required_namespaces)}")
-        if skill.required_tags:
-            block.append(f"  required_tags: {', '.join(skill.required_tags)}")
-        steps = skill.steps
-        if max_steps is not None:
-            steps = steps[:max_steps]
-        block.append("  steps:")
-        for step in steps:
-            block.append(f"    - {step}")
-        if include_optional:
-            if skill.preconditions:
-                block.append("  preconditions:")
-                for item in skill.preconditions:
-                    block.append(f"    - {item}")
-            if skill.failure_modes:
-                block.append("  failure_modes:")
-                for item in skill.failure_modes:
-                    block.append(f"    - {item}")
-        return block
-
     for skill in skills:
-        attempts = [
-            (True, None),
-            (False, None),
-            (False, min(3, len(skill.steps))),
-        ]
-        added = False
-        for include_optional, max_steps in attempts:
-            candidate_lines = (
-                header
-                + lines
-                + _skill_block(
-                    skill,
-                    include_optional=include_optional,
-                    max_steps=max_steps,
-                )
-                + footer
-            )
-            candidate_text = "\n".join(candidate_lines)
-            if _estimate_tokens(candidate_text) <= max_tokens:
-                lines.extend(_skill_block(skill, include_optional=include_optional, max_steps=max_steps))
-                if include_optional is False or max_steps is not None:
-                    was_summarized = True
-                added = True
-                break
-        if not added:
+        fitted = _fitting_skill_block(
+            skill,
+            lines=lines,
+            header=header,
+            footer=footer,
+            max_tokens=max_tokens,
+        )
+        if fitted is None:
             was_summarized = True
             break
+        block, trimmed = fitted
+        lines.extend(block)
+        was_summarized = was_summarized or trimmed
 
     text = "\n".join(header + lines + footer) if lines else ""
-    raw_tokens = _estimate_tokens("\n".join(header + lines + footer)) if lines else 0
+    raw_tokens = (
+        _estimate_tokens("\n".join(header + lines + footer)) if lines else 0
+    )
     final_tokens = _estimate_tokens(text) if text else 0
     return text, raw_tokens, final_tokens, was_summarized
 
@@ -446,14 +503,18 @@ def _dedupe_by_name(items: Sequence[_T], key: Callable[[_T], str]) -> list[_T]:
 
 
 class LocalSkillProvider:
-    """Default :class:`SkillProvider` backed by a local SQLite-based skill store.
+    """Default :class:`SkillProvider` backed by a local SQLite skill store.
 
-    Loads skills from configured `SkillPackConfig` packs into a `LocalSkillStore` and
-    serves retrieval, search, listing, and directory queries against it, applying scope
-    filtering, capability-based redaction, and PII redaction as configured.
+    Loads skills from configured `SkillPackConfig` packs into a
+    `LocalSkillStore` and serves retrieval, search, listing, and directory
+    queries against it, applying scope filtering, capability-based redaction,
+    and PII redaction as configured.
     """
 
-    def __init__(self, config: SkillsConfig, *, store: LocalSkillStore | None = None) -> None:
+    def __init__(
+        self, config: SkillsConfig, *, store: LocalSkillStore | None = None
+    ) -> None:
+        """Open the local store and configure retrieval from ``config``."""
         self._config = config
         db_path = Path(config.cache_dir) / "skills.db"
         self._store = store or LocalSkillStore(
@@ -464,9 +525,12 @@ class LocalSkillProvider:
         self._pinned_names = _collect_pinned_names(config.skill_packs)
 
     def load_packs(self) -> list[SkillPackLoadResult]:
+        """Load the configured skill packs into the local store."""
         results: list[SkillPackLoadResult] = []
         keep_packs: set[tuple[str, SkillScopeMode]] = {
-            (pack.name, pack.scope_mode) for pack in self._config.skill_packs if pack.enabled
+            (pack.name, pack.scope_mode)
+            for pack in self._config.skill_packs
+            if pack.enabled
         }
         for pack in self._config.skill_packs:
             if not pack.enabled:
@@ -500,7 +564,9 @@ class LocalSkillProvider:
             )
 
         if self._config.prune_packs_not_in_config:
-            removed = self._store.prune_packs_not_in_config(keep_packs=keep_packs)
+            removed = self._store.prune_packs_not_in_config(
+                keep_packs=keep_packs
+            )
             for pack_name, scope_mode, removed_count in removed:
                 results.append(
                     SkillPackLoadResult(
@@ -517,7 +583,11 @@ class LocalSkillProvider:
         records: Sequence[SkillRecord],
         capability_context: SkillCapabilityContext | None,
     ) -> list[SkillRecord]:
-        return [record for record in records if _skill_is_applicable(record, capability_context)]
+        return [
+            record
+            for record in records
+            if _skill_is_applicable(record, capability_context)
+        ]
 
     def _search_records(
         self,
@@ -544,8 +614,10 @@ class LocalSkillProvider:
             namespace=namespace,
         )
         names = [item["name"] for item in results]
-        records = self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params)
-        return records, cast(SkillSearchType, effective)
+        records = self._store.get_by_name(
+            names, scope_clause=scope_clause, scope_params=scope_params
+        )
+        return records, effective
 
     def _collect_applicable_search_records(
         self,
@@ -562,7 +634,7 @@ class LocalSkillProvider:
     ) -> tuple[list[SkillRecord], SkillSearchType]:
         batch_size = max(int(target_count), 1)
         offset = 0
-        effective = cast(SkillSearchType, search_type)
+        effective = search_type
         collected: list[SkillRecord] = []
         seen: set[str] = set()
         while len(collected) < target_count:
@@ -597,6 +669,7 @@ class LocalSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> RetrievalResponse:
+        """Return the skills relevant to ``query``, formatted for injection."""
         scope_clause, scope_params = _build_scope_filter(tool_context)
         applicable, effective = self._collect_applicable_search_records(
             query=query.task,
@@ -609,7 +682,9 @@ class LocalSkillProvider:
             tags=tuple(query.tags),
             namespace=query.namespace,
         )
-        disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
+        disallowed, tool_search_allowed = _tool_redaction_sets(
+            capability_context
+        )
         detailed = [
             _redact_skill(
                 record,
@@ -621,9 +696,11 @@ class LocalSkillProvider:
         ]
         if applicable:
             self._store.touch([record.name for record in applicable])
-        formatted, raw_tokens, final_tokens, summarized = _format_skills_for_injection(
-            detailed,
-            max_tokens=self._config.max_tokens,
+        formatted, raw_tokens, final_tokens, summarized = (
+            _format_skills_for_injection(
+                detailed,
+                max_tokens=self._config.max_tokens,
+            )
         )
         return RetrievalResponse(
             skills=detailed,
@@ -643,6 +720,7 @@ class LocalSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> SkillSearchResponse:
+        """Search skills matching ``query``."""
         scope_clause, scope_params = _build_scope_filter(tool_context)
         query_tags = tuple(query.tags)
         query_namespace = query.namespace
@@ -656,18 +734,20 @@ class LocalSkillProvider:
             tags=query_tags,
             namespace=query_namespace,
         )
-        effective = cast(SkillSearchType, effective)
+        effective = effective
         if capability_context is not None:
-            applicable_records, effective = self._collect_applicable_search_records(
-                query=query.query,
-                search_type=effective,
-                target_count=query.limit,
-                task_type=query.task_type,
-                scope_clause=scope_clause,
-                scope_params=scope_params,
-                capability_context=capability_context,
-                tags=query_tags,
-                namespace=query_namespace,
+            applicable_records, effective = (
+                self._collect_applicable_search_records(
+                    query=query.query,
+                    search_type=effective,
+                    target_count=query.limit,
+                    task_type=query.task_type,
+                    scope_clause=scope_clause,
+                    scope_params=scope_params,
+                    capability_context=capability_context,
+                    tags=query_tags,
+                    namespace=query_namespace,
+                )
             )
             applicable_names = {record.name for record in applicable_records}
             if applicable_names:
@@ -681,7 +761,11 @@ class LocalSkillProvider:
                     tags=query_tags,
                     namespace=query_namespace,
                 )
-                filtered_results = [item for item in results if item["name"] in applicable_names]
+                filtered_results = [
+                    item
+                    for item in results
+                    if item["name"] in applicable_names
+                ]
                 if len(filtered_results) < len(applicable_names):
                     offset = len(results)
                     while len(filtered_results) < len(applicable_names):
@@ -698,7 +782,11 @@ class LocalSkillProvider:
                         )
                         if not batch:
                             break
-                        filtered_results.extend(item for item in batch if item["name"] in applicable_names)
+                        filtered_results.extend(
+                            item
+                            for item in batch
+                            if item["name"] in applicable_names
+                        )
                         offset += len(batch)
                 results = filtered_results[: query.limit]
             else:
@@ -708,11 +796,17 @@ class LocalSkillProvider:
             applicable_names = {
                 record.name
                 for record in self._applicable_records(
-                    self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params),
+                    self._store.get_by_name(
+                        names,
+                        scope_clause=scope_clause,
+                        scope_params=scope_params,
+                    ),
                     capability_context,
                 )
             }
-        disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
+        disallowed, tool_search_allowed = _tool_redaction_sets(
+            capability_context
+        )
         payload = [
             SkillSearchResult(
                 name=item["name"],
@@ -734,7 +828,9 @@ class LocalSkillProvider:
             for item in results
             if item["name"] in applicable_names
         ]
-        return SkillSearchResponse(skills=payload, query=query.query, search_type=effective)
+        return SkillSearchResponse(
+            skills=payload, query=query.query, search_type=effective
+        )
 
     async def get_by_name(
         self,
@@ -743,10 +839,15 @@ class LocalSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> list[SkillResultDetailed]:
+        """Return the named skills the caller may use."""
         scope_clause, scope_params = _build_scope_filter(tool_context)
-        records = self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params)
+        records = self._store.get_by_name(
+            names, scope_clause=scope_clause, scope_params=scope_params
+        )
         applicable = self._applicable_records(records, capability_context)
-        disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
+        disallowed, tool_search_allowed = _tool_redaction_sets(
+            capability_context
+        )
         detailed = [
             _redact_skill(
                 record,
@@ -767,6 +868,7 @@ class LocalSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> SkillListResponse:
+        """List skills page by page."""
         scope_clause, scope_params = _build_scope_filter(tool_context)
         req_tags = tuple(req.tags)
         req_namespace = req.namespace
@@ -793,12 +895,16 @@ class LocalSkillProvider:
                 tags=req_tags,
                 namespace=req_namespace,
             )
-            applicable_records = self._applicable_records(all_records, capability_context)
+            applicable_records = self._applicable_records(
+                all_records, capability_context
+            )
             total = len(applicable_records)
             start = (max(req.page, 1) - 1) * max(req.page_size, 1)
             end = start + max(req.page_size, 1)
             applicable = applicable_records[start:end]
-        disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
+        disallowed, tool_search_allowed = _tool_redaction_sets(
+            capability_context
+        )
         entries = [
             SkillListEntry(
                 name=record.name,
@@ -818,7 +924,12 @@ class LocalSkillProvider:
             )
             for record in applicable
         ]
-        return SkillListResponse(skills=entries, page=req.page, page_size=req.page_size, total=int(total))
+        return SkillListResponse(
+            skills=entries,
+            page=req.page,
+            page_size=req.page_size,
+            total=int(total),
+        )
 
     async def directory(
         self,
@@ -827,6 +938,7 @@ class LocalSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> Sequence[SkillDirectoryEntry]:
+        """Return the always-on skills directory entries."""
         if not config.enabled:
             return []
         scope_clause, scope_params = _build_scope_filter(tool_context)
@@ -867,7 +979,9 @@ class LocalSkillProvider:
         else:
             extra = []
         records = pinned_records + extra
-        disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
+        disallowed, tool_search_allowed = _tool_redaction_sets(
+            capability_context
+        )
         return [
             SkillDirectoryEntry(
                 name=record.name,
@@ -894,19 +1008,23 @@ class LocalSkillProvider:
         *,
         max_tokens: int,
     ) -> tuple[str, int, int, bool]:
+        """Format skills for prompt injection within ``max_tokens``."""
         return _format_skills_for_injection(skills, max_tokens=max_tokens)
 
 
 class CompositeSkillProvider:
-    """:class:`SkillProvider` that fans a query out across multiple providers and merges results.
+    """:class:`SkillProvider` that fans queries out and merges results.
 
-    Useful for combining a local pack-backed provider with a remote/learned-skill
-    provider; results are deduplicated by skill name (first provider wins) and
-    truncated to the requested size.
+    Useful for combining a local pack-backed provider with a
+    remote/learned-skill provider; results are deduplicated by skill name
+    (first provider wins) and truncated to the requested size.
     """
 
-    def __init__(self, providers: Sequence[SkillProvider], *, config: SkillsConfig) -> None:
-        self._providers = [provider for provider in providers]
+    def __init__(
+        self, providers: Sequence[SkillProvider], *, config: SkillsConfig
+    ) -> None:
+        """Combine ``providers`` under one configuration."""
+        self._providers = list(providers)
         self._config = config
 
     def _fanout_multiplier(self) -> int:
@@ -933,7 +1051,10 @@ class CompositeSkillProvider:
             if not response.skills:
                 break
             collected.extend(response.skills)
-            if len(collected) >= response.total or len(response.skills) < req.page_size:
+            if (
+                len(collected) >= response.total
+                or len(response.skills) < req.page_size
+            ):
                 break
             page += 1
         return collected, total
@@ -945,7 +1066,10 @@ class CompositeSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> RetrievalResponse:
-        expanded_query = query.model_copy(update={"top_k": query.top_k * self._fanout_multiplier()})
+        """Merge each provider's relevant skills for ``query``."""
+        expanded_query = query.model_copy(
+            update={"top_k": query.top_k * self._fanout_multiplier()}
+        )
         responses = [
             await provider.get_relevant(
                 expanded_query,
@@ -958,12 +1082,14 @@ class CompositeSkillProvider:
             [skill for response in responses for skill in response.skills],
             key=lambda item: item.name,
         )[: query.top_k]
-        formatted, raw_tokens, final_tokens, summarized = _format_skills_for_injection(
-            skills,
-            max_tokens=self._config.max_tokens,
+        formatted, raw_tokens, final_tokens, summarized = (
+            _format_skills_for_injection(
+                skills,
+                max_tokens=self._config.max_tokens,
+            )
         )
         effective_search_type = (
-            responses[0].search_type if responses else cast(SkillSearchType, query.search_type)
+            responses[0].search_type if responses else query.search_type
         )
         return RetrievalResponse(
             skills=skills,
@@ -983,7 +1109,10 @@ class CompositeSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> SkillSearchResponse:
-        expanded_query = query.model_copy(update={"limit": query.limit * self._fanout_multiplier()})
+        """Merge each provider's search matches for ``query``."""
+        expanded_query = query.model_copy(
+            update={"limit": query.limit * self._fanout_multiplier()}
+        )
         responses = [
             await provider.search(
                 expanded_query,
@@ -997,9 +1126,11 @@ class CompositeSkillProvider:
             key=lambda item: item.name,
         )[: query.limit]
         effective_search_type = (
-            responses[0].search_type if responses else cast(SkillSearchType, query.search_type)
+            responses[0].search_type if responses else query.search_type
         )
-        return SkillSearchResponse(skills=skills, query=query.query, search_type=effective_search_type)
+        return SkillSearchResponse(
+            skills=skills, query=query.query, search_type=effective_search_type
+        )
 
     async def get_by_name(
         self,
@@ -1008,6 +1139,7 @@ class CompositeSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> list[SkillResultDetailed]:
+        """Return the named skills from every provider."""
         results = [
             await provider.get_by_name(
                 names,
@@ -1017,7 +1149,11 @@ class CompositeSkillProvider:
             for provider in self._providers
         ]
         detailed = _dedupe_by_name(
-            [skill for provider_results in results for skill in provider_results],
+            [
+                skill
+                for provider_results in results
+                for skill in provider_results
+            ],
             key=lambda item: item.name,
         )
         lookup = {item.name: item for item in detailed}
@@ -1030,6 +1166,7 @@ class CompositeSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> SkillListResponse:
+        """Merge each provider's skill listing."""
         responses = [
             await self._collect_provider_entries(
                 provider,
@@ -1040,12 +1177,21 @@ class CompositeSkillProvider:
             for provider in self._providers
         ]
         skills = _dedupe_by_name(
-            [skill for provider_entries, _total in responses for skill in provider_entries],
+            [
+                skill
+                for provider_entries, _total in responses
+                for skill in provider_entries
+            ],
             key=lambda item: item.name,
         )
         offset = max((req.page - 1) * req.page_size, 0)
         paged = skills[offset : offset + req.page_size]
-        return SkillListResponse(skills=paged, page=req.page, page_size=req.page_size, total=len(skills))
+        return SkillListResponse(
+            skills=paged,
+            page=req.page,
+            page_size=req.page_size,
+            total=len(skills),
+        )
 
     async def directory(
         self,
@@ -1054,7 +1200,12 @@ class CompositeSkillProvider:
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
     ) -> Sequence[SkillDirectoryEntry]:
-        expanded_config = config.model_copy(update={"max_entries": config.max_entries * self._fanout_multiplier()})
+        """Merge each provider's directory entries."""
+        expanded_config = config.model_copy(
+            update={
+                "max_entries": config.max_entries * self._fanout_multiplier()
+            }
+        )
         entries = [
             await provider.directory(
                 expanded_config,
@@ -1064,7 +1215,11 @@ class CompositeSkillProvider:
             for provider in self._providers
         ]
         return _dedupe_by_name(
-            [entry for provider_entries in entries for entry in provider_entries],
+            [
+                entry
+                for provider_entries in entries
+                for entry in provider_entries
+            ],
             key=lambda item: item.name,
         )[: config.max_entries]
 
@@ -1074,6 +1229,7 @@ class CompositeSkillProvider:
         *,
         max_tokens: int,
     ) -> tuple[str, int, int, bool]:
+        """Format skills for prompt injection within ``max_tokens``."""
         return _format_skills_for_injection(skills, max_tokens=max_tokens)
 
 

@@ -17,12 +17,14 @@ MAX_TOOLS = 32
 MAX_TOOL_SCHEMA_KEYS = 16
 
 PROFILES: dict[str, ModelProfile] = {
-    # ==========================================================================
+    #  ========================================================================
     # OpenAI GPT-5 Series on Databricks (January 2026)
-    # ==========================================================================
+    #  ========================================================================
     "databricks-gpt-5-5-pro": ModelProfile(
-        supports_native_tool_calls=False,  # chat-completions rejects tools; needs Responses API
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # chat-completions rejects tools; needs Responses API
+        supports_native_tool_calls=False,
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -38,8 +40,10 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-5": ModelProfile(
-        supports_native_tool_calls=False,  # chat-completions rejects tools; needs Responses API
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # chat-completions rejects tools; needs Responses API
+        supports_native_tool_calls=False,
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -55,7 +59,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-4-mini": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -71,7 +76,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-4-nano": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -87,7 +93,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-2": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -103,7 +110,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-1": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -119,7 +127,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -135,7 +144,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-mini": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -151,7 +161,8 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=128000,
     ),
     "databricks-gpt-5-nano": ModelProfile(
-        supports_temperature=False,  # GPT-5 reasoning: only the default temperature
+        # GPT-5 reasoning: only the default temperature
+        supports_temperature=False,
         supports_schema_guided_output=True,
         supports_json_only_output=True,
         supports_tools=True,
@@ -196,12 +207,15 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=128000,
         max_output_tokens=16000,
     ),
-    # ==========================================================================
+    #  ========================================================================
     # Anthropic Claude Series on Databricks (January 2026)
-    # ==========================================================================
+    #  ========================================================================
     "databricks-claude-opus-4-8": ModelProfile(
-        supports_temperature=False,  # Databricks route rejects the temperature param
-        unsupported_request_params=frozenset({"temperature", "top_p", "top_k"}),
+        # Databricks route rejects the temperature param
+        supports_temperature=False,
+        unsupported_request_params=frozenset(
+            {"temperature", "top_p", "top_k"}
+        ),
         supports_schema_guided_output=True,
         supports_json_only_output=False,  # Only schema-guided, not json_object
         supports_tools=True,
@@ -213,7 +227,8 @@ PROFILES: dict[str, ModelProfile] = {
         schema_transformer_name="DatabricksJsonSchemaTransformer",
         reasoning_request_style="adaptive_effort",
         reasoning_display_default="omitted",
-        preferred_transport="native",  # generic transport cannot parse reasoning content blocks
+        # generic transport cannot parse reasoning content blocks
+        preferred_transport="native",
         strict_mode_default=True,
         max_tools=MAX_TOOLS,
         max_schema_keys=MAX_SCHEMA_KEYS,
@@ -221,8 +236,11 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=64000,
     ),
     "databricks-claude-opus-4-7": ModelProfile(
-        supports_temperature=False,  # Databricks route rejects the temperature param
-        unsupported_request_params=frozenset({"temperature", "top_p", "top_k"}),
+        # Databricks route rejects the temperature param
+        supports_temperature=False,
+        unsupported_request_params=frozenset(
+            {"temperature", "top_p", "top_k"}
+        ),
         supports_schema_guided_output=True,
         supports_json_only_output=False,  # Only schema-guided, not json_object
         supports_tools=True,
@@ -234,7 +252,8 @@ PROFILES: dict[str, ModelProfile] = {
         schema_transformer_name="DatabricksJsonSchemaTransformer",
         reasoning_request_style="adaptive_effort",
         reasoning_display_default="omitted",
-        preferred_transport="native",  # generic transport cannot parse reasoning content blocks
+        # generic transport cannot parse reasoning content blocks
+        preferred_transport="native",
         strict_mode_default=True,
         max_tools=MAX_TOOLS,
         max_schema_keys=MAX_SCHEMA_KEYS,
@@ -242,8 +261,11 @@ PROFILES: dict[str, ModelProfile] = {
         max_output_tokens=64000,
     ),
     "databricks-claude-sonnet-5": ModelProfile(
-        supports_temperature=False,  # Databricks route rejects the temperature param
-        unsupported_request_params=frozenset({"temperature", "top_p", "top_k"}),
+        # Databricks route rejects the temperature param
+        supports_temperature=False,
+        unsupported_request_params=frozenset(
+            {"temperature", "top_p", "top_k"}
+        ),
         supports_schema_guided_output=True,
         supports_json_only_output=False,  # Only schema-guided, not json_object
         supports_tools=True,
@@ -255,7 +277,8 @@ PROFILES: dict[str, ModelProfile] = {
         schema_transformer_name="DatabricksJsonSchemaTransformer",
         reasoning_request_style="adaptive_effort",
         reasoning_display_default="omitted",
-        preferred_transport="native",  # generic transport cannot parse reasoning content blocks
+        # generic transport cannot parse reasoning content blocks
+        preferred_transport="native",
         strict_mode_default=True,
         max_tools=MAX_TOOLS,
         max_schema_keys=MAX_SCHEMA_KEYS,
@@ -279,7 +302,8 @@ PROFILES: dict[str, ModelProfile] = {
         supports_schema_guided_output=True,
         supports_json_only_output=False,
         supports_tools=True,
-        supports_reasoning=True,  # Hybrid reasoning, near-instant or extended thinking
+        # Hybrid reasoning, near-instant or extended thinking
+        supports_reasoning=True,
         supports_streaming=True,
         default_output_mode="native",
         native_structured_kind="databricks_constrained_decoding",
@@ -351,9 +375,9 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=200000,
         max_output_tokens=8192,
     ),
-    # ==========================================================================
+    #  ========================================================================
     # Google Gemini Series on Databricks (January 2026)
-    # ==========================================================================
+    #  ========================================================================
     "databricks-gemini-3-5-flash": ModelProfile(
         supports_schema_guided_output=True,
         supports_json_only_output=True,
@@ -444,9 +468,9 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=128000,
         max_output_tokens=8192,
     ),
-    # ==========================================================================
+    #  ========================================================================
     # Meta Llama Series on Databricks (January 2026)
-    # ==========================================================================
+    #  ========================================================================
     "databricks-llama-4-maverick": ModelProfile(
         supports_schema_guided_output=True,
         supports_json_only_output=True,
@@ -508,9 +532,9 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=128000,
         max_output_tokens=4096,
     ),
-    # ==========================================================================
+    #  ========================================================================
     # Alibaba Qwen on Databricks (January 2026)
-    # ==========================================================================
+    #  ========================================================================
     "databricks-qwen3-next-80b-a3b-instruct": ModelProfile(
         supports_schema_guided_output=True,
         supports_json_only_output=True,
@@ -526,9 +550,9 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=128000,
         max_output_tokens=8192,
     ),
-    # ==========================================================================
+    #  ========================================================================
     # Legacy Models (kept for backward compatibility)
-    # ==========================================================================
+    #  ========================================================================
     # DBRX - Databricks' own model
     "databricks-dbrx-instruct": ModelProfile(
         supports_schema_guided_output=True,

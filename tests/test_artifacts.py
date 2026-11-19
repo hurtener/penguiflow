@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import pytest
@@ -59,6 +60,7 @@ class TestArtifactRef:
         assert ref.size_bytes == 1024
         assert ref.filename == "report.pdf"
         assert ref.sha256 == "a" * 64
+        assert ref.scope is not None
         assert ref.scope.session_id == "session1"
         assert ref.namespace == "tableau"
         assert ref.source["tool"] == "tableau.download_workbook"
@@ -113,15 +115,23 @@ class TestArtifactNamespaceSanitization:
     """Tests for artifact namespace normalization."""
 
     def test_sanitize_artifact_namespace_allows_supported_chars(self) -> None:
-        assert sanitize_artifact_namespace("pengui_slides-app_01") == "pengui_slides-app_01"
+        """Sanitize artifact namespace allows supported chars."""
+        assert (
+            sanitize_artifact_namespace("pengui_slides-app_01")
+            == "pengui_slides-app_01"
+        )
 
     def test_sanitize_artifact_namespace_replaces_dots(self) -> None:
+        """Sanitize artifact namespace replaces dots."""
         assert (
-            sanitize_artifact_namespace("observation.pengui_slides.get_design_soul")
+            sanitize_artifact_namespace(
+                "observation.pengui_slides.get_design_soul"
+            )
             == "observation_pengui_slides_get_design_soul"
         )
 
     def test_sanitize_artifact_namespace_returns_none_when_empty(self) -> None:
+        """Sanitize artifact namespace returns none when empty."""
         assert sanitize_artifact_namespace("...") is None
 
 
@@ -355,7 +365,7 @@ class TestInMemoryArtifactStore:
 
     @pytest.mark.asyncio
     async def test_dotted_namespace_is_sanitized_in_id_only(self) -> None:
-        """Dotted namespaces should produce backend-safe IDs without losing metadata."""
+        """Dotted namespaces give backend-safe IDs and keep metadata."""
         store = InMemoryArtifactStore()
         raw_namespace = "observation.pengui_slides.get_design_soul"
 
@@ -469,8 +479,8 @@ class TestInMemoryArtifactStoreEviction:
         ref2 = await store.put_bytes(b"data2", namespace="ns2")
         assert store.count == 2
 
-        # Store a 3rd - with cleanup_strategy='none', eviction is skipped
-        # so the artifact is still added (exceeds limit)
+        # Store a 3rd - with cleanup_strategy='none', eviction is skipped so
+        # the artifact is still added (exceeds limit)
         ref3 = await store.put_bytes(b"data3", namespace="ns3")
         assert store.count == 3
         assert await store.exists(ref1.id) is True
@@ -551,27 +561,31 @@ class TestNoOpArtifactStoreWarning:
     """Tests for NoOpArtifactStore warning behavior."""
 
     @pytest.mark.asyncio
-    async def test_warning_only_once(self) -> None:
+    async def test_warning_only_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Test that warning is only logged once per store instance."""
         store = NoOpArtifactStore()
 
-        # First put_bytes should set _warned = True
-        ref1 = await store.put_bytes(b"data1")
-        assert store._warned is True
+        with caplog.at_level(logging.WARNING, logger="penguiflow.artifacts"):
+            ref1 = await store.put_bytes(b"data1")
+            ref2 = await store.put_bytes(b"data2")
 
-        # Second put_bytes should not log warning again
-        ref2 = await store.put_bytes(b"data2")
+        assert len(caplog.records) == 1
         assert ref1.source["warning"] is not None
         assert ref2.source["warning"] is not None
 
     @pytest.mark.asyncio
-    async def test_put_text_warning(self) -> None:
+    async def test_put_text_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Test that put_text also triggers warning on first call."""
         store = NoOpArtifactStore()
 
-        # First put_text should set _warned = True
-        ref = await store.put_text("test text")
-        assert store._warned is True
+        with caplog.at_level(logging.WARNING, logger="penguiflow.artifacts"):
+            ref = await store.put_text("test text")
+
+        assert len(caplog.records) == 1
         assert ref.source["truncated"] is True
 
     @pytest.mark.asyncio
@@ -629,9 +643,13 @@ class TestInMemoryArtifactStoreList:
     async def test_list_no_scope_returns_all(self) -> None:
         """list(scope=None) returns all artifacts."""
         store = InMemoryArtifactStore()
-        await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(tenant_id="t1"))
+        await store.put_bytes(
+            b"a", namespace="ns1", scope=ArtifactScope(tenant_id="t1")
+        )
         await store.put_bytes(b"b", namespace="ns2")  # no scope
-        await store.put_text("c", namespace="ns3", scope=ArtifactScope(session_id="s1"))
+        await store.put_text(
+            "c", namespace="ns3", scope=ArtifactScope(session_id="s1")
+        )
 
         result = await store.list(scope=None)
         assert len(result) == 3
@@ -640,31 +658,49 @@ class TestInMemoryArtifactStoreList:
     async def test_list_filters_by_tenant_id(self) -> None:
         """Filter by tenant_id returns only matching artifacts."""
         store = InMemoryArtifactStore()
-        await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(tenant_id="t1"))
-        await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(tenant_id="t2"))
-        await store.put_bytes(b"c", namespace="ns3", scope=ArtifactScope(tenant_id="t1"))
+        await store.put_bytes(
+            b"a", namespace="ns1", scope=ArtifactScope(tenant_id="t1")
+        )
+        await store.put_bytes(
+            b"b", namespace="ns2", scope=ArtifactScope(tenant_id="t2")
+        )
+        await store.put_bytes(
+            b"c", namespace="ns3", scope=ArtifactScope(tenant_id="t1")
+        )
 
         result = await store.list(scope=ArtifactScope(tenant_id="t1"))
         assert len(result) == 2
-        assert all(r.scope is not None and r.scope.tenant_id == "t1" for r in result)
+        assert all(
+            r.scope is not None and r.scope.tenant_id == "t1" for r in result
+        )
 
     @pytest.mark.asyncio
     async def test_list_filters_by_session_id(self) -> None:
         """Filter by session_id returns only matching artifacts."""
         store = InMemoryArtifactStore()
-        await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
-        await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
+        await store.put_bytes(
+            b"a", namespace="ns1", scope=ArtifactScope(session_id="s1")
+        )
+        await store.put_bytes(
+            b"b", namespace="ns2", scope=ArtifactScope(session_id="s2")
+        )
 
         result = await store.list(scope=ArtifactScope(session_id="s1"))
         assert len(result) == 1
-        assert result[0].scope is not None and result[0].scope.session_id == "s1"
+        assert (
+            result[0].scope is not None and result[0].scope.session_id == "s1"
+        )
 
     @pytest.mark.asyncio
     async def test_list_filters_by_user_id(self) -> None:
         """Filter by user_id returns only matching artifacts."""
         store = InMemoryArtifactStore()
-        await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(user_id="u1"))
-        await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(user_id="u2"))
+        await store.put_bytes(
+            b"a", namespace="ns1", scope=ArtifactScope(user_id="u1")
+        )
+        await store.put_bytes(
+            b"b", namespace="ns2", scope=ArtifactScope(user_id="u2")
+        )
 
         result = await store.list(scope=ArtifactScope(user_id="u1"))
         assert len(result) == 1
@@ -672,19 +708,27 @@ class TestInMemoryArtifactStoreList:
 
     @pytest.mark.asyncio
     async def test_list_filters_multiple_dimensions(self) -> None:
-        """Filter on tenant_id + session_id together returns only matching artifacts."""
+        """Filtering on tenant_id and session_id returns only matches."""
         store = InMemoryArtifactStore()
         await store.put_bytes(
-            b"a", namespace="ns1", scope=ArtifactScope(tenant_id="t1", session_id="s1")
+            b"a",
+            namespace="ns1",
+            scope=ArtifactScope(tenant_id="t1", session_id="s1"),
         )
         await store.put_bytes(
-            b"b", namespace="ns2", scope=ArtifactScope(tenant_id="t1", session_id="s2")
+            b"b",
+            namespace="ns2",
+            scope=ArtifactScope(tenant_id="t1", session_id="s2"),
         )
         await store.put_bytes(
-            b"c", namespace="ns3", scope=ArtifactScope(tenant_id="t2", session_id="s1")
+            b"c",
+            namespace="ns3",
+            scope=ArtifactScope(tenant_id="t2", session_id="s1"),
         )
 
-        result = await store.list(scope=ArtifactScope(tenant_id="t1", session_id="s1"))
+        result = await store.list(
+            scope=ArtifactScope(tenant_id="t1", session_id="s1")
+        )
         assert len(result) == 1
         ref = result[0]
         assert ref.scope is not None
@@ -693,7 +737,7 @@ class TestInMemoryArtifactStoreList:
 
     @pytest.mark.asyncio
     async def test_list_unscoped_artifacts_match_none_filter(self) -> None:
-        """Unscoped artifacts match all-None filter but fail non-None filter."""
+        """Unscoped artifacts match an all-None filter, not others."""
         store = InMemoryArtifactStore()
         await store.put_bytes(b"unscoped", namespace="ns1")  # scope=None
 
@@ -706,24 +750,19 @@ class TestInMemoryArtifactStoreList:
         assert len(result) == 0
 
     @pytest.mark.asyncio
-    async def test_list_expired_artifacts_excluded(self) -> None:
+    async def test_list_expired_artifacts_excluded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Expired artifacts are not returned by list()."""
         config = ArtifactRetentionConfig(ttl_seconds=10)
         store = InMemoryArtifactStore(retention=config)
 
-        ref = await store.put_bytes(b"data", namespace="ns1")
+        await store.put_bytes(b"data", namespace="ns1")
         assert len(await store.list()) == 1
 
-        # Manipulate created_at to simulate expiration
-        stored = store._artifacts[ref.id]
-        # Replace with a new _StoredArtifact with old created_at
-        from penguiflow.artifacts import _StoredArtifact
-
-        store._artifacts[ref.id] = _StoredArtifact(
-            ref=stored.ref,
-            data=stored.data,
-            created_at=time.time() - 20,  # 20 seconds ago, TTL is 10
-        )
+        # Move the clock 20 seconds ahead; the TTL is 10.
+        later = time.time() + 20
+        monkeypatch.setattr(time, "time", lambda: later)
 
         result = await store.list()
         assert len(result) == 0
@@ -748,20 +787,32 @@ class TestSessionArtifactStoreList:
     async def test_list_scoped_to_session(self) -> None:
         """list(scope=session_id) returns only that session's artifacts."""
         store = SessionArtifactStore()
-        await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
-        await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
+        await store.put_bytes(
+            b"a", namespace="ns1", scope=ArtifactScope(session_id="s1")
+        )
+        await store.put_bytes(
+            b"b", namespace="ns2", scope=ArtifactScope(session_id="s2")
+        )
 
         result = await store.list(scope=ArtifactScope(session_id="s1"))
         assert len(result) == 1
-        assert result[0].scope is not None and result[0].scope.session_id == "s1"
+        assert (
+            result[0].scope is not None and result[0].scope.session_id == "s1"
+        )
 
     @pytest.mark.asyncio
     async def test_list_no_scope_aggregates_all_sessions(self) -> None:
         """list(scope=None) returns artifacts from all sessions."""
         store = SessionArtifactStore()
-        await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
-        await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
-        await store.put_bytes(b"c", namespace="ns3", scope=ArtifactScope(session_id="s1"))
+        await store.put_bytes(
+            b"a", namespace="ns1", scope=ArtifactScope(session_id="s1")
+        )
+        await store.put_bytes(
+            b"b", namespace="ns2", scope=ArtifactScope(session_id="s2")
+        )
+        await store.put_bytes(
+            b"c", namespace="ns3", scope=ArtifactScope(session_id="s1")
+        )
 
         result = await store.list(scope=None)
         assert len(result) == 3
@@ -772,17 +823,21 @@ class TestEventEmittingProxyList:
 
     @pytest.mark.asyncio
     async def test_list_delegates_to_inner_store(self) -> None:
-        """Verify list() delegates to the wrapped store and returns same results."""
-        from penguiflow.planner.artifact_handling import _EventEmittingArtifactStoreProxy
+        """list() delegates to the wrapped store and returns its results."""
+        from penguiflow.planner.artifact_handling import (
+            _EventEmittingArtifactStoreProxy,
+        )
         from penguiflow.planner.trajectory import Trajectory
 
         inner = InMemoryArtifactStore()
-        await inner.put_bytes(b"data", namespace="ns1", scope=ArtifactScope(tenant_id="t1"))
+        await inner.put_bytes(
+            b"data", namespace="ns1", scope=ArtifactScope(tenant_id="t1")
+        )
 
         trajectory = Trajectory(query="test")
         proxy = _EventEmittingArtifactStoreProxy(
             store=inner,
-            emit_event=lambda e: None,
+            emit_event=lambda _e: None,
             time_source=time.time,
             trajectory=trajectory,
         )
@@ -810,8 +865,12 @@ class TestScopeMatches:
 
     def test_exact_match(self) -> None:
         """All fields match returns True."""
-        scope = ArtifactScope(tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1")
-        filter_scope = ArtifactScope(tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1")
+        scope = ArtifactScope(
+            tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+        )
+        filter_scope = ArtifactScope(
+            tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+        )
         assert _scope_matches(scope, filter_scope) is True
 
     def test_partial_filter_match(self) -> None:
@@ -829,45 +888,48 @@ class TestScopeMatches:
     def test_none_filter_field_matches_any(self) -> None:
         """None filter field matches any artifact value for that dimension."""
         scope = ArtifactScope(tenant_id="t1", session_id="s1")
-        filter_scope = ArtifactScope(session_id="s1")  # tenant_id filter is None
+        filter_scope = ArtifactScope(
+            session_id="s1"
+        )  # tenant_id filter is None
         assert _scope_matches(scope, filter_scope) is True
 
 
 class TestScopedArtifactsImmutability:
     """Tests for ScopedArtifacts immutability."""
 
-    def _make_facade(self, **kwargs) -> ScopedArtifacts:
-        defaults = dict(tenant_id=None, user_id=None, session_id=None, trace_id=None)
+    def _make_facade(self, **kwargs: str) -> ScopedArtifacts:
+        defaults: dict[str, str | None] = {
+            "tenant_id": None,
+            "user_id": None,
+            "session_id": None,
+            "trace_id": None,
+        }
         defaults.update(kwargs)
         return ScopedArtifacts(InMemoryArtifactStore(), **defaults)
 
-    def test_cannot_reassign_store(self) -> None:
-        """Reassigning _store raises AttributeError."""
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("_store", InMemoryArtifactStore()),
+            ("_scope", ArtifactScope()),
+            ("_read_scope", ArtifactScope()),
+            ("scope", ArtifactScope()),
+            ("foo", "bar"),
+        ],
+    )
+    def test_attribute_assignment_is_rejected(
+        self, name: str, value: object
+    ) -> None:
+        """Assigning any attribute, existing or new, raises AttributeError."""
         facade = self._make_facade()
         with pytest.raises(AttributeError, match="immutable"):
-            facade._store = InMemoryArtifactStore()
-
-    def test_cannot_reassign_scope(self) -> None:
-        """Reassigning _scope raises AttributeError."""
-        facade = self._make_facade()
-        with pytest.raises(AttributeError, match="immutable"):
-            facade._scope = ArtifactScope()
-
-    def test_cannot_reassign_read_scope(self) -> None:
-        """Reassigning _read_scope raises AttributeError."""
-        facade = self._make_facade()
-        with pytest.raises(AttributeError, match="immutable"):
-            facade._read_scope = ArtifactScope()
-
-    def test_cannot_add_new_attribute(self) -> None:
-        """Adding a new attribute raises AttributeError."""
-        facade = self._make_facade()
-        with pytest.raises(AttributeError):
-            facade.foo = "bar"
+            setattr(facade, name, value)
 
     def test_scope_property_returns_correct_value(self) -> None:
-        """scope property returns the ArtifactScope passed at construction."""
-        facade = self._make_facade(tenant_id="t1", session_id="s1", trace_id="tr1")
+        """Scope property returns the ArtifactScope passed at construction."""
+        facade = self._make_facade(
+            tenant_id="t1", session_id="s1", trace_id="tr1"
+        )
         assert facade.scope.tenant_id == "t1"
         assert facade.scope.session_id == "s1"
         assert facade.scope.trace_id == "tr1"
@@ -879,12 +941,18 @@ class TestScopedArtifactsUpload:
 
     @pytest.mark.asyncio
     async def test_upload_bytes(self) -> None:
-        """upload(bytes) stores via put_bytes and returns ArtifactRef with full scope."""
+        """upload(bytes) uses put_bytes and returns a fully scoped ref."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
-        ref = await facade.upload(b"pdf data", mime_type="application/pdf", filename="report.pdf")
+        ref = await facade.upload(
+            b"pdf data", mime_type="application/pdf", filename="report.pdf"
+        )
 
         assert ref.mime_type == "application/pdf"
         assert ref.filename == "report.pdf"
@@ -897,7 +965,7 @@ class TestScopedArtifactsUpload:
 
     @pytest.mark.asyncio
     async def test_upload_str(self) -> None:
-        """upload(str) stores via put_text, defaults mime_type to text/plain."""
+        """upload(str) uses put_text with a text/plain default type."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
             store, tenant_id="t1", user_id=None, session_id="s1", trace_id=None
@@ -946,7 +1014,11 @@ class TestScopedArtifactsUpload:
         """Upload injects full scope including trace_id."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade.upload(b"data")
 
@@ -965,7 +1037,11 @@ class TestScopedArtifactsDownload:
         """Upload via facade, then download returns the bytes."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade.upload(b"secret data")
         result = await facade.download(ref.id)
@@ -973,15 +1049,23 @@ class TestScopedArtifactsDownload:
 
     @pytest.mark.asyncio
     async def test_download_different_trace_same_session(self) -> None:
-        """Different trace_id but same tenant/user/session: download succeeds."""
+        """Download succeeds across trace_ids in the same session scope."""
         store = InMemoryArtifactStore()
         facade1 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade1.upload(b"data")
 
         facade2 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr2"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr2",
         )
         result = await facade2.download(ref.id)
         assert result == b"data"
@@ -1025,7 +1109,11 @@ class TestScopedArtifactsDownload:
         assert ref.scope is None
 
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         result = await facade.download(ref.id)
         assert result == b"open data"
@@ -1046,12 +1134,18 @@ class TestScopedArtifactsGetMetadata:
 
     @pytest.mark.asyncio
     async def test_get_metadata_returns_ref(self) -> None:
-        """Upload, then get_metadata returns the ArtifactRef with correct fields."""
+        """After upload, get_metadata returns the matching ArtifactRef."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id=None, session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id=None,
+            session_id="s1",
+            trace_id="tr1",
         )
-        ref = await facade.upload(b"data", mime_type="application/pdf", filename="doc.pdf")
+        ref = await facade.upload(
+            b"data", mime_type="application/pdf", filename="doc.pdf"
+        )
 
         metadata = await facade.get_metadata(ref.id)
         assert metadata is not None
@@ -1066,12 +1160,20 @@ class TestScopedArtifactsGetMetadata:
         """Different trace, same tenant/user/session: returns ref."""
         store = InMemoryArtifactStore()
         facade1 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade1.upload(b"data")
 
         facade2 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr2"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr2",
         )
         metadata = await facade2.get_metadata(ref.id)
         assert metadata is not None
@@ -1111,7 +1213,11 @@ class TestScopedArtifactsList:
         """Upload artifacts via facade. list() returns them."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         await facade.upload(b"data1", namespace="ns1")
         await facade.upload(b"data2", namespace="ns2")
@@ -1126,10 +1232,14 @@ class TestScopedArtifactsList:
 
         # Store artifacts for two tenants via raw store
         await store.put_bytes(
-            b"a", namespace="ns1", scope=ArtifactScope(tenant_id="t1", session_id="s1")
+            b"a",
+            namespace="ns1",
+            scope=ArtifactScope(tenant_id="t1", session_id="s1"),
         )
         await store.put_bytes(
-            b"b", namespace="ns2", scope=ArtifactScope(tenant_id="t2", session_id="s1")
+            b"b",
+            namespace="ns2",
+            scope=ArtifactScope(tenant_id="t2", session_id="s1"),
         )
 
         facade = ScopedArtifacts(
@@ -1137,21 +1247,31 @@ class TestScopedArtifactsList:
         )
         result = await facade.list()
         assert len(result) == 1
-        assert result[0].scope is not None and result[0].scope.tenant_id == "t1"
+        assert (
+            result[0].scope is not None and result[0].scope.tenant_id == "t1"
+        )
 
     @pytest.mark.asyncio
     async def test_list_includes_all_traces(self) -> None:
-        """list() returns artifacts from all traces (same tenant/user/session)."""
+        """list() returns artifacts of every trace in the session scope."""
         store = InMemoryArtifactStore()
 
         # Upload with two different trace IDs
         facade_tr1 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         await facade_tr1.upload(b"data1", namespace="ns1")
 
         facade_tr2 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr2"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr2",
         )
         await facade_tr2.upload(b"data2", namespace="ns2")
 
@@ -1181,7 +1301,11 @@ class TestScopedArtifactsExists:
         """Upload, then exists() returns True."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id=None, session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id=None,
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade.upload(b"data")
         assert await facade.exists(ref.id) is True
@@ -1205,12 +1329,20 @@ class TestScopedArtifactsExists:
         """Different trace, same tenant/user/session: exists() returns True."""
         store = InMemoryArtifactStore()
         facade1 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade1.upload(b"data")
 
         facade2 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr2"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr2",
         )
         assert await facade2.exists(ref.id) is True
 
@@ -1232,7 +1364,11 @@ class TestScopedArtifactsDelete:
         """Upload, delete() returns True, artifact is gone."""
         store = InMemoryArtifactStore()
         facade = ScopedArtifacts(
-            store, tenant_id="t1", user_id=None, session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id=None,
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade.upload(b"data")
 
@@ -1260,12 +1396,20 @@ class TestScopedArtifactsDelete:
         """Different trace, same tenant/user/session: delete() succeeds."""
         store = InMemoryArtifactStore()
         facade1 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr1"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr1",
         )
         ref = await facade1.upload(b"data")
 
         facade2 = ScopedArtifacts(
-            store, tenant_id="t1", user_id="u1", session_id="s1", trace_id="tr2"
+            store,
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr2",
         )
         assert await facade2.delete(ref.id) is True
         assert await store.exists(ref.id) is False

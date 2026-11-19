@@ -1,3 +1,5 @@
+"""Tests for A2A models."""
+
 from __future__ import annotations
 
 import pytest
@@ -16,11 +18,13 @@ from penguiflow_a2a.models import (
 
 
 def test_part_oneof_validation() -> None:
+    """Part oneof validation."""
     with pytest.raises(ValidationError):
         Part(text="hi", data=DataPart(data={"a": 1}))
 
 
 def test_stream_response_oneof_validation() -> None:
+    """Stream response oneof validation."""
     task = Task(
         id="task-1",
         context_id="ctx-1",
@@ -36,6 +40,7 @@ def test_stream_response_oneof_validation() -> None:
 
 
 def test_enum_and_alias_serialization() -> None:
+    """Enum and alias serialization."""
     message = Message(
         message_id="msg-1",
         role=Role.USER,

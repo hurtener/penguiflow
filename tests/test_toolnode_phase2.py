@@ -7,12 +7,18 @@ This module tests:
 - Generated planner tools for resources
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 
+import mcp.types as mcp_types
 import pytest
+from pydantic import AnyUrl
 
-from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
+from penguiflow.artifacts import (
+    InMemoryArtifactStore,
+)
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.config import ExternalToolConfig, TransportType
 from penguiflow.tools.node import ToolNode
@@ -24,69 +30,46 @@ from penguiflow.tools.resources import (
     ResourceSubscriptionManager,
     ResourceTemplateInfo,
 )
-from penguiflow.tools.resources import (
-    _CacheEntry as ResourceCacheEntry,
-)
+
+from .tool_context_doubles import FakeToolContext
 
 pytest.importorskip("tenacity")
 
 
-# ─── Fixtures ─────────────────────────────────────────────────────────────────
+# ─── Fixtures ────────────────────────────────────────────────────────────────
 
 
-class DummyCtx:
-    """Minimal context for testing resource operations."""
+class DummyCtx(FakeToolContext):
+    """Tool context for ToolNode tests."""
 
-    def __init__(self, artifact_store: InMemoryArtifactStore | None = None):
-        self._tool_context: dict[str, str] = {}
-        self._llm_context: dict[str, str] = {}
-        self._meta: dict[str, str] = {}
-        self._artifacts_store = artifact_store or InMemoryArtifactStore()
-
-    @property
-    def tool_context(self):
-        return self._tool_context
-
-    @property
-    def llm_context(self):
-        return self._llm_context
-
-    @property
-    def meta(self):
-        return self._meta
-
-    @property
-    def _artifacts(self):
-        return self._artifacts_store
-
-    @property
-    def artifacts(self):
-        return ScopedArtifacts(
-            self._artifacts_store,
-            tenant_id=None,
-            user_id=None,
-            session_id=None,
-            trace_id=None,
-        )
+    def __init__(
+        self,
+        artifact_store: InMemoryArtifactStore | None = None,
+    ) -> None:
+        """Store artifacts in ``artifact_store`` when given."""
+        super().__init__(artifact_store=artifact_store)
 
 
-def build_config(**overrides):
-    base = {
+def build_config(**overrides: object) -> ExternalToolConfig:
+    """Build an MCP tool config, with ``overrides`` applied."""
+    base: dict[str, object] = {
         "name": "test_server",
         "transport": TransportType.MCP,
         "connection": "npx -y @test/server",
     }
     base.update(overrides)
-    return ExternalToolConfig(**base)
+    return ExternalToolConfig.model_validate(base)
 
 
 @pytest.fixture
-def artifact_store():
+def artifact_store() -> InMemoryArtifactStore:
+    """Provide an empty in-memory artifact store."""
     return InMemoryArtifactStore()
 
 
 @pytest.fixture
-def resource_cache(artifact_store):
+def resource_cache() -> ResourceCache:
+    """Provide a resource cache with small limits."""
     config = ResourceCacheConfig(
         enabled=True,
         max_entries=10,
@@ -97,14 +80,15 @@ def resource_cache(artifact_store):
 
 
 @pytest.fixture
-def subscription_manager():
+def subscription_manager() -> ResourceSubscriptionManager:
+    """Provide a resource subscription manager."""
     return ResourceSubscriptionManager("test")
 
 
-# ─── ResourceInfo/ResourceTemplateInfo Model Tests ────────────────────────────
+# ─── ResourceInfo/ResourceTemplateInfo Model Tests ───────────────────────────
 
 
-def test_resource_info_basic():
+def test_resource_info_basic() -> None:
     """ResourceInfo should accept basic fields."""
     info = ResourceInfo(
         uri="file:///test.txt",
@@ -118,7 +102,7 @@ def test_resource_info_basic():
     assert info.mime_type == "text/plain"
 
 
-def test_resource_info_minimal():
+def test_resource_info_minimal() -> None:
     """ResourceInfo should only require uri."""
     info = ResourceInfo(uri="file:///test.txt")
     assert info.uri == "file:///test.txt"
@@ -126,7 +110,7 @@ def test_resource_info_minimal():
     assert info.annotations == {}
 
 
-def test_resource_template_info():
+def test_resource_template_info() -> None:
     """ResourceTemplateInfo should store template URI patterns."""
     template = ResourceTemplateInfo(
         uri_template="file:///{path}",
@@ -138,7 +122,7 @@ def test_resource_template_info():
     assert template.name == "File Template"
 
 
-def test_resource_contents_text():
+def test_resource_contents_text() -> None:
     """ResourceContents should hold text content."""
     contents = ResourceContents(
         uri="file:///test.txt",
@@ -149,7 +133,7 @@ def test_resource_contents_text():
     assert contents.blob is None
 
 
-def test_resource_contents_blob():
+def test_resource_contents_blob() -> None:
     """ResourceContents should hold binary content as base64."""
     data = b"binary data"
     contents = ResourceContents(
@@ -161,10 +145,10 @@ def test_resource_contents_blob():
     assert base64.b64decode(contents.blob) == data
 
 
-# ─── ResourceCacheConfig Tests ────────────────────────────────────────────────
+# ─── ResourceCacheConfig Tests ───────────────────────────────────────────────
 
 
-def test_cache_config_defaults():
+def test_cache_config_defaults() -> None:
     """ResourceCacheConfig should have sensible defaults."""
     config = ResourceCacheConfig()
     assert config.enabled is True
@@ -173,7 +157,7 @@ def test_cache_config_defaults():
     assert config.inline_text_if_under_chars == 10_000
 
 
-def test_cache_config_custom():
+def test_cache_config_custom() -> None:
     """ResourceCacheConfig should accept custom values."""
     config = ResourceCacheConfig(
         enabled=False,
@@ -185,18 +169,22 @@ def test_cache_config_custom():
     assert config.max_entries == 50
 
 
-# ─── ResourceCache Tests ──────────────────────────────────────────────────────
+# ─── ResourceCache Tests ─────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_cache_get_or_fetch_text_inline(resource_cache, artifact_store):
+async def test_cache_get_or_fetch_text_inline(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """Small text content should be inlined."""
     ctx = DummyCtx(artifact_store)
 
-    async def read_fn(uri):
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
         return {"contents": [{"text": "small text", "mimeType": "text/plain"}]}
 
-    result = await resource_cache.get_or_fetch("file:///test.txt", read_fn, ctx)
+    result = await resource_cache.get_or_fetch(
+        "file:///test.txt", read_fn, ctx
+    )
 
     assert "text" in result
     assert result["text"] == "small text"
@@ -204,25 +192,31 @@ async def test_cache_get_or_fetch_text_inline(resource_cache, artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_cache_get_or_fetch_text_inline_from_list_response(resource_cache, artifact_store):
+async def test_cache_get_or_fetch_text_inline_from_list_response(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """List-based read_resource responses should inline text correctly."""
     ctx = DummyCtx(artifact_store)
 
-    class MockContent:
-        text = "small text"
-        mimeType = "text/plain"
+    async def read_fn(uri: str) -> list[mcp_types.TextResourceContents]:
+        return [
+            mcp_types.TextResourceContents(
+                uri=AnyUrl(uri), text="small text", mimeType="text/plain"
+            )
+        ]
 
-    async def read_fn(uri):
-        return [MockContent()]
-
-    result = await resource_cache.get_or_fetch("file:///test-list.txt", read_fn, ctx)
+    result = await resource_cache.get_or_fetch(
+        "file:///test-list.txt", read_fn, ctx
+    )
 
     assert result == {"text": "small text"}
     assert resource_cache.size == 1
 
 
 @pytest.mark.asyncio
-async def test_cache_get_or_fetch_text_large(artifact_store):
+async def test_cache_get_or_fetch_text_large(
+    artifact_store: InMemoryArtifactStore,
+) -> None:
     """Large text content should be stored as artifact."""
     config = ResourceCacheConfig(inline_text_if_under_chars=10)
     cache = ResourceCache("test", config)
@@ -230,7 +224,7 @@ async def test_cache_get_or_fetch_text_large(artifact_store):
 
     large_text = "x" * 100  # Exceeds threshold of 10
 
-    async def read_fn(uri):
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
         return {"contents": [{"text": large_text, "mimeType": "text/plain"}]}
 
     result = await cache.get_or_fetch("file:///large.txt", read_fn, ctx)
@@ -240,16 +234,24 @@ async def test_cache_get_or_fetch_text_large(artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_cache_get_or_fetch_binary(resource_cache, artifact_store):
+async def test_cache_get_or_fetch_binary(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """Binary content should be stored as artifact."""
     ctx = DummyCtx(artifact_store)
     binary_data = b"binary content"
     encoded = base64.b64encode(binary_data).decode()
 
-    async def read_fn(uri):
-        return {"contents": [{"blob": encoded, "mimeType": "application/octet-stream"}]}
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
+        return {
+            "contents": [
+                {"blob": encoded, "mimeType": "application/octet-stream"}
+            ]
+        }
 
-    result = await resource_cache.get_or_fetch("file:///test.bin", read_fn, ctx)
+    result = await resource_cache.get_or_fetch(
+        "file:///test.bin", read_fn, ctx
+    )
 
     assert "artifact" in result
     # Verify artifact was stored
@@ -258,32 +260,40 @@ async def test_cache_get_or_fetch_binary(resource_cache, artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_cache_hit_returns_cached(resource_cache, artifact_store):
+async def test_cache_hit_returns_cached(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """Second fetch should return cached result without calling read_fn."""
     ctx = DummyCtx(artifact_store)
     call_count = 0
 
-    async def read_fn(uri):
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
         nonlocal call_count
         call_count += 1
         return {"contents": [{"text": "cached text"}]}
 
     # First fetch
-    result1 = await resource_cache.get_or_fetch("file:///test.txt", read_fn, ctx)
+    result1 = await resource_cache.get_or_fetch(
+        "file:///test.txt", read_fn, ctx
+    )
     # Second fetch - should be cached
-    result2 = await resource_cache.get_or_fetch("file:///test.txt", read_fn, ctx)
+    result2 = await resource_cache.get_or_fetch(
+        "file:///test.txt", read_fn, ctx
+    )
 
     assert call_count == 1
     assert result1 == result2
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidate(resource_cache, artifact_store):
+async def test_cache_invalidate(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """Invalidate should remove entry and cause re-fetch."""
     ctx = DummyCtx(artifact_store)
     call_count = 0
 
-    async def read_fn(uri):
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
         nonlocal call_count
         call_count += 1
         return {"contents": [{"text": f"version {call_count}"}]}
@@ -297,23 +307,29 @@ async def test_cache_invalidate(resource_cache, artifact_store):
     assert resource_cache.size == 0
 
     # Fetch again - should call read_fn
-    result = await resource_cache.get_or_fetch("file:///test.txt", read_fn, ctx)
+    result = await resource_cache.get_or_fetch(
+        "file:///test.txt", read_fn, ctx
+    )
     assert call_count == 2
     assert result["text"] == "version 2"
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidate_nonexistent(resource_cache):
+async def test_cache_invalidate_nonexistent(
+    resource_cache: ResourceCache,
+) -> None:
     """Invalidating non-existent entry should return False."""
     assert resource_cache.invalidate("file:///nonexistent.txt") is False
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidate_all(resource_cache, artifact_store):
+async def test_cache_invalidate_all(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """invalidate_all should clear all entries."""
     ctx = DummyCtx(artifact_store)
 
-    async def read_fn(uri):
+    async def read_fn(uri: str) -> dict[str, list[object]]:
         return {"contents": [{"text": f"content for {uri}"}]}
 
     # Populate cache with multiple entries
@@ -329,13 +345,13 @@ async def test_cache_invalidate_all(resource_cache, artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_cache_eviction(artifact_store):
+async def test_cache_eviction(artifact_store: InMemoryArtifactStore) -> None:
     """Cache should evict oldest entries when full."""
     config = ResourceCacheConfig(max_entries=3)
     cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
 
-    async def read_fn(uri):
+    async def read_fn(uri: str) -> dict[str, list[object]]:
         return {"contents": [{"text": f"content for {uri}"}]}
 
     # Fill cache
@@ -351,7 +367,7 @@ async def test_cache_eviction(artifact_store):
     # First entry should have been evicted
     call_count = 0
 
-    async def counting_read(uri):
+    async def counting_read(_uri: str) -> dict[str, list[object]]:
         nonlocal call_count
         call_count += 1
         return {"contents": [{"text": "re-fetched"}]}
@@ -362,14 +378,14 @@ async def test_cache_eviction(artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_cache_disabled(artifact_store):
+async def test_cache_disabled(artifact_store: InMemoryArtifactStore) -> None:
     """Disabled cache should always fetch."""
     config = ResourceCacheConfig(enabled=False)
     cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
     call_count = 0
 
-    async def read_fn(uri):
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
         nonlocal call_count
         call_count += 1
         return {"contents": [{"text": "fresh"}]}
@@ -382,25 +398,31 @@ async def test_cache_disabled(artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_cache_empty_content(resource_cache, artifact_store):
+async def test_cache_empty_content(
+    resource_cache: ResourceCache, artifact_store: InMemoryArtifactStore
+) -> None:
     """Empty content should return error."""
     ctx = DummyCtx(artifact_store)
 
-    async def read_fn(uri):
+    async def read_fn(_uri: str) -> dict[str, list[object]]:
         return {"contents": [{}]}  # No text or blob
 
-    result = await resource_cache.get_or_fetch("file:///empty.txt", read_fn, ctx)
+    result = await resource_cache.get_or_fetch(
+        "file:///empty.txt", read_fn, ctx
+    )
     assert "error" in result
 
 
-# ─── ResourceSubscriptionManager Tests ────────────────────────────────────────
+# ─── ResourceSubscriptionManager Tests ───────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_subscribe(subscription_manager):
+async def test_subscription_manager_subscribe(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """Subscribe should call subscribe_fn and track subscription."""
 
-    async def subscribe_fn(uri):
+    async def subscribe_fn(uri: str) -> None:
         pass  # Mock subscription
 
     result = await subscription_manager.subscribe(
@@ -414,11 +436,13 @@ async def test_subscription_manager_subscribe(subscription_manager):
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_subscribe_idempotent(subscription_manager):
+async def test_subscription_manager_subscribe_idempotent(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """Subscribing twice should not call subscribe_fn again."""
     call_count = 0
 
-    async def subscribe_fn(uri):
+    async def subscribe_fn(_uri: str) -> None:
         nonlocal call_count
         call_count += 1
 
@@ -429,43 +453,53 @@ async def test_subscription_manager_subscribe_idempotent(subscription_manager):
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_unsubscribe(subscription_manager):
+async def test_subscription_manager_unsubscribe(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """Unsubscribe should call unsubscribe_fn and remove tracking."""
 
-    async def subscribe_fn(uri):
+    async def subscribe_fn(uri: str) -> None:
         pass
 
-    async def unsubscribe_fn(uri):
+    async def unsubscribe_fn(uri: str) -> None:
         pass
 
     await subscription_manager.subscribe("file:///test.txt", subscribe_fn)
     assert subscription_manager.is_subscribed("file:///test.txt")
 
-    result = await subscription_manager.unsubscribe("file:///test.txt", unsubscribe_fn)
+    result = await subscription_manager.unsubscribe(
+        "file:///test.txt", unsubscribe_fn
+    )
     assert result is True
     assert not subscription_manager.is_subscribed("file:///test.txt")
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_unsubscribe_not_subscribed(subscription_manager):
+async def test_subscription_manager_unsubscribe_not_subscribed(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """Unsubscribing without subscription should return False."""
 
-    async def unsubscribe_fn(uri):
+    async def unsubscribe_fn(uri: str) -> None:
         pass
 
-    result = await subscription_manager.unsubscribe("file:///not_subscribed.txt", unsubscribe_fn)
+    result = await subscription_manager.unsubscribe(
+        "file:///not_subscribed.txt", unsubscribe_fn
+    )
     assert result is False
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_handle_update_with_callback(subscription_manager):
+async def test_subscription_manager_handle_update_with_callback(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """handle_update should call the registered callback."""
     updates_received = []
 
-    def callback(uri):
+    def callback(uri: str) -> None:
         updates_received.append(uri)
 
-    async def subscribe_fn(uri):
+    async def subscribe_fn(uri: str) -> None:
         pass
 
     await subscription_manager.subscribe(
@@ -479,15 +513,17 @@ async def test_subscription_manager_handle_update_with_callback(subscription_man
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_handle_update_async_callback(subscription_manager):
+async def test_subscription_manager_handle_update_async_callback(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """handle_update should support async callbacks."""
     updates_received = []
 
-    async def async_callback(uri):
+    async def async_callback(uri: str) -> None:
         await asyncio.sleep(0.001)
         updates_received.append(uri)
 
-    async def subscribe_fn(uri):
+    async def subscribe_fn(uri: str) -> None:
         pass
 
     await subscription_manager.subscribe(
@@ -501,16 +537,18 @@ async def test_subscription_manager_handle_update_async_callback(subscription_ma
 
 
 @pytest.mark.asyncio
-async def test_subscription_manager_handle_update_no_subscription(subscription_manager):
+async def test_subscription_manager_handle_update_no_subscription(
+    subscription_manager: ResourceSubscriptionManager,
+) -> None:
     """handle_update should not fail for non-subscribed URI."""
     await subscription_manager.handle_update("file:///unknown.txt")
     # Should not raise
 
 
-# ─── ToolNode Resource Method Tests ───────────────────────────────────────────
+# ─── ToolNode Resource Method Tests ──────────────────────────────────────────
 
 
-def test_toolnode_resources_supported_default():
+def test_toolnode_resources_supported_default() -> None:
     """ToolNode should default to resources not supported."""
     config = build_config()
     registry = ModelRegistry()
@@ -521,33 +559,36 @@ def test_toolnode_resources_supported_default():
     assert node.resource_templates == []
 
 
-def test_toolnode_generate_resource_tools_not_supported():
-    """Generating resource tools when not supported should return empty list."""
+def test_toolnode_generate_resource_tools_not_supported() -> None:
+    """No resource tools are generated when unsupported."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
     # Not resources_supported - no resource tools
-    assert node._resources_supported is False
-    specs = node._generate_resource_tools()
+    assert node.resources_supported is False
+    specs = node.generate_resource_tools()
     assert specs == []
 
 
-def test_toolnode_generate_resource_tools_creates_specs():
+def test_toolnode_generate_resource_tools_creates_specs() -> None:
     """Generating resource tools should create proper NodeSpecs."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
-    # Simulate resources being discovered (must be done before generating tools)
-    node._resources_supported = True
-    node._resources = [
+    # Simulate resources being discovered (must be done before generating
+    # tools)
+    node.resources_supported = True
+    node.resources = [
         ResourceInfo(uri="file:///test.txt", name="Test"),
     ]
 
-    specs = node._generate_resource_tools()
+    specs = node.generate_resource_tools()
 
-    assert len(specs) == 3  # resources_list, resources_read, resources_templates_list
+    assert (
+        len(specs) == 3
+    )  # resources_list, resources_read, resources_templates_list
 
     names = [s.name for s in specs]
     assert "test_server.resources_list" in names
@@ -560,17 +601,17 @@ def test_toolnode_generate_resource_tools_creates_specs():
     assert registry.has("test_server.resources_templates_list")
 
 
-def test_toolnode_generate_resource_tools_read_has_uri_param():
+def test_toolnode_generate_resource_tools_read_has_uri_param() -> None:
     """resources_read tool should have uri parameter."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
     # Enable resources support
-    node._resources_supported = True
-    node._resources = [ResourceInfo(uri="file:///test.txt")]
+    node.resources_supported = True
+    node.resources = [ResourceInfo(uri="file:///test.txt")]
 
-    specs = node._generate_resource_tools()
+    specs = node.generate_resource_tools()
 
     read_spec = next(s for s in specs if "resources_read" in s.name)
     # Check that args_model has uri field
@@ -580,7 +621,7 @@ def test_toolnode_generate_resource_tools_read_has_uri_param():
 
 
 @pytest.mark.asyncio
-async def test_toolnode_list_resources_not_connected():
+async def test_toolnode_list_resources_not_connected() -> None:
     """list_resources when not connected should return empty list."""
     config = build_config()
     registry = ModelRegistry()
@@ -591,7 +632,9 @@ async def test_toolnode_list_resources_not_connected():
 
 
 @pytest.mark.asyncio
-async def test_toolnode_read_resource_not_connected(artifact_store):
+async def test_toolnode_read_resource_not_connected(
+    artifact_store: InMemoryArtifactStore,
+) -> None:
     """read_resource when not connected should return error."""
     config = build_config()
     registry = ModelRegistry()
@@ -604,35 +647,43 @@ async def test_toolnode_read_resource_not_connected(artifact_store):
 
 
 @pytest.mark.asyncio
-async def test_toolnode_read_resource_list_shape_inline_text(artifact_store):
+async def test_toolnode_read_resource_list_shape_inline_text(
+    artifact_store: InMemoryArtifactStore,
+) -> None:
     """read_resource should support list-shaped MCP content responses."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
-    class MockContent:
-        text = "resource text from list"
-        mimeType = "text/plain"
-
     mock_client = type("MockClient", (), {})()
 
-    async def _read_resource(_uri):
-        return [MockContent()]
+    async def _read_resource(
+        uri: str,
+    ) -> list[mcp_types.TextResourceContents]:
+        return [
+            mcp_types.TextResourceContents(
+                uri=AnyUrl(uri),
+                text="resource text from list",
+                mimeType="text/plain",
+            )
+        ]
 
     mock_client.read_resource = _read_resource
 
-    node._connected = True
-    node._resources_supported = True
-    node._mcp_client = mock_client
+    node.connected = True
+    node.resources_supported = True
+    node.mcp_client = mock_client
 
     ctx = DummyCtx(artifact_store)
-    result = await node.read_resource("pengui://docs/overview", ctx, use_cache=False)
+    result = await node.read_resource(
+        "pengui://docs/overview", ctx, use_cache=False
+    )
 
     assert result == {"text": "resource text from list"}
 
 
 @pytest.mark.asyncio
-async def test_toolnode_subscribe_resource_not_connected():
+async def test_toolnode_subscribe_resource_not_connected() -> None:
     """subscribe_resource when not connected should return False."""
     config = build_config()
     registry = ModelRegistry()
@@ -643,7 +694,7 @@ async def test_toolnode_subscribe_resource_not_connected():
 
 
 @pytest.mark.asyncio
-async def test_toolnode_unsubscribe_resource_not_connected():
+async def test_toolnode_unsubscribe_resource_not_connected() -> None:
     """unsubscribe_resource when not connected should return False."""
     config = build_config()
     registry = ModelRegistry()
@@ -654,34 +705,37 @@ async def test_toolnode_unsubscribe_resource_not_connected():
 
 
 @pytest.mark.asyncio
-async def test_toolnode_subscribe_resource_connected_without_client_support():
-    """subscribe_resource should return False when MCP client lacks subscribe APIs."""
+async def test_subscribe_resource_without_client_support() -> None:
+    """subscribe_resource is False without client subscribe APIs."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
-    node._connected = True
-    node._resources_supported = True
-    node._mcp_client = object()
+    node.connected = True
+    node.resources_supported = True
+    node.mcp_client = object()
 
     result = await node.subscribe_resource("file:///test.txt")
     assert result is False
 
 
 @pytest.mark.asyncio
-async def test_toolnode_unsubscribe_resource_connected_without_client_support():
-    """unsubscribe_resource should return False when MCP client lacks unsubscribe APIs."""
+async def test_unsubscribe_resource_without_client_support() -> None:
+    """unsubscribe_resource is False without client APIs."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
-    node._connected = True
-    node._resources_supported = True
-    node._mcp_client = object()
+    node.connected = True
+    node.resources_supported = True
+    node.mcp_client = object()
 
     result = await node.unsubscribe_resource("file:///test.txt")
     assert result is False
 
 
-def test_toolnode_handle_resource_updated():
+@pytest.mark.asyncio
+async def test_toolnode_handle_resource_updated(
+    artifact_store: InMemoryArtifactStore,
+) -> None:
     """handle_resource_updated should invalidate cache entry."""
     config = build_config()
     registry = ModelRegistry()
@@ -690,12 +744,13 @@ def test_toolnode_handle_resource_updated():
     # Set up cache with an entry
     cache_config = ResourceCacheConfig()
     cache = ResourceCache("test", cache_config)
-    node._resource_cache = cache
+    node.resource_cache = cache
 
-    # Manually add a cache entry for testing
-    cache._entries["file:///test.txt"] = ResourceCacheEntry(
-        uri="file:///test.txt",
-        inline_text="cached content",
+    async def read_fn(uri: str) -> dict[str, object]:
+        return {"contents": [{"uri": uri, "text": "cached content"}]}
+
+    await cache.get_or_fetch(
+        "file:///test.txt", read_fn, DummyCtx(artifact_store)
     )
     assert cache.size == 1
 
@@ -704,7 +759,7 @@ def test_toolnode_handle_resource_updated():
     assert cache.size == 0
 
 
-def test_toolnode_handle_resource_updated_no_cache():
+def test_toolnode_handle_resource_updated_no_cache() -> None:
     """handle_resource_updated should not fail if no cache exists."""
     config = build_config()
     registry = ModelRegistry()
@@ -714,7 +769,7 @@ def test_toolnode_handle_resource_updated_no_cache():
     node.handle_resource_updated("file:///test.txt")
 
 
-def test_toolnode_handle_resource_updated_invokes_callback():
+def test_toolnode_handle_resource_updated_invokes_callback() -> None:
     """handle_resource_updated should call registered callback."""
     config = build_config()
     registry = ModelRegistry()
@@ -731,26 +786,26 @@ def test_toolnode_handle_resource_updated_invokes_callback():
     assert seen == ["file:///callback.txt"]
 
 
-# ─── Handler Tests ────────────────────────────────────────────────────────────
+# ─── Handler Tests ───────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_handle_resources_list():
+async def test_handle_resources_list() -> None:
     """_handle_resources_list should return resource list."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
     # Simulate connected state with resources
-    node._connected = True
-    node._resources_supported = True
-    node._resources = [
+    node.connected = True
+    node.resources_supported = True
+    node.resources = [
         ResourceInfo(uri="file:///a.txt", name="File A"),
         ResourceInfo(uri="file:///b.txt", name="File B"),
     ]
 
     ctx = DummyCtx()
-    result = await node._handle_resources_list({}, ctx)
+    result = await node.handle_resources_list({}, ctx)
 
     assert result["count"] == 2
     assert len(result["resources"]) == 2
@@ -758,40 +813,42 @@ async def test_handle_resources_list():
 
 
 @pytest.mark.asyncio
-async def test_handle_resources_list_not_connected():
+async def test_handle_resources_list_not_connected() -> None:
     """_handle_resources_list when not connected should return empty list."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
     # Set cached resources but don't connect
-    node._resources = [
+    node.resources = [
         ResourceInfo(uri="file:///a.txt", name="File A"),
     ]
 
     ctx = DummyCtx()
-    result = await node._handle_resources_list({}, ctx)
+    result = await node.handle_resources_list({}, ctx)
 
     # Returns cached resources (which is what _resources contains)
     assert result["count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_handle_resources_templates_list():
+async def test_handle_resources_templates_list() -> None:
     """_handle_resources_templates_list should return template list."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
     # Simulate connected state
-    node._connected = True
-    node._resources_supported = True
-    node._resource_templates = [
-        ResourceTemplateInfo(uri_template="file:///{path}", name="File Template"),
+    node.connected = True
+    node.resources_supported = True
+    node.resource_templates = [
+        ResourceTemplateInfo(
+            uri_template="file:///{path}", name="File Template"
+        ),
     ]
 
     ctx = DummyCtx()
-    result = await node._handle_resources_templates_list({}, ctx)
+    result = await node.handle_resources_templates_list({}, ctx)
 
     assert result["count"] == 1
     assert len(result["templates"]) == 1
@@ -799,14 +856,14 @@ async def test_handle_resources_templates_list():
 
 
 @pytest.mark.asyncio
-async def test_handle_resources_read_missing_uri():
+async def test_handle_resources_read_missing_uri() -> None:
     """_handle_resources_read should error on missing uri."""
     config = build_config()
     registry = ModelRegistry()
     node = ToolNode(config=config, registry=registry)
 
     ctx = DummyCtx()
-    result = await node._handle_resources_read({}, ctx)
+    result = await node.handle_resources_read({}, ctx)
 
     assert "error" in result["result"]
     assert "uri" in result["result"]["error"].lower()

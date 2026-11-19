@@ -1,18 +1,30 @@
+"""Tests for bidirectional session."""
+
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import pytest
 
-from penguiflow.sessions import StreamingSession, TaskResult, TaskType, UpdateType
+from penguiflow.sessions import (
+    StreamingSession,
+    TaskResult,
+    TaskType,
+    UpdateType,
+)
 from penguiflow.steering import SteeringEvent, SteeringEventType
+
+if TYPE_CHECKING:
+    from penguiflow.sessions.session import TaskRuntime
 
 
 @pytest.mark.asyncio
 async def test_session_run_task_emits_result() -> None:
+    """Session run task emits result."""
     session = StreamingSession("session-1")
 
-    async def pipeline(runtime):
+    async def pipeline(runtime: TaskRuntime) -> TaskResult:
         runtime.emit_update(UpdateType.PROGRESS, {"label": "start"})
         return TaskResult(payload={"answer": "ok"}, digest=["ok"])
 
@@ -27,7 +39,9 @@ async def test_session_run_task_emits_result() -> None:
                 break
 
     collector = asyncio.create_task(collect())
-    result = await session.run_task(pipeline, task_type=TaskType.FOREGROUND, query="hi")
+    result = await session.run_task(
+        pipeline, task_type=TaskType.FOREGROUND, query="hi"
+    )
     await collector
 
     assert result.payload == {"answer": "ok"}
@@ -36,13 +50,16 @@ async def test_session_run_task_emits_result() -> None:
 
 @pytest.mark.asyncio
 async def test_control_policy_requires_confirmation() -> None:
+    """Control policy requires confirmation."""
     session = StreamingSession("session-2")
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.01)
         return TaskResult(payload={"answer": "ok"})
 
-    task_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="hello")
+    task_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="hello"
+    )
     event = SteeringEvent(
         session_id="session-2",
         task_id=task_id,

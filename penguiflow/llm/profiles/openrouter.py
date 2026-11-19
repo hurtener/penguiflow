@@ -1,7 +1,7 @@
 """OpenRouter model profiles.
 
-Defines capabilities and configuration for OpenRouter routing.
-OpenRouter provides access to 500+ models from multiple providers.
+Defines capabilities and configuration for OpenRouter routing. OpenRouter
+provides access to 500+ models from multiple providers.
 
 Top-tier models available (January 2026):
 - OpenAI: GPT-5, GPT-5.1, GPT-5.2 Pro (up to 400K context)
@@ -48,8 +48,8 @@ PROVIDER_PROFILE_MAPPING = {
 
 # Profiles for OpenRouter-specific models
 PROFILES: dict[str, ModelProfile] = {
-    # OpenRouter-specific routing (uses underlying provider profiles)
-    # These are fallback profiles when we can't determine the underlying provider
+    # OpenRouter-specific routing (uses underlying provider profiles) These are
+    # fallback profiles when we can't determine the underlying provider
     "openrouter/auto": ModelProfile(
         supports_schema_guided_output=False,
         supports_json_only_output=True,
@@ -730,9 +730,13 @@ PROFILES: dict[str, ModelProfile] = {
 }
 
 
-def _match_prefixed_profiles(model_name: str, *provider_prefixes: str) -> ModelProfile | None:
-    """Match a model against explicit OpenRouter profile entries for a provider prefix."""
-    items = sorted(PROFILES.items(), key=lambda item: len(item[0]), reverse=True)
+def _match_prefixed_profiles(
+    model_name: str, *provider_prefixes: str
+) -> ModelProfile | None:
+    """Match a model against OpenRouter entries for a provider prefix."""
+    items = sorted(
+        PROFILES.items(), key=lambda item: len(item[0]), reverse=True
+    )
     for key, profile in items:
         if not any(key.startswith(prefix) for prefix in provider_prefixes):
             continue
@@ -743,15 +747,82 @@ def _match_prefixed_profiles(model_name: str, *provider_prefixes: str) -> ModelP
     return None
 
 
+# Profile types matched by explicit OpenRouter entries under these prefixes.
+_PREFIXED_PROFILE_TYPES: dict[str, tuple[str, ...]] = {
+    "stepfun": ("stepfun/",),
+    "xai": ("x-ai/", "xai/"),
+    "inception": ("inception/",),
+}
+# Alternate spellings of a provider prefix in OpenRouter model ids.
+_PROVIDER_ALIASES: dict[str, tuple[str, ...]] = {
+    "x-ai": ("xai/",),
+    "xai": ("x-ai/",),
+}
+
+
+def _native_profiles(profile_type: str) -> dict[str, ModelProfile] | None:
+    """Return the native provider profile table for ``profile_type``."""
+    if profile_type == "openai":
+        from . import openai
+
+        return openai.PROFILES
+    if profile_type == "anthropic":
+        from . import anthropic
+
+        return anthropic.PROFILES
+    if profile_type == "google":
+        from . import google
+
+        return google.PROFILES
+    return None
+
+
+def _match_provider_default(
+    profile_type: str, provider: str, model_name: str
+) -> ModelProfile | None:
+    """Match ``model_name`` against the profiles of its provider type."""
+    native = _native_profiles(profile_type)
+    if native is not None:
+        for key, profile in native.items():
+            if model_name.startswith(key) or key in model_name:
+                return profile
+        return None
+    if profile_type == "openrouter_explicit":
+        prefixes: tuple[str, ...] = (f"{provider}/",)
+    else:
+        prefixes = _PREFIXED_PROFILE_TYPES.get(profile_type, ())
+    if not prefixes:
+        return None
+    return _match_prefixed_profiles(model_name, *prefixes)
+
+
+def _match_provider_model(parts: list[str]) -> ModelProfile | None:
+    """Match a ``<provider>/<model>`` id split into ``parts``."""
+    full_model = "/".join(parts)
+    if full_model in PROFILES:
+        return PROFILES[full_model]
+    provider = parts[0]
+    model_name = parts[-1]
+    profile_type = PROVIDER_PROFILE_MAPPING.get(provider)
+    if profile_type is not None:
+        matched = _match_provider_default(profile_type, provider, model_name)
+        if matched is not None:
+            return matched
+    return _match_prefixed_profiles(
+        model_name, f"{provider}/", *_PROVIDER_ALIASES.get(provider, ())
+    )
+
+
 def get_openrouter_profile(model: str) -> ModelProfile:
     """Get the profile for an OpenRouter model.
 
-    Parses the model string to determine the underlying provider and
-    returns the appropriate profile. Handles model variant suffixes
-    like :free, :extended, :thinking, :online, :nitro, :exacto.
+    Parses the model string to determine the underlying provider and returns
+    the appropriate profile. Handles model variant suffixes like :free,
+    :extended, :thinking, :online, :nitro, :exacto.
 
     Args:
-        model: The OpenRouter model string (e.g., "openrouter/anthropic/claude-sonnet-4.5",
+        model: The OpenRouter model string (e.g.,
+            "openrouter/anthropic/claude-sonnet-4.5",
                "openai/gpt-5:thinking", "deepseek/deepseek-r1:free").
 
     Returns:
@@ -761,82 +832,9 @@ def get_openrouter_profile(model: str) -> ModelProfile:
     if model in PROFILES:
         return PROFILES[model]
 
-    # Strip "openrouter/" prefix if present
-    if model.startswith("openrouter/"):
-        model = model.removeprefix("openrouter/")
-
-    # Check for provider-specific match
-    parts = model.split("/")
+    parts = model.removeprefix("openrouter/").split("/")
     if len(parts) >= 2:
-        provider = parts[0]
-        full_model = "/".join(parts)
-
-        # Check if we have a specific profile for this model
-        if full_model in PROFILES:
-            return PROFILES[full_model]
-
-        # Otherwise, try to get the provider's default profile
-        if provider in PROVIDER_PROFILE_MAPPING:
-            # Import the appropriate profile module
-            profile_type = PROVIDER_PROFILE_MAPPING[provider]
-
-            if profile_type == "openai":
-                from . import openai
-
-                # Try to match the model name in OpenAI profiles
-                model_name = parts[-1] if len(parts) > 1 else model
-                for key, profile in openai.PROFILES.items():
-                    if model_name.startswith(key) or key in model_name:
-                        return profile
-
-            elif profile_type == "anthropic":
-                from . import anthropic
-
-                model_name = parts[-1] if len(parts) > 1 else model
-                for key, profile in anthropic.PROFILES.items():
-                    if model_name.startswith(key) or key in model_name:
-                        return profile
-
-            elif profile_type == "google":
-                from . import google
-
-                model_name = parts[-1] if len(parts) > 1 else model
-                for key, profile in google.PROFILES.items():
-                    if model_name.startswith(key) or key in model_name:
-                        return profile
-
-            elif profile_type == "stepfun":
-                model_name = parts[-1] if len(parts) > 1 else model
-                matched = _match_prefixed_profiles(model_name, "stepfun/")
-                if matched is not None:
-                    return matched
-
-            elif profile_type == "xai":
-                model_name = parts[-1] if len(parts) > 1 else model
-                matched = _match_prefixed_profiles(model_name, "x-ai/", "xai/")
-                if matched is not None:
-                    return matched
-
-            elif profile_type == "inception":
-                model_name = parts[-1] if len(parts) > 1 else model
-                matched = _match_prefixed_profiles(model_name, "inception/")
-                if matched is not None:
-                    return matched
-
-            elif profile_type == "openrouter_explicit":
-                model_name = parts[-1] if len(parts) > 1 else model
-                matched = _match_prefixed_profiles(model_name, f"{provider}/")
-                if matched is not None:
-                    return matched
-
-        model_name = parts[-1] if len(parts) > 1 else model
-        provider_prefixes = [f"{provider}/"]
-        if provider == "x-ai":
-            provider_prefixes.append("xai/")
-        elif provider == "xai":
-            provider_prefixes.append("x-ai/")
-
-        matched = _match_prefixed_profiles(model_name, *provider_prefixes)
+        matched = _match_provider_model(parts)
         if matched is not None:
             return matched
 

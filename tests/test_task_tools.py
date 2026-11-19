@@ -1,107 +1,94 @@
+"""Tests for task tools."""
+
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Literal
+
 import pytest
+from typing_extensions import override
 
-from penguiflow.artifacts import NoOpArtifactStore, ScopedArtifacts
-from penguiflow.sessions.models import TaskStatus, TaskType
-from penguiflow.sessions.task_service import TaskDetails, TaskService, TaskSpawnResult, TaskSummary
-from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY, build_task_tool_specs
+from penguiflow.artifacts import NoOpArtifactStore
+from penguiflow.sessions.models import (
+    GroupReportStrategy,
+    GroupStatus,
+    MergeStrategy,
+    TaskGroup,
+    TaskStatus,
+    TaskType,
+)
+from penguiflow.sessions.task_service import (
+    ContextDepth,
+    TaskDetails,
+    TaskService,
+    TaskSpawnResult,
+    TaskSummary,
+)
+from penguiflow.sessions.task_tools import (
+    SUBAGENT_FLAG_KEY,
+    TASK_SERVICE_KEY,
+    build_task_tool_specs,
+)
+
+from .tool_context_doubles import FakeToolContext
+
+if TYPE_CHECKING:
+    import builtins
 
 
-class DummyContext:
-    def __init__(self, tool_context):
-        self._tool_context = tool_context
+class DummyContext(FakeToolContext):
+    """Tool context over ``tool_context`` with artifacts going nowhere."""
 
-    @property
-    def llm_context(self):
-        return {}
-
-    @property
-    def tool_context(self):
-        return self._tool_context
-
-    @property
-    def meta(self):
-        return {}
-
-    @property
-    def _artifacts(self):
-        raise RuntimeError("not_used")
-
-    @property
-    def artifacts(self):
-        return ScopedArtifacts(
-            NoOpArtifactStore(),
-            tenant_id=None,
-            user_id=None,
-            session_id=None,
-            trace_id=None,
+    def __init__(self, tool_context: dict[str, Any]) -> None:
+        """Use ``tool_context``; artifacts go to a no-op store."""
+        super().__init__(
+            tool_context=tool_context, artifact_store=NoOpArtifactStore()
         )
-
-    async def pause(self, reason, payload=None):  # type: ignore[no-untyped-def]
-        raise RuntimeError("not_used")
-
-    async def emit_chunk(self, stream_id, seq, text, *, done=False, meta=None):  # type: ignore[no-untyped-def]
-        raise RuntimeError("not_used")
-
-    async def emit_artifact(self, stream_id, chunk, *, done=False, artifact_type=None, meta=None):  # type: ignore[no-untyped-def]
-        raise RuntimeError("not_used")
 
 
 class DummyService(TaskService):
+    """Task service that records each call."""
+
     def __init__(self) -> None:
+        """Start with no recorded state."""
         self.spawn_calls: list[tuple[str, str]] = []
         self.job_calls: list[tuple[str, str]] = []
         self.list_calls: list[str] = []
         self.get_calls: list[tuple[str, str, bool]] = []
         self.ack_calls: list[tuple[str, list[str]]] = []
 
-    async def spawn(  # type: ignore[no-untyped-def]
+    @override
+    async def spawn(
         self,
         *,
-        session_id,
-        query,
-        parent_task_id=None,
-        priority=0,
-        merge_strategy=None,
-        propagate_on_cancel="cascade",
-        notify_on_complete=True,
-        context_depth="full",
-        task_id=None,
-        idempotency_key=None,
-        context_tool_context=None,
+        session_id: str,
+        query: str,
+        parent_task_id: str | None = None,
+        priority: int = 0,
+        merge_strategy: MergeStrategy = MergeStrategy.HUMAN_GATED,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+        notify_on_complete: bool = True,
+        context_depth: ContextDepth = "full",
+        task_id: str | None = None,
+        idempotency_key: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
-        group=None,
-        group_id=None,
-        group_sealed=False,
-        retain_turn=False,
-        group_merge_strategy=None,
-        group_report=None,
-        turn_id=None,
-    ):
-        _ = (
-            parent_task_id,
-            priority,
-            merge_strategy,
-            propagate_on_cancel,
-            notify_on_complete,
-            context_depth,
-            task_id,
-            idempotency_key,
-            context_tool_context,
-            group,
-            group_id,
-            group_sealed,
-            retain_turn,
-            group_merge_strategy,
-            group_report,
-            turn_id,
-        )
+        group: str | None = None,
+        group_id: str | None = None,
+        group_sealed: bool = False,
+        retain_turn: bool = False,
+        group_merge_strategy: MergeStrategy | None = None,
+        group_report: GroupReportStrategy | None = None,
+        turn_id: str | None = None,
+    ) -> TaskSpawnResult:
         self.spawn_calls.append((session_id, query))
-        return TaskSpawnResult(task_id="t1", session_id=session_id, status=TaskStatus.PENDING)
+        return TaskSpawnResult(
+            task_id="t1", session_id=session_id, status=TaskStatus.PENDING
+        )
 
-    async def list(self, *, session_id, status=None):  # type: ignore[no-untyped-def]
-        _ = status
+    @override
+    async def list(
+        self, *, session_id: str, status: TaskStatus | None = None
+    ) -> builtins.list[TaskSummary]:
         self.list_calls.append(session_id)
         return [
             TaskSummary(
@@ -113,7 +100,10 @@ class DummyService(TaskService):
             )
         ]
 
-    async def get(self, *, session_id, task_id, include_result=False):  # type: ignore[no-untyped-def]
+    @override
+    async def get(
+        self, *, session_id: str, task_id: str, include_result: bool = False
+    ) -> TaskDetails | None:
         self.get_calls.append((session_id, task_id, include_result))
         return TaskDetails(
             task_id=task_id,
@@ -123,109 +113,113 @@ class DummyService(TaskService):
             priority=0,
         )
 
-    async def cancel(self, *, session_id, task_id, reason=None):  # type: ignore[no-untyped-def]
-        _ = session_id, task_id, reason
+    @override
+    async def cancel(
+        self, *, session_id: str, task_id: str, reason: str | None = None
+    ) -> bool:
         return True
 
-    async def prioritize(self, *, session_id, task_id, priority):  # type: ignore[no-untyped-def]
-        _ = session_id, task_id, priority
+    @override
+    async def prioritize(
+        self, *, session_id: str, task_id: str, priority: int
+    ) -> bool:
         return True
 
-    async def apply_patch(self, *, session_id, patch_id, action, strategy=None):  # type: ignore[no-untyped-def]
-        _ = session_id, patch_id, action, strategy
+    @override
+    async def apply_patch(
+        self,
+        *,
+        session_id: str,
+        patch_id: str,
+        action: Literal["apply", "reject"],
+        strategy: MergeStrategy | None = None,
+    ) -> bool:
         return True
 
-    async def acknowledge_background(self, *, session_id, task_ids):  # type: ignore[no-untyped-def]
+    @override
+    async def acknowledge_background(
+        self, *, session_id: str, task_ids: builtins.list[str]
+    ) -> int:
         self.ack_calls.append((session_id, list(task_ids)))
         return len(task_ids)
 
-    async def spawn_tool_job(  # type: ignore[no-untyped-def]
+    @override
+    async def spawn_tool_job(
         self,
         *,
-        session_id,
-        tool_name,
-        tool_args,
-        parent_task_id=None,
-        priority=0,
-        merge_strategy=None,
-        propagate_on_cancel="cascade",
-        notify_on_complete=True,
-        task_id=None,
-        context_tool_context=None,
+        session_id: str,
+        tool_name: str,
+        tool_args: object,
+        parent_task_id: str | None = None,
+        priority: int = 0,
+        merge_strategy: MergeStrategy = MergeStrategy.HUMAN_GATED,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+        notify_on_complete: bool = True,
+        task_id: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
-        group=None,
-        group_id=None,
-        group_sealed=False,
-        retain_turn=False,
-        group_merge_strategy=None,
-        group_report=None,
-        turn_id=None,
-    ):
-        _ = (
-            tool_args,
-            parent_task_id,
-            priority,
-            merge_strategy,
-            propagate_on_cancel,
-            notify_on_complete,
-            task_id,
-            context_tool_context,
-            group,
-            group_id,
-            group_sealed,
-            retain_turn,
-            group_merge_strategy,
-            group_report,
-            turn_id,
-        )
+        group: str | None = None,
+        group_id: str | None = None,
+        group_sealed: bool = False,
+        retain_turn: bool = False,
+        group_merge_strategy: MergeStrategy | None = None,
+        group_report: GroupReportStrategy | None = None,
+        turn_id: str | None = None,
+    ) -> TaskSpawnResult:
         self.job_calls.append((session_id, tool_name))
-        return TaskSpawnResult(task_id="t_job", session_id=session_id, status=TaskStatus.PENDING)
+        return TaskSpawnResult(
+            task_id="t_job", session_id=session_id, status=TaskStatus.PENDING
+        )
 
     # Task Group Methods
-    async def seal_group(  # type: ignore[no-untyped-def]
+    @override
+    async def seal_group(
         self,
         *,
-        session_id,
-        group_id=None,
-        group_name=None,
-        turn_id=None,
-    ):
-        _ = group_name, turn_id
-        return {"ok": True, "group_id": group_id or "g1", "sealed_task_count": 2}
+        session_id: str,
+        group_id: str | None = None,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "group_id": group_id or "g1",
+            "sealed_task_count": 2,
+        }
 
-    async def cancel_group(  # type: ignore[no-untyped-def]
+    @override
+    async def cancel_group(
         self,
         *,
-        session_id,
-        group_id,
-        reason=None,
-        propagate_on_cancel="cascade",
-    ):
-        _ = session_id, reason, propagate_on_cancel
+        session_id: str,
+        group_id: str,
+        reason: str | None = None,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+    ) -> dict[str, Any]:
         return {"ok": True, "cancelled_task_count": 1}
 
-    async def apply_group(  # type: ignore[no-untyped-def]
+    @override
+    async def apply_group(
         self,
         *,
-        session_id,
-        group_id,
-        action="apply",
-        strategy=None,
-    ):
-        _ = session_id, strategy
+        session_id: str,
+        group_id: str,
+        action: Literal["apply", "reject"] = "apply",
+        strategy: MergeStrategy | None = None,
+    ) -> dict[str, Any]:
         return {
             "ok": True,
             "action": action,
             "applied_patch_count": 2 if action == "apply" else 0,
         }
 
-    async def list_groups(  # type: ignore[no-untyped-def]
+    @override
+    async def list_groups(
         self,
         *,
-        session_id,
-        status=None,
-    ):
-        _ = status
+        session_id: str,
+        status: GroupStatus | None = None,
+    ) -> builtins.list[TaskGroup]:
         from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         return [
@@ -239,15 +233,15 @@ class DummyService(TaskService):
             )
         ]
 
-    async def get_group(  # type: ignore[no-untyped-def]
+    @override
+    async def get_group(
         self,
         *,
-        session_id,
-        group_id=None,
-        group_name=None,
-        turn_id=None,
-    ):
-        _ = group_name, turn_id
+        session_id: str,
+        group_id: str | None = None,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> TaskGroup | None:
         from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         return TaskGroup(
@@ -262,6 +256,7 @@ class DummyService(TaskService):
 
 @pytest.mark.asyncio
 async def test_task_tools_specs_build() -> None:
+    """Task tools specs build."""
     specs = build_task_tool_specs()
     names = {spec.name for spec in specs}
     assert "tasks.spawn" in names
@@ -271,6 +266,7 @@ async def test_task_tools_specs_build() -> None:
 
 @pytest.mark.asyncio
 async def test_task_tools_reject_subagent() -> None:
+    """Task tools reject subagent."""
     from penguiflow.sessions.task_tools import TasksSpawnArgs, tasks_spawn
 
     service = DummyService()
@@ -282,11 +278,12 @@ async def test_task_tools_reject_subagent() -> None:
         }
     )
     with pytest.raises(RuntimeError):
-        await tasks_spawn(TasksSpawnArgs(query="hi"), ctx)  # type: ignore[arg-type]
+        await tasks_spawn(TasksSpawnArgs(query="hi"), ctx)
 
 
 @pytest.mark.asyncio
 async def test_task_tools_require_task_service() -> None:
+    """Task tools require task service."""
     from penguiflow.sessions.task_tools import TasksSpawnArgs, tasks_spawn
 
     ctx = DummyContext(
@@ -296,11 +293,12 @@ async def test_task_tools_require_task_service() -> None:
         }
     )
     with pytest.raises(RuntimeError, match="task_service_unavailable"):
-        await tasks_spawn(TasksSpawnArgs(query="hi"), ctx)  # type: ignore[arg-type]
+        await tasks_spawn(TasksSpawnArgs(query="hi"), ctx)
 
 
 @pytest.mark.asyncio
 async def test_task_spawn_calls_service() -> None:
+    """Task spawn calls service."""
     from penguiflow.sessions.task_tools import TasksSpawnArgs, tasks_spawn
 
     service = DummyService()
@@ -312,13 +310,14 @@ async def test_task_spawn_calls_service() -> None:
             SUBAGENT_FLAG_KEY: False,
         }
     )
-    result = await tasks_spawn(TasksSpawnArgs(query="do it"), ctx)  # type: ignore[arg-type]
+    result = await tasks_spawn(TasksSpawnArgs(query="do it"), ctx)
     assert result.task_id == "t1"
     assert service.spawn_calls == [("s1", "do it")]
 
 
 @pytest.mark.asyncio
 async def test_task_tools_other_methods() -> None:
+    """Task tools other methods."""
     from penguiflow.sessions.task_tools import (
         TasksAcknowledgeBackgroundArgs,
         TasksApplyPatchArgs,
@@ -343,27 +342,33 @@ async def test_task_tools_other_methods() -> None:
             SUBAGENT_FLAG_KEY: False,
         }
     )
-    listed = await tasks_list(TasksListArgs(status=None), ctx)  # type: ignore[arg-type]
+    listed = await tasks_list(TasksListArgs(status=None), ctx)
     assert listed.tasks and listed.tasks[0].task_id == "t1"
     assert service.list_calls == ["s1"]
 
-    got = await tasks_get(TasksGetArgs(task_id="t1", include_result=True), ctx)  # type: ignore[arg-type]
+    got = await tasks_get(TasksGetArgs(task_id="t1", include_result=True), ctx)
     assert got.task_id == "t1"
     assert service.get_calls == [("s1", "t1", True)]
 
-    cancelled = await tasks_cancel(TasksCancelArgs(task_id="t1", reason="stop"), ctx)  # type: ignore[arg-type]
+    cancelled = await tasks_cancel(
+        TasksCancelArgs(task_id="t1", reason="stop"), ctx
+    )
     assert cancelled.ok is True
 
-    prioritized = await tasks_prioritize(TasksPrioritizeArgs(task_id="t1", priority=5), ctx)  # type: ignore[arg-type]
+    prioritized = await tasks_prioritize(
+        TasksPrioritizeArgs(task_id="t1", priority=5), ctx
+    )
     assert prioritized.ok is True
 
-    applied = await tasks_apply_patch(TasksApplyPatchArgs(patch_id="p1", action="reject"), ctx)  # type: ignore[arg-type]
+    applied = await tasks_apply_patch(
+        TasksApplyPatchArgs(patch_id="p1", action="reject"), ctx
+    )
     assert applied.ok is True
     assert applied.action == "reject"
 
     acknowledged = await tasks_acknowledge_background(
         TasksAcknowledgeBackgroundArgs(task_ids=["t1", "t2"]),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert acknowledged.acknowledged == ["t1", "t2"]
     assert acknowledged.cleaned_up == 2
@@ -372,20 +377,22 @@ async def test_task_tools_other_methods() -> None:
 
 @pytest.mark.asyncio
 async def test_task_tools_missing_service_or_session_id_errors() -> None:
+    """Task tools missing service or session ID errors."""
     from penguiflow.sessions.task_tools import TasksListArgs, tasks_list
 
     ctx = DummyContext({"session_id": "s1", SUBAGENT_FLAG_KEY: False})
     with pytest.raises(RuntimeError):
-        await tasks_list(TasksListArgs(status=None), ctx)  # type: ignore[arg-type]
+        await tasks_list(TasksListArgs(status=None), ctx)
 
     service = DummyService()
     ctx2 = DummyContext({TASK_SERVICE_KEY: service, SUBAGENT_FLAG_KEY: False})
     with pytest.raises(RuntimeError):
-        await tasks_list(TasksListArgs(status=None), ctx2)  # type: ignore[arg-type]
+        await tasks_list(TasksListArgs(status=None), ctx2)
 
 
 @pytest.mark.asyncio
 async def test_task_spawn_job_mode_calls_spawn_tool_job() -> None:
+    """Task spawn job mode calls spawn tool job."""
     from penguiflow.sessions.task_tools import TasksSpawnArgs, tasks_spawn
 
     service = DummyService()
@@ -399,7 +406,7 @@ async def test_task_spawn_job_mode_calls_spawn_tool_job() -> None:
     )
     result = await tasks_spawn(
         TasksSpawnArgs(mode="job", tool_name="t", tool_args={"x": 1}),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.task_id == "t_job"
     assert service.job_calls == [("s1", "t")]
@@ -425,7 +432,7 @@ async def test_task_spawn_with_group() -> None:
     )
     result = await tasks_spawn(
         TasksSpawnArgs(query="analyze data", group="analysis"),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.task_id == "t1"
     assert service.spawn_calls == [("s1", "analyze data")]
@@ -450,7 +457,7 @@ async def test_tasks_seal_group() -> None:
     )
     result = await tasks_seal_group(
         TasksSealGroupArgs(group_id="g1"),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.ok is True
     assert result.group_id == "g1"
@@ -475,7 +482,7 @@ async def test_tasks_cancel_group() -> None:
     )
     result = await tasks_cancel_group(
         TasksCancelGroupArgs(group_id="g1", reason="cancelled by user"),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.ok is True
 
@@ -499,7 +506,7 @@ async def test_tasks_apply_group() -> None:
     )
     result = await tasks_apply_group(
         TasksApplyGroupArgs(group_id="g1", action="apply"),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.ok is True
     assert result.action == "apply"
@@ -524,7 +531,7 @@ async def test_tasks_apply_group_reject() -> None:
     )
     result = await tasks_apply_group(
         TasksApplyGroupArgs(group_id="g1", action="reject"),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.ok is True
     assert result.action == "reject"
@@ -549,7 +556,7 @@ async def test_tasks_list_groups() -> None:
     )
     result = await tasks_list_groups(
         TasksListGroupsArgs(status=None),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert len(result.groups) == 1
     assert result.groups[0].group_id == "g1"
@@ -575,7 +582,7 @@ async def test_tasks_get_group() -> None:
     )
     result = await tasks_get_group(
         TasksGetGroupArgs(group_id="g1"),
-        ctx,  # type: ignore[arg-type]
+        ctx,
     )
     assert result.group_id == "g1"
     assert result.name == "test-group"

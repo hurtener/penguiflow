@@ -1,10 +1,14 @@
+"""Tests for session telemetry."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
+from typing_extensions import override
 
 from penguiflow.sessions import StreamingSession, TaskResult, TaskType
 from penguiflow.sessions.models import TaskStatus
@@ -15,29 +19,41 @@ from penguiflow.sessions.telemetry import (
     TaskTelemetrySink,
 )
 
+if TYPE_CHECKING:
+    from penguiflow.sessions.session import TaskRuntime
+
 
 class BufferSink(TaskTelemetrySink):
+    """Telemetry sink that buffers events."""
+
     def __init__(self) -> None:
+        """Start with no recorded state."""
         self.events: list[TaskTelemetryEvent] = []
 
+    @override
     async def emit(self, event: TaskTelemetryEvent) -> None:
         self.events.append(event)
 
 
 @pytest.mark.asyncio
 async def test_session_emits_telemetry_for_background_task() -> None:
+    """Session emits telemetry for background task."""
     sink = BufferSink()
     session = StreamingSession("telemetry-session", telemetry_sink=sink)
 
-    async def pipeline(_runtime):
+    async def pipeline(_runtime: TaskRuntime) -> TaskResult:
         await asyncio.sleep(0.05)
         return TaskResult(payload={"answer": "ok"})
 
-    task_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="x")
+    task_id = await session.spawn_task(
+        pipeline, task_type=TaskType.BACKGROUND, query="x"
+    )
     # Give it time to complete.
     await asyncio.sleep(0.15)
 
-    types = [event.event_type for event in sink.events if event.task_id == task_id]
+    types = [
+        event.event_type for event in sink.events if event.task_id == task_id
+    ]
     assert "task_spawned" in types
     assert "task_completed" in types
 
@@ -48,12 +64,12 @@ async def test_session_emits_telemetry_for_background_task() -> None:
 def _make_event(
     event_type: str,
     outcome: str = "completed",
-    **extra_fields,
+    **extra_fields: str | float | dict[str, object],
 ) -> TaskTelemetryEvent:
     """Helper to create telemetry events for testing."""
     return TaskTelemetryEvent(
-        event_type=event_type,  # type: ignore[arg-type]
-        outcome=outcome,  # type: ignore[arg-type]
+        event_type=event_type,
+        outcome=outcome,
         session_id="test-session",
         task_id="test-task-123",
         task_type=TaskType.BACKGROUND,
@@ -64,6 +80,7 @@ def _make_event(
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_spawned() -> None:
+    """Logging sink task spawned."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -84,6 +101,7 @@ async def test_logging_sink_task_spawned() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_completed() -> None:
+    """Logging sink task completed."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -99,6 +117,7 @@ async def test_logging_sink_task_completed() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_completed_no_duration() -> None:
+    """Logging sink task completed no duration."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -112,6 +131,7 @@ async def test_logging_sink_task_completed_no_duration() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_failed() -> None:
+    """Logging sink task failed."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -130,6 +150,7 @@ async def test_logging_sink_task_failed() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_failed_with_extra() -> None:
+    """Logging sink task failed with extra."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger, include_extra=True)
 
@@ -146,6 +167,7 @@ async def test_logging_sink_task_failed_with_extra() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_cancelled() -> None:
+    """Logging sink task cancelled."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -164,6 +186,7 @@ async def test_logging_sink_task_cancelled() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_group_completed() -> None:
+    """Logging sink task group completed."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -187,6 +210,7 @@ async def test_logging_sink_task_group_completed() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_task_group_failed() -> None:
+    """Logging sink task group failed."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -209,6 +233,7 @@ async def test_logging_sink_task_group_failed() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_default_logger() -> None:
+    """Logging sink default logger."""
     sink = LoggingTaskTelemetrySink()
     event = _make_event("task_spawned", outcome="spawned")
     # Should not raise
@@ -217,6 +242,7 @@ async def test_logging_sink_default_logger() -> None:
 
 @pytest.mark.asyncio
 async def test_logging_sink_with_parent_and_trace() -> None:
+    """Logging sink with parent and trace."""
     mock_logger = MagicMock(spec=logging.Logger)
     sink = LoggingTaskTelemetrySink(logger=mock_logger)
 
@@ -238,8 +264,8 @@ async def test_logging_sink_with_parent_and_trace() -> None:
 
 @pytest.mark.asyncio
 async def test_noop_sink_does_nothing() -> None:
+    """Noop sink does nothing."""
     sink = NoOpTaskTelemetrySink()
     event = _make_event("task_spawned", outcome="spawned")
-    result = await sink.emit(event)
-    assert result is None
-
+    # Emitting must not fail; there is nothing else to observe.
+    await sink.emit(event)

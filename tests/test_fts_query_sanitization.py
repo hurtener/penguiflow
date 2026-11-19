@@ -1,6 +1,8 @@
+"""Tests for FTS query sanitization."""
+
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
@@ -10,6 +12,11 @@ from penguiflow.planner.tool_search_cache import ToolSearchCache
 from penguiflow.registry import ModelRegistry
 from penguiflow.skills.local_store import LocalSkillStore
 from penguiflow.skills.models import SkillDefinition
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from penguiflow.planner.context import ToolContext
 
 
 class _Args(BaseModel):
@@ -21,12 +28,13 @@ class _Out(BaseModel):
 
 
 @tool(desc="Dummy tool")
-async def dummy_tool(args: _Args, ctx):
-    del ctx
+async def dummy_tool(args: _Args, _ctx: ToolContext) -> _Out:
+    """Echo the input as the output."""
     return _Out(text=args.text)
 
 
 def test_tool_search_fts_sanitizes_punctuation(tmp_path: Path) -> None:
+    """Tool search FTS sanitizes punctuation."""
     registry = ModelRegistry()
     registry.register("dummy_tool", _Args, _Out)
     specs = build_catalog([Node(dummy_tool, name="dummy_tool")], registry)
@@ -46,6 +54,8 @@ def test_tool_search_fts_sanitizes_punctuation(tmp_path: Path) -> None:
 
 
 def test_tool_search_fts_matches_name_tokens(tmp_path: Path) -> None:
+    """Tool search FTS matches name tokens."""
+
     class A(BaseModel):
         x: str
 
@@ -53,13 +63,14 @@ def test_tool_search_fts_matches_name_tokens(tmp_path: Path) -> None:
         y: str
 
     @tool(desc="Charting tool", tags=["mcp", "charting"])
-    async def charting_tool(args: A, ctx):
-        del ctx
+    async def charting_tool(args: A, _ctx: ToolContext) -> Out:
         return Out(y=args.x)
 
     registry = ModelRegistry()
     registry.register("charting.start_chart_analysis", A, Out)
-    specs = build_catalog([Node(charting_tool, name="charting.start_chart_analysis")], registry)
+    specs = build_catalog(
+        [Node(charting_tool, name="charting.start_chart_analysis")], registry
+    )
     cache = ToolSearchCache(cache_dir=str(tmp_path))
     cache.sync_tools(specs)
 
@@ -71,10 +82,15 @@ def test_tool_search_fts_matches_name_tokens(tmp_path: Path) -> None:
         allowed_names=None,
     )
     assert effective == "fts"
-    assert any(item["name"] == "charting.start_chart_analysis" for item in results)
+    assert any(
+        item["name"] == "charting.start_chart_analysis" for item in results
+    )
 
 
-def test_tool_search_fts_no_matches_does_not_force_fallback(tmp_path: Path) -> None:
+def test_tool_search_fts_no_matches_does_not_force_fallback(
+    tmp_path: Path,
+) -> None:
+    """Tool search FTS no matches does not force fallback."""
     registry = ModelRegistry()
     registry.register("dummy_tool", _Args, _Out)
     specs = build_catalog([Node(dummy_tool, name="dummy_tool")], registry)
@@ -93,6 +109,7 @@ def test_tool_search_fts_no_matches_does_not_force_fallback(tmp_path: Path) -> N
 
 
 def test_skill_search_fts_sanitizes_punctuation(tmp_path: Path) -> None:
+    """Skill search FTS sanitizes punctuation."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(
@@ -117,7 +134,10 @@ def test_skill_search_fts_sanitizes_punctuation(tmp_path: Path) -> None:
     assert isinstance(results, list)
 
 
-def test_skill_search_fuzzy_text_matches_with_extra_terms(tmp_path: Path) -> None:
+def test_skill_search_fuzzy_text_matches_with_extra_terms(
+    tmp_path: Path,
+) -> None:
+    """Skill search fuzzy text matches with extra terms."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(
@@ -142,7 +162,10 @@ def test_skill_search_fuzzy_text_matches_with_extra_terms(tmp_path: Path) -> Non
     assert any(item["name"] == "pack.ads.sov_comparison" for item in results)
 
 
-def test_skill_search_fts_no_matches_does_not_force_fallback(tmp_path: Path) -> None:
+def test_skill_search_fts_no_matches_does_not_force_fallback(
+    tmp_path: Path,
+) -> None:
+    """Skill search FTS no matches does not force fallback."""
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(
         SkillDefinition(

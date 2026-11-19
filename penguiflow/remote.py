@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .types import Message
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+
+    from .types import Message
 
 
 @dataclass(slots=True)
@@ -15,14 +17,20 @@ class RemoteCallRequest:
     """Input to :class:`RemoteTransport` implementations.
 
     Attributes:
-        message: The PenguiFlow :class:`~penguiflow.types.Message` being forwarded to the remote agent.
+        message: The PenguiFlow :class:`~penguiflow.types.Message` being
+            forwarded to the remote agent.
         skill: Name of the remote skill/capability to invoke.
         agent_url: Base URL of the remote agent to call.
-        agent_card: Optional agent card metadata (e.g. capabilities descriptor) for the target agent.
-        metadata: Optional request metadata forwarded alongside the message (typically ``message.meta``).
-        timeout_s: Optional per-call timeout in seconds; ``None`` means no explicit timeout override.
-        context_id: Optional remote conversation/context identifier to continue an existing context.
-        task_id: Optional remote task identifier to continue or resume an existing task.
+        agent_card: Optional agent card metadata (e.g. capabilities descriptor)
+            for the target agent.
+        metadata: Optional request metadata forwarded alongside the message
+            (typically ``message.meta``).
+        timeout_s: Optional per-call timeout in seconds; ``None`` means no
+            explicit timeout override.
+        context_id: Optional remote conversation/context identifier to continue
+            an existing context.
+        task_id: Optional remote task identifier to continue or resume an
+            existing task.
     """
 
     message: Message
@@ -41,9 +49,11 @@ class RemoteCallResult:
 
     Attributes:
         result: The unary result payload returned by the remote agent.
-        context_id: Remote conversation/context identifier assigned or reused by the remote agent, if any.
+        context_id: Remote conversation/context identifier assigned or reused
+            by the remote agent, if any.
         task_id: Remote task identifier assigned by the remote agent, if any.
-        agent_url: Agent URL that actually served the request (may differ from the requested ``agent_url``).
+        agent_url: Agent URL that actually served the request (may differ from
+            the requested ``agent_url``).
         meta: Optional additional metadata returned by the transport.
     """
 
@@ -61,10 +71,13 @@ class RemoteStreamEvent:
     Attributes:
         text: Incremental text chunk emitted by the remote agent, if any.
         done: Whether this event marks the end of the stream.
-        meta: Optional metadata associated with this chunk (e.g. token usage, reasoning tags).
-        context_id: Remote conversation/context identifier associated with this event, if known.
+        meta: Optional metadata associated with this chunk (e.g. token usage,
+            reasoning tags).
+        context_id: Remote conversation/context identifier associated with this
+            event, if known.
         task_id: Remote task identifier associated with this event, if known.
-        agent_url: Agent URL that produced this event, if known (may change across retries/redirects).
+        agent_url: Agent URL that produced this event, if known (may change
+            across retries/redirects).
         result: Optional final result payload attached to a terminal event.
     """
 
@@ -82,7 +95,8 @@ class RemoteTaskState(str, Enum):
 
     Attributes:
         UNSPECIFIED: State was not reported by the remote transport.
-        SUBMITTED: Task was accepted by the remote agent but has not started running yet.
+        SUBMITTED: Task was accepted by the remote agent but has not started
+            running yet.
         WORKING: Task is actively being processed by the remote agent.
         COMPLETED: Task finished successfully (terminal state).
         FAILED: Task finished with an error (terminal state).
@@ -120,7 +134,8 @@ class RemoteTaskStatus:
     Attributes:
         state: Current lifecycle state of the remote task.
         message: Optional human-readable status message from the remote agent.
-        timestamp: Optional ISO-8601 timestamp of when this status was reported.
+        timestamp: Optional ISO-8601 timestamp of when this status was
+            reported.
         raw: Optional raw, transport-specific status payload for debugging.
     """
 
@@ -132,7 +147,7 @@ class RemoteTaskStatus:
 
 @dataclass(slots=True)
 class RemoteTaskSnapshot:
-    """Normalized task representation returned by task-oriented remote transports.
+    """Normalized task returned by task-oriented remote transports.
 
     Attributes:
         task_id: Remote task identifier.
@@ -156,7 +171,7 @@ class RemoteTaskSnapshot:
 
     @property
     def is_terminal(self) -> bool:
-        """Return whether ``status.state`` is one of the terminal task states."""
+        """Return whether ``status.state`` is a terminal task state."""
         return self.status.state in REMOTE_TERMINAL_TASK_STATES
 
 
@@ -165,14 +180,16 @@ class RemoteTaskEvent:
     """Normalized event emitted by task subscriptions.
 
     Attributes:
-        kind: Discriminator describing the kind of event (transport-specific string).
+        kind: Discriminator describing the kind of event (transport-specific
+            string).
         task: Optional full task snapshot attached to this event.
         status: Optional status update attached to this event.
         text: Optional incremental text chunk attached to this event.
         result: Optional result payload attached to this event.
         artifact: Optional artifact attached to this event.
         done: Whether this event marks the end of the subscription stream.
-        context_id: Remote conversation/context identifier associated with this event, if known.
+        context_id: Remote conversation/context identifier associated with this
+            event, if known.
         task_id: Remote task identifier associated with this event, if known.
         agent_url: Agent URL that produced this event, if known.
         meta: Optional additional metadata for this event.
@@ -199,9 +216,11 @@ class RemoteTaskPage:
 
     Attributes:
         tasks: Page of normalized task snapshots.
-        next_page_token: Opaque token to fetch the next page; empty string if there is no next page.
+        next_page_token: Opaque token to fetch the next page; empty string if
+            there is no next page.
         page_size: Number of items requested per page.
-        total_size: Total number of tasks available across all pages, if reported by the transport.
+        total_size: Total number of tasks available across all pages, if
+            reported by the transport.
     """
 
     tasks: list[RemoteTaskSnapshot]
@@ -216,7 +235,8 @@ class RemotePushNotificationBinding:
 
     Attributes:
         name: Optional identifier/name of the push notification configuration.
-        config: The push notification configuration payload (transport-specific shape).
+        config: The push notification configuration payload (transport-specific
+            shape).
     """
 
     name: str | None
@@ -224,11 +244,12 @@ class RemotePushNotificationBinding:
 
 
 class RemoteTaskInputRequired(RuntimeError):
-    """Raised when a remote task needs user clarification before it can continue.
+    """Raised when a remote task needs user clarification to continue.
 
     Attributes:
-        snapshot: The :class:`RemoteTaskSnapshot` that triggered this exception, carrying the
-            remote task's current state (including any status message).
+        snapshot: The :class:`RemoteTaskSnapshot` that triggered this
+            exception, carrying the remote task's current state (including any
+            status message).
     """
 
     def __init__(self, snapshot: RemoteTaskSnapshot) -> None:
@@ -246,8 +267,9 @@ class RemoteTaskAuthRequired(RuntimeError):
     """Raised when a remote task requires authorization before it can continue.
 
     Attributes:
-        snapshot: The :class:`RemoteTaskSnapshot` that triggered this exception, carrying the
-            remote task's current state (including any status message).
+        snapshot: The :class:`RemoteTaskSnapshot` that triggered this
+            exception, carrying the remote task's current state (including any
+            status message).
     """
 
     def __init__(self, snapshot: RemoteTaskSnapshot) -> None:
@@ -256,7 +278,9 @@ class RemoteTaskAuthRequired(RuntimeError):
         Args:
             snapshot: Task snapshot whose status indicated ``AUTH_REQUIRED``.
         """
-        detail = snapshot.status.message or "Remote agent requires authorization."
+        detail = (
+            snapshot.status.message or "Remote agent requires authorization."
+        )
         super().__init__(detail)
         self.snapshot = snapshot
 
@@ -264,9 +288,10 @@ class RemoteTaskAuthRequired(RuntimeError):
 class RemoteTransport(Protocol):
     """Protocol describing the minimal remote invocation surface.
 
-    Implement this protocol to plug a custom remote-agent transport (e.g. HTTP, gRPC, A2A)
-    into planner toolsets such as ``penguiflow_a2a.A2AAgentToolset``. Only ``send``,
-    ``stream``, and ``cancel`` are required; richer task-oriented operations belong to
+    Implement this protocol to plug a custom remote-agent transport (e.g. HTTP,
+    gRPC, A2A) into planner toolsets such as
+    ``penguiflow_a2a.A2AAgentToolset``. Only ``send``, ``stream``, and
+    ``cancel`` are required; richer task-oriented operations belong to
     :class:`SupportsRemoteTasks`.
     """
 
@@ -274,25 +299,31 @@ class RemoteTransport(Protocol):
         """Perform a unary remote call.
 
         Args:
-            request: The call parameters, including the message, skill, and target agent URL.
+            request: The call parameters, including the message, skill, and
+                target agent URL.
 
         Returns:
             The remote agent's result wrapped in a :class:`RemoteCallResult`.
 
         Raises:
-            Exception: Implementations should raise on transport failure; PenguiFlow logs the
-                error via ``remote_call_error`` events and re-raises it to the caller.
+            Exception: Implementations should raise on transport failure;
+                PenguiFlow logs the error via ``remote_call_error`` events and
+                re-raises it to the caller.
         """
 
-    def stream(self, request: RemoteCallRequest) -> AsyncIterator[RemoteStreamEvent]:
+    def stream(
+        self, request: RemoteCallRequest
+    ) -> AsyncIterator[RemoteStreamEvent]:
         """Perform a remote call that yields streaming events.
 
         Args:
-            request: The call parameters, including the message, skill, and target agent URL.
+            request: The call parameters, including the message, skill, and
+                target agent URL.
 
         Yields:
-            :class:`RemoteStreamEvent` instances as the remote agent produces output; the final
-            event should set ``done=True`` and may include a terminal ``result``.
+            :class:`RemoteStreamEvent` instances as the remote agent produces
+            output; the final event should set ``done=True`` and may include a
+            terminal ``result``.
 
         Raises:
             Exception: Implementations should raise on transport failure.
@@ -306,8 +337,9 @@ class RemoteTransport(Protocol):
             task_id: Identifier of the remote task to cancel.
 
         Raises:
-            Exception: Implementations should raise on transport failure; callers in this
-                module log but otherwise swallow cancellation errors defensively.
+            Exception: Implementations should raise on transport failure;
+                callers in this module log but otherwise swallow cancellation
+                errors defensively.
         """
 
 
@@ -315,21 +347,27 @@ class RemoteTransport(Protocol):
 class SupportsRemoteTasks(Protocol):
     """Optional task-oriented remote execution surface.
 
-    Implement this protocol in addition to :class:`RemoteTransport` when the remote agent
-    supports long-running, resumable tasks (create/fetch/list/subscribe, plus push
-    notification configuration). Runtime checks use ``isinstance(transport, SupportsRemoteTasks)``
-    to detect support for these operations.
+    Implement this protocol in addition to :class:`RemoteTransport` when the
+    remote agent supports long-running, resumable tasks
+    (create/fetch/list/subscribe, plus push notification configuration).
+    Runtime checks use ``isinstance(transport, SupportsRemoteTasks)`` to detect
+    support for these operations.
     """
 
-    async def send_task(self, request: RemoteCallRequest, *, blocking: bool = False) -> RemoteTaskSnapshot:
+    async def send_task(
+        self, request: RemoteCallRequest, *, blocking: bool = False
+    ) -> RemoteTaskSnapshot:
         """Create or continue a remote task and return its current snapshot.
 
         Args:
-            request: The call parameters, including the message, skill, and target agent URL.
-            blocking: If ``True``, wait for the task to reach a terminal state before returning.
+            request: The call parameters, including the message, skill, and
+                target agent URL.
+            blocking: If ``True``, wait for the task to reach a terminal state
+                before returning.
 
         Returns:
-            The current :class:`RemoteTaskSnapshot` for the created/continued task.
+            The current :class:`RemoteTaskSnapshot` for the created/continued
+            task.
 
         Raises:
             Exception: Implementations should raise on transport failure.
@@ -347,13 +385,15 @@ class SupportsRemoteTasks(Protocol):
         Args:
             agent_url: Base URL of the remote agent that owns the task.
             task_id: Identifier of the remote task to fetch.
-            history_length: Optional cap on the number of history entries to return.
+            history_length: Optional cap on the number of history entries to
+                return.
 
         Returns:
             The current :class:`RemoteTaskSnapshot` for the task.
 
         Raises:
-            Exception: Implementations should raise if the task cannot be found or fetched.
+            Exception: Implementations should raise if the task cannot be found
+                or fetched.
         """
 
     async def list_tasks(
@@ -375,17 +415,22 @@ class SupportsRemoteTasks(Protocol):
             status: Optional task state (or raw string) to filter by.
             page_size: Maximum number of tasks to return per page.
             page_token: Optional opaque token to resume from a previous page.
-            history_length: Optional cap on the number of history entries per task.
-            include_artifacts: Whether to include task artifacts in the response.
+            history_length: Optional cap on the number of history entries per
+                task.
+            include_artifacts: Whether to include task artifacts in the
+                response.
 
         Returns:
-            A :class:`RemoteTaskPage` with the matching tasks and pagination info.
+            A :class:`RemoteTaskPage` with the matching tasks and pagination
+            info.
 
         Raises:
             Exception: Implementations should raise on transport failure.
         """
 
-    def subscribe_task(self, *, agent_url: str, task_id: str) -> AsyncIterator[RemoteTaskEvent]:
+    def subscribe_task(
+        self, *, agent_url: str, task_id: str
+    ) -> AsyncIterator[RemoteTaskEvent]:
         """Subscribe to task updates.
 
         Args:
@@ -393,8 +438,8 @@ class SupportsRemoteTasks(Protocol):
             task_id: Identifier of the remote task to subscribe to.
 
         Yields:
-            :class:`RemoteTaskEvent` instances as the remote task progresses; the final event
-            should set ``done=True``.
+            :class:`RemoteTaskEvent` instances as the remote task progresses;
+            the final event should set ``done=True``.
 
         Raises:
             Exception: Implementations should raise on transport failure.
@@ -414,7 +459,8 @@ class SupportsRemoteTasks(Protocol):
             agent_url: Base URL of the remote agent that owns the task.
             task_id: Identifier of the remote task to configure.
             config_id: Identifier for the push notification configuration.
-            config: The push notification configuration payload (transport-specific shape).
+            config: The push notification configuration payload
+                (transport-specific shape).
 
         Returns:
             The stored :class:`RemotePushNotificationBinding`.
@@ -435,13 +481,15 @@ class SupportsRemoteTasks(Protocol):
         Args:
             agent_url: Base URL of the remote agent that owns the task.
             task_id: Identifier of the remote task.
-            config_id: Identifier of the push notification configuration to fetch.
+            config_id: Identifier of the push notification configuration to
+                fetch.
 
         Returns:
             The matching :class:`RemotePushNotificationBinding`.
 
         Raises:
-            Exception: Implementations should raise if the configuration cannot be found.
+            Exception: Implementations should raise if the configuration cannot
+                be found.
         """
 
     async def list_task_push_notification_configs(
@@ -479,7 +527,8 @@ class SupportsRemoteTasks(Protocol):
         Args:
             agent_url: Base URL of the remote agent that owns the task.
             task_id: Identifier of the remote task.
-            config_id: Identifier of the push notification configuration to delete.
+            config_id: Identifier of the push notification configuration to
+                delete.
 
         Raises:
             Exception: Implementations should raise on transport failure.

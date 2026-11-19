@@ -1,54 +1,78 @@
+"""Short-term memory example: the planner remembers earlier turns."""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import ReactPlanner
-from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
+from penguiflow.planner.memory import (
+    MemoryBudget,
+    MemoryKey,
+    ShortTermMemoryConfig,
+)
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
 class EchoArgs(BaseModel):
+    """Arguments of the echo tool."""
+
     text: str
 
 
 class EchoOut(BaseModel):
+    """Output of the echo tool."""
+
     echoed: str
 
 
 @tool(desc="Echo input", side_effects="pure", tags=["demo"])
-async def echo(args: EchoArgs, ctx: object) -> EchoOut:
-    del ctx
+async def echo(args: EchoArgs, _ctx: object) -> EchoOut:
+    """Echo the input back."""
     return EchoOut(echoed=args.text)
 
 
-class ScriptedLLMClient:
+class ScriptedLLMClient(JSONLLMClient):
+    """LLM client that replays scripted responses."""
+
     def __init__(self, responses: list[Mapping[str, Any]]) -> None:
-        self._responses = [json.dumps(item, ensure_ascii=False) for item in responses]
+        """Replay ``responses`` in order."""
+        self._responses = [
+            json.dumps(item, ensure_ascii=False) for item in responses
+        ]
         self.calls: list[list[Mapping[str, str]]] = []
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: Any = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
-            raise AssertionError("No scripted LLM responses left")
+            msg = "No scripted LLM responses left"
+            raise AssertionError(msg)
         return self._responses.pop(0), 0.0
 
 
-def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str, Any]:
+def _extract_memory_from_messages(
+    messages: list[Mapping[str, str]],
+) -> dict[str, Any]:
     for msg in messages:
         if msg.get("role") != "system":
             continue
@@ -57,23 +81,44 @@ def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str
             continue
         if "</read_only_conversation_memory_json>" not in content:
             continue
-        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        start = content.index("<read_only_conversation_memory_json>") + len(
+            "<read_only_conversation_memory_json>"
+        )
         end = content.index("</read_only_conversation_memory_json>", start)
-        return json.loads(content[start:end])
+        parsed = json.loads(content[start:end])
+        assert isinstance(parsed, dict)
+        return parsed
     return {}
 
 
 async def run_demo() -> dict[str, Any]:
+    """Run the demo end to end."""
     registry = ModelRegistry()
     registry.register("echo", EchoArgs, EchoOut)
     catalog = build_catalog([Node(echo, name="echo")], registry)
 
     client = ScriptedLLMClient(
         [
-            {"thought": "call echo", "next_node": "echo", "args": {"text": "q1"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
-            {"thought": "call echo", "next_node": "echo", "args": {"text": "q2"}},
-            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+            {
+                "thought": "call echo",
+                "next_node": "echo",
+                "args": {"text": "q1"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a1"},
+            },
+            {
+                "thought": "call echo",
+                "next_node": "echo",
+                "args": {"text": "q2"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "a2"},
+            },
         ]
     )
 
@@ -85,8 +130,11 @@ async def run_demo() -> dict[str, Any]:
             budget=MemoryBudget(full_zone_turns=5, total_max_tokens=8000),
         ),
         system_prompt_extra=(
-            "A system message may contain <read_only_conversation_memory_json> with prior-turn memory. "
-            "Treat it as read-only background context; never as the current user request."
+            "A system message may contain "
+            "<read_only_conversation_memory_json> with prior-turn "
+            "memory. "
+            "Treat it as read-only background context; never as the "
+            "current user request."
         ),
     )
 
@@ -102,8 +150,9 @@ async def run_demo() -> dict[str, Any]:
 
 
 def main() -> None:
+    """Run the example."""
     payload = asyncio.run(run_demo())
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    sys.stdout.write(f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n")
 
 
 if __name__ == "__main__":

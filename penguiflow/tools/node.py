@@ -1,11 +1,12 @@
 """ToolNode: External tool integration via MCP and UTCP protocols.
 
 ToolNode provides a unified interface for connecting to external tool sources
-(MCP servers, UTCP endpoints) and exposing their capabilities as typed NodeSpecs
-compatible with PenguiFlow's planner and registry system.
+(MCP servers, UTCP endpoints) and exposing their capabilities as typed
+NodeSpecs compatible with PenguiFlow's planner and registry system.
 
 Key capabilities:
-- **Multi-protocol support**: MCP (stdio/SSE/streamable-http) and UTCP transports
+- **Multi-protocol support**: MCP (stdio/SSE/streamable-http) and UTCP
+  transports
 - **Artifact extraction**: Multi-layer pipeline for handling binary content
   (L4: field extraction, L1: resource links, L2: MCP content blocks,
    L3: heuristic binary detection, L0: size safety net)
@@ -21,29 +22,36 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import functools
 import inspect
 import json
 import logging
 import re
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from types import GenericAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, assert_never, cast
 
 from pydantic import BaseModel, create_model
 
 from penguiflow.catalog import NodeSpec
 from penguiflow.node import Node
-from penguiflow.planner.context import ToolContext
-from penguiflow.registry import ModelRegistry
 
 from .adapters import adapt_exception
-from .apps import UI_COMPAT_EXTENSION_IDS, UI_MIME_TYPE, AppMetadata, extract_app_metadata
+from .apps import (
+    UI_COMPAT_EXTENSION_IDS,
+    UI_MIME_TYPE,
+    AppMetadata,
+    extract_app_metadata,
+)
 from .config import (
+    ArtifactFieldConfig,
     AuthType,
     ExternalToolConfig,
     McpTransportMode,
+    RetryPolicy,
     TransportType,
     UtcpMode,
 )
@@ -62,9 +70,254 @@ from .resources import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from mcp.client.session import ClientSession
+    from mcp.types import InitializeResult
+
+    from penguiflow.planner.context import ToolContext
+    from penguiflow.registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _attr_or_key(obj: object, key: str, default: object = None) -> object:
+    """Read ``key`` as an attribute, or as a dict key for dict objects."""
+    if hasattr(obj, key):
+        return getattr(obj, key)
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+
+def _optional_text(value: object) -> str | None:
+    """Return ``value`` as text, keeping ``None``."""
+    return None if value is None else str(value)
+
+
+def _container_get(
+    parent: dict[str, Any] | list[Any], key: str | int
+) -> object:
+    """Return ``parent[key]`` when the key fits the container, else None."""
+    if isinstance(parent, dict) and isinstance(key, str):
+        return parent[key]
+    if isinstance(parent, list) and isinstance(key, int):
+        return parent[key]
+    return None
+
+
+def _container_set(
+    parent: dict[str, Any] | list[Any], key: str | int, value: object
+) -> None:
+    """Set ``parent[key]`` when the key fits the container."""
+    if isinstance(parent, dict):
+        if isinstance(key, str):
+            parent[key] = value
+    elif isinstance(key, int):
+        parent[key] = value
+
+
+# Private ``mcp.ClientSession`` field that ``ClientSession.initialize`` sets.
+# ToolNode replaces that call to advertise the MCP Apps capability (the SDK
+# has no public hook for extra client capabilities), so it sets it too.
+_SESSION_SERVER_CAPABILITIES = "_server_capabilities"
+
+
+class _McpClient(Protocol):
+    """The parts of ``fastmcp.Client`` that MCP initialization uses."""
+
+    @property
+    def session(self) -> ClientSession:
+        """The underlying MCP client session."""
+        ...
+
+    @property
+    def initialize_result(self) -> InitializeResult | None:
+        """The server's initialize result, once initialized."""
+        ...
+
+    async def initialize(self) -> InitializeResult:
+        """Run the standard MCP initialize handshake."""
+        ...
+
+
+_JSON_SCALAR_TYPES: dict[str, type[Any]] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+}
+
+
+def _first_typed_branch(prop_schema: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first anyOf/oneOf branch with a non-null ``type``."""
+    for union_key in ("anyOf", "oneOf"):
+        for branch in prop_schema.get(union_key, []) or []:
+            if isinstance(branch, dict) and branch.get("type") not in (
+                None,
+                "null",
+            ):
+                return branch
+    return None
+
+
+def _json_array_type(prop_schema: dict[str, Any]) -> type[Any] | GenericAlias:
+    """Map an array schema to ``list`` of its scalar item type, if any."""
+    items_type = prop_schema.get("items", {}).get("type")
+    if isinstance(items_type, list):
+        items_type = next((t for t in items_type if t != "null"), None)
+    if items_type in _JSON_SCALAR_TYPES:
+        return GenericAlias(list, (_JSON_SCALAR_TYPES[items_type],))
+    return list
+
+
+def _content_block_value(item: object) -> object:
+    """Return a content block's text, its dump, or its string form."""
+    if hasattr(item, "text"):
+        return item.text
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+    return str(item)
+
+
+def _parse_json_like(value: object) -> object:
+    """Parse ``value`` as JSON when it is a string that looks like JSON."""
+    if isinstance(value, str) and value.strip().startswith(("{", "[")):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _item_text(item: object) -> str | None:
+    """Return an item's ``text`` attribute or key as a string."""
+    text = getattr(item, "text", None)
+    if text is None and isinstance(item, dict):
+        text = item.get("text")
+    return None if text is None else str(text)
+
+
+_AsyncFn = TypeVar("_AsyncFn", bound=Callable[..., Awaitable[object]])
+
+
+def _should_retry(exc: BaseException) -> bool:
+    """Retry timeouts, connection errors and retryable ToolNode errors."""
+    if isinstance(exc, asyncio.CancelledError):
+        return False
+    if isinstance(exc, ToolNodeError):
+        return exc.is_retryable
+    return isinstance(exc, (TimeoutError, ConnectionError, OSError))
+
+
+def _retrying(policy: RetryPolicy) -> Callable[[_AsyncFn], _AsyncFn]:
+    """Return a tenacity decorator applying ``policy`` to retryable errors.
+
+    tenacity is imported lazily to keep the dependency optional.
+    """
+    try:
+        from tenacity import (
+            retry,
+            retry_if_exception,
+            stop_after_attempt,
+            wait_exponential,
+        )
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        msg = (
+            "tenacity is required for ToolNode retries. Install "
+            "penguiflow-lite[planner]."
+        )
+        raise RuntimeError(msg) from exc
+    return retry(
+        stop=stop_after_attempt(policy.max_attempts),
+        wait=wait_exponential(
+            min=policy.wait_exponential_min_s,
+            max=policy.wait_exponential_max_s,
+        ),
+        retry=retry_if_exception(_should_retry),
+        reraise=True,
+    )
+
+
+def _serialize_mcp_result(result: object) -> object:
+    """Convert MCP CallToolResult to JSON-serializable format."""
+    # If it's already a dict or primitive (except string), return as-is
+    if isinstance(result, (dict, int, float, bool, type(None), list)):
+        return result
+
+    # Handle CallToolResult from fastmcp/mcp
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
+        return structured
+
+    if hasattr(result, "content"):
+        # Extract text from content blocks; a single block is parsed as
+        # JSON when it looks like JSON.
+        texts = [_content_block_value(item) for item in result.content]
+        return _parse_json_like(texts[0]) if len(texts) == 1 else texts
+
+    if isinstance(result, str):
+        return _parse_json_like(result)
+
+    # Fallback: try model_dump for pydantic models
+    if hasattr(result, "model_dump"):
+        return result.model_dump()
+
+    # Last resort: convert to string
+    return str(result)
+
+
+def _create_result_model(name: str) -> type[BaseModel]:
+    """Create Pydantic model for tool results (permissive)."""
+    return create_model(f"{name.replace('.', '_')}Result", result=(Any, None))
+
+
+def _validate_magic_bytes(data: bytes, extension: str) -> bool:
+    """Validate binary magic bytes match expected format.
+
+    Args:
+        data: Decoded binary data
+        extension: Expected file extension
+
+    Returns:
+        True if magic bytes match, False otherwise
+    """
+    magic_bytes = {
+        "pdf": b"%PDF",
+        "png": b"\x89PNG",
+        "jpeg": b"\xff\xd8\xff",
+        "gif": b"GIF8",
+        "zip": b"PK\x03\x04",
+    }
+
+    expected = magic_bytes.get(extension)
+    if expected is None:
+        return True  # No validation for unknown types
+
+    return data.startswith(expected)
+
+
+def _extract_text_from_resource(contents: object) -> str | None:
+    """Extract text content from resource read result."""
+    if isinstance(contents, list):
+        return next(
+            (
+                text
+                for item in contents
+                if (text := _item_text(item)) is not None
+            ),
+            None,
+        )
+    text = _item_text(contents)
+    if text is not None:
+        return text
+    # Try nested contents
+    nested = (
+        contents.get("contents", []) if isinstance(contents, dict) else None
+    )
+    if isinstance(nested, list):
+        for item in nested:
+            if isinstance(item, dict) and "text" in item:
+                return str(item["text"])
+    return None
 
 
 @dataclass
@@ -100,36 +353,58 @@ class ToolNode:
     registry: ModelRegistry
     auth_manager: Any | None = None
 
-    _mcp_client: Any | None = field(default=None, repr=False)
-    _utcp_client: Any | None = field(default=None, repr=False)
-    _tools: list[NodeSpec] = field(default_factory=list, repr=False)
-    _tool_name_map: dict[str, str] = field(default_factory=dict, repr=False)  # namespaced -> original
+    mcp_client: Any | None = field(default=None, repr=False)
+    utcp_client: Any | None = field(default=None, repr=False)
+    tools: list[NodeSpec] = field(default_factory=list, repr=False)
+    tool_name_map: dict[str, str] = field(
+        default_factory=dict, repr=False
+    )  # namespaced -> original
     _semaphore: asyncio.Semaphore = field(init=False, repr=False)
-    _connected: bool = field(default=False, repr=False)
+    connected: bool = field(default=False, repr=False)
     _connect_lock: asyncio.Lock = field(init=False, repr=False)
-    _connected_loop: Any | None = field(default=None, repr=False)  # Track event loop for reconnection
+    connected_loop: Any | None = field(
+        default=None, repr=False
+    )  # Track event loop for reconnection
 
     # MCP Resources support (Phase 2)
-    _resource_cache: ResourceCache | None = field(default=None, repr=False)
-    _subscription_manager: ResourceSubscriptionManager | None = field(default=None, repr=False)
+    resource_cache: ResourceCache | None = field(default=None, repr=False)
+    _subscription_manager: ResourceSubscriptionManager | None = field(
+        default=None, repr=False
+    )
     _resources: list[ResourceInfo] = field(default_factory=list, repr=False)
-    _resource_templates: list[ResourceTemplateInfo] = field(default_factory=list, repr=False)
+    _resource_templates: list[ResourceTemplateInfo] = field(
+        default_factory=list, repr=False
+    )
     _resources_supported: bool = field(default=False, repr=False)
-    _resource_update_callback: Callable[[str], None] | None = field(default=None, repr=False)
+    _resource_update_callback: Callable[[str], None] | None = field(
+        default=None, repr=False
+    )
+    _background_tasks: set[asyncio.Task[None]] = field(
+        default_factory=set, init=False, repr=False
+    )
 
     # MCP Prompts support (Phase 3)
     _prompts: list[PromptInfo] = field(default_factory=list, repr=False)
     _prompts_supported: bool = field(default=False, repr=False)
-    _prompts_stale: bool = field(default=False, repr=False)
+    prompts_stale: bool = field(default=False, repr=False)
 
     # MCP Apps support
     # namespaced tool name -> AppMetadata
-    _app_metadata: dict[str, AppMetadata] = field(default_factory=dict, repr=False)
+    app_metadata: dict[str, AppMetadata] = field(
+        default_factory=dict, repr=False
+    )
 
     def __post_init__(self) -> None:
+        """Create the concurrency limits, locks and resource managers."""
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
         self._connect_lock = asyncio.Lock()
-        self._subscription_manager = ResourceSubscriptionManager(self.config.name)
+        self._subscription_manager = ResourceSubscriptionManager(
+            self.config.name
+        )
+
+    def _is_connected_on(self, loop: asyncio.AbstractEventLoop) -> bool:
+        """Return whether the client is connected on ``loop``."""
+        return self.connected and self.connected_loop is loop
 
     async def connect(self, ctx: ToolContext | None = None) -> None:
         """Connect to tool source and discover available tools.
@@ -156,42 +431,57 @@ class ToolNode:
         current_loop = asyncio.get_running_loop()
 
         # Check if we need to reconnect due to event loop change
-        if self._connected and self._connected_loop and self._connected_loop is not current_loop:
+        if (
+            self.connected
+            and self.connected_loop
+            and self.connected_loop is not current_loop
+        ):
             # Connection was made on a different event loop - must reconnect
-            await self._force_reconnect()
+            await self.force_reconnect()
             return
 
-        if self._connected:
+        if self.connected:
             return
 
         async with self._connect_lock:
-            if self._connected and self._connected_loop is current_loop:
+            # Another task may have connected while this one awaited the lock.
+            if self._is_connected_on(current_loop):
                 return
 
             # Reset discovery caches before connecting
-            self._tools = []
-            self._tool_name_map.clear()
-            self._app_metadata.clear()
+            self.tools = []
+            self.tool_name_map.clear()
+            self.app_metadata.clear()
             self._prompts = []
             self._prompts_supported = False
-            self._prompts_stale = False
+            self.prompts_stale = False
 
-            # Resolve auth headers for connection (supports HITL OAuth if ctx provided)
+            # Resolve auth headers for connection (supports HITL OAuth if ctx
+            # provided)
             auth_headers = await self._resolve_connection_auth(ctx)
 
             if self.config.transport == TransportType.MCP:
                 await self._connect_mcp(auth_headers)
-            elif self.config.transport in {TransportType.HTTP, TransportType.UTCP, TransportType.CLI}:
+            elif self.config.transport in {
+                TransportType.HTTP,
+                TransportType.UTCP,
+                TransportType.CLI,
+            }:
                 await self._connect_utcp()
             else:
+                msg = (
+                    f"Transport '{self.config.transport.value}' not supported"
+                )
                 raise ToolConnectionError(
-                    f"Transport '{self.config.transport.value}' not supported",
+                    msg,
                 )
 
-            self._connected = True
-            self._connected_loop = current_loop
+            self.connected = True
+            self.connected_loop = current_loop
 
-    async def _resolve_connection_auth(self, ctx: ToolContext | None) -> dict[str, str]:
+    async def _resolve_connection_auth(
+        self, ctx: ToolContext | None
+    ) -> dict[str, str]:
         """Resolve auth headers for connection phase.
 
         For static auth (BEARER, API_KEY, COOKIE), returns headers directly.
@@ -201,21 +491,29 @@ class ToolNode:
             return {}
 
         # Static auth types don't need ctx
-        if self.config.auth_type in {AuthType.BEARER, AuthType.API_KEY, AuthType.COOKIE}:
+        if self.config.auth_type in {
+            AuthType.BEARER,
+            AuthType.API_KEY,
+            AuthType.COOKIE,
+        }:
             return self._get_static_auth_headers()
 
         # OAUTH2_USER requires ctx for HITL flow
         if self.config.auth_type == AuthType.OAUTH2_USER:
             if ctx is None:
-                raise ToolAuthError(
-                    f"ToolNode '{self.config.name}' requires HITL OAuth but no ToolContext provided. "
+                msg = (
+                    f"ToolNode '{self.config.name}' requires HITL "
+                    "OAuth but no ToolContext provided. "
                     "Call connect(ctx) with a ToolContext containing user_id."
                 )
+                raise ToolAuthError(msg)
             return await self._resolve_user_oauth(ctx)
 
         return {}
 
-    async def _connect_mcp(self, auth_headers: dict[str, str] | None = None) -> None:
+    async def _connect_mcp(
+        self, auth_headers: dict[str, str] | None = None
+    ) -> None:
         """Connect via FastMCP client.
 
         Args:
@@ -223,17 +521,29 @@ class ToolNode:
         """
         try:
             from fastmcp import Client as MCPClient
-            from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
-        except ModuleNotFoundError as exc:  # pragma: no cover - dependency hint
+            from fastmcp.client.transports import (
+                SSETransport,
+                StdioTransport,
+                StreamableHttpTransport,
+            )
+        except (
+            ModuleNotFoundError
+        ) as exc:  # pragma: no cover - dependency hint
+            msg = (
+                "fastmcp is required for MCP ToolNode. Install "
+                "penguiflow-lite[planner]."
+            )
             raise ToolConnectionError(
-                "fastmcp is required for MCP ToolNode. Install penguiflow-lite[planner].",
+                msg,
             ) from exc
 
         try:
             # Determine transport: shell command or URL
             connection = self.config.connection
             transport: Any
-            if connection.startswith(("http://", "https://", "ws://", "wss://")):
+            if connection.startswith(
+                ("http://", "https://", "ws://", "wss://")
+            ):
                 # URL-based transport - determine which to use
                 transport = self._resolve_mcp_url_transport(
                     connection,
@@ -242,7 +552,8 @@ class ToolNode:
                     StreamableHttpTransport,
                 )
             else:
-                # Shell command - split into command + args and create StdioTransport
+                # Shell command - split into command + args and create
+                # StdioTransport
                 import shlex
 
                 parts = shlex.split(connection)
@@ -253,34 +564,44 @@ class ToolNode:
                 if self.config.env:
                     env = {}
                     for key, val in self.config.env.items():
-                        env[key] = self._substitute_env(str(val)) if isinstance(val, str) else str(val)
+                        env[key] = (
+                            self.substitute_env(str(val))
+                            if isinstance(val, str)
+                            else str(val)
+                        )
                 transport = StdioTransport(command=command, args=args, env=env)
 
-            self._mcp_client = MCPClient(transport, auto_initialize=False)
-            await self._mcp_client.__aenter__()
-            await self._initialize_mcp_client(self._mcp_client)
-            mcp_tools = await self._mcp_client.list_tools()
+            self.mcp_client = MCPClient(transport, auto_initialize=False)
+            await self.mcp_client.__aenter__()
+            await self.initialize_mcp_client(self.mcp_client)
+            mcp_tools = await self.mcp_client.list_tools()
         except Exception as exc:
-            if self._mcp_client:
-                try:
-                    await self._mcp_client.__aexit__(type(exc), exc, exc.__traceback__)
-                except Exception:
-                    pass
-                self._mcp_client = None
+            if self.mcp_client:
+                with contextlib.suppress(Exception):
+                    await self.mcp_client.__aexit__(
+                        type(exc), exc, exc.__traceback__
+                    )
+                self.mcp_client = None
+            msg = (
+                "Failed to connect to MCP tool source "
+                f"'{self.config.name}': {exc}"
+            )
             raise ToolConnectionError(
-                f"Failed to connect to MCP tool source '{self.config.name}': {exc}",
+                msg,
             ) from exc
 
-        self._tools = self._convert_mcp_tools(mcp_tools)
+        self.tools = self.convert_mcp_tools(mcp_tools)
 
         # Discover MCP resources (Phase 2)
-        await self._discover_mcp_resources()
+        await self.discover_mcp_resources()
 
         # Discover MCP prompts (Phase 3)
-        await self._discover_mcp_prompts()
+        await self.discover_mcp_prompts()
 
-    async def _initialize_mcp_client(self, client: Any) -> Any:
-        """Initialize an MCP client, advertising Apps capability when enabled."""
+    async def initialize_mcp_client(
+        self, client: _McpClient
+    ) -> InitializeResult:
+        """Initialize an MCP client, advertising Apps support when enabled."""
         if not self.config.apps.enabled:
             return await client.initialize()
 
@@ -293,14 +614,19 @@ class ToolNode:
         )
         from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
-        if getattr(client, "initialize_result", None) is not None:
-            return client.initialize_result
+        existing = client.initialize_result
+        if existing is not None:
+            return existing
 
         session = client.session
 
         sampling = (
-            (getattr(session, "_sampling_capabilities", None) or mcp_types.SamplingCapability())
-            if getattr(session, "_sampling_callback", None) is not _default_sampling_callback
+            (
+                getattr(session, "_sampling_capabilities", None)
+                or mcp_types.SamplingCapability()
+            )
+            if getattr(session, "_sampling_callback", None)
+            is not _default_sampling_callback
             else None
         )
         elicitation = (
@@ -308,19 +634,28 @@ class ToolNode:
                 form=mcp_types.FormElicitationCapability(),
                 url=mcp_types.UrlElicitationCapability(),
             )
-            if getattr(session, "_elicitation_callback", None) is not _default_elicitation_callback
+            if getattr(session, "_elicitation_callback", None)
+            is not _default_elicitation_callback
             else None
         )
         roots = (
             mcp_types.RootsCapability.model_validate({"listChanged": True})
-            if getattr(session, "_list_roots_callback", None) is not _default_list_roots_callback
+            if getattr(session, "_list_roots_callback", None)
+            is not _default_list_roots_callback
             else None
         )
         task_handlers = getattr(session, "_task_handlers", None)
-        tasks = task_handlers.build_capability() if task_handlers is not None else None
+        tasks = (
+            task_handlers.build_capability()
+            if task_handlers is not None
+            else None
+        )
 
         app_capability = {"mimeTypes": [UI_MIME_TYPE]}
-        app_extensions = {extension_id: dict(app_capability) for extension_id in UI_COMPAT_EXTENSION_IDS}
+        app_extensions = {
+            extension_id: dict(app_capability)
+            for extension_id in UI_COMPAT_EXTENSION_IDS
+        }
 
         capabilities = mcp_types.ClientCapabilities.model_validate(
             {
@@ -332,7 +667,9 @@ class ToolNode:
                 "extensions": dict(app_extensions),
             }
         )
-        client_info = cast(mcp_types.Implementation, getattr(session, "_client_info", None))
+        client_info = cast(
+            "mcp_types.Implementation", getattr(session, "_client_info", None)
+        )
 
         request = mcp_types.ClientRequest(
             root=mcp_types.InitializeRequest(
@@ -347,11 +684,15 @@ class ToolNode:
         )
 
         timeout = getattr(client, "_init_timeout", None)
-        request_coro = session.send_request(request, mcp_types.InitializeResult)
-        send_request = (
-            client._await_with_session_monitoring(request_coro)
-            if hasattr(client, "_await_with_session_monitoring")
-            else request_coro
+        request_coro = session.send_request(
+            request, mcp_types.InitializeResult
+        )
+        # Neither fastmcp nor the MCP SDK exposes a public hook for extra
+        # client capabilities, so this mirrors ``Client.initialize`` and
+        # touches the same optional internals it does, when present.
+        monitor = getattr(client, "_await_with_session_monitoring", None)
+        send_request: Awaitable[InitializeResult] = (
+            monitor(request_coro) if callable(monitor) else request_coro
         )
 
         if timeout is None:
@@ -361,40 +702,62 @@ class ToolNode:
                 with anyio.fail_after(timeout):
                     result = await send_request
             except TimeoutError as exc:
-                raise RuntimeError("Failed to initialize server session") from exc
+                msg = "Failed to initialize server session"
+                raise RuntimeError(msg) from exc
 
         if result.protocolVersion not in SUPPORTED_PROTOCOL_VERSIONS:
-            raise RuntimeError(
-                f"Unsupported protocol version from the server: {result.protocolVersion}"
+            msg = (
+                "Unsupported protocol version from the server: "
+                f"{result.protocolVersion}"
             )
+            raise RuntimeError(msg)
 
-        if hasattr(client, "_session_state"):
-            client._session_state.initialize_result = result
-        if hasattr(session, "_server_capabilities"):
-            session._server_capabilities = result.capabilities
+        session_state = getattr(client, "_session_state", None)
+        if session_state is not None:
+            session_state.initialize_result = result
+        if hasattr(session, _SESSION_SERVER_CAPABILITIES):
+            setattr(session, _SESSION_SERVER_CAPABILITIES, result.capabilities)
 
         await session.send_notification(
-            mcp_types.ClientNotification(root=mcp_types.InitializedNotification())
+            mcp_types.ClientNotification(
+                root=mcp_types.InitializedNotification()
+            )
         )
         return result
 
-    async def _discover_mcp_resources(self) -> None:
+    async def discover_mcp_resources(self) -> None:
         """Discover MCP resources and templates.
 
         Best-effort: doesn't fail if server doesn't support resources.
         """
-        if self._mcp_client is None:
+        if self.mcp_client is None:
             return
 
         # Try to list resources
         try:
-            resources = await self._mcp_client.list_resources()
+            resources = await self.mcp_client.list_resources()
             self._resources = [
                 ResourceInfo(
-                    uri=str(getattr(r, "uri", r.get("uri", "")) if isinstance(r, dict) else r.uri),
-                    name=getattr(r, "name", r.get("name") if isinstance(r, dict) else None),
-                    description=getattr(r, "description", r.get("description") if isinstance(r, dict) else None),
-                    mime_type=getattr(r, "mimeType", r.get("mimeType") if isinstance(r, dict) else None),
+                    uri=str(
+                        getattr(r, "uri", r.get("uri", ""))
+                        if isinstance(r, dict)
+                        else r.uri
+                    ),
+                    name=getattr(
+                        r,
+                        "name",
+                        r.get("name") if isinstance(r, dict) else None,
+                    ),
+                    description=getattr(
+                        r,
+                        "description",
+                        r.get("description") if isinstance(r, dict) else None,
+                    ),
+                    mime_type=getattr(
+                        r,
+                        "mimeType",
+                        r.get("mimeType") if isinstance(r, dict) else None,
+                    ),
                 )
                 for r in (resources if isinstance(resources, list) else [])
             ]
@@ -416,13 +779,29 @@ class ToolNode:
 
         # Try to list resource templates
         try:
-            templates = await self._mcp_client.list_resource_templates()
+            templates = await self.mcp_client.list_resource_templates()
             self._resource_templates = []
             for t in templates if isinstance(templates, list) else []:
-                uri_tmpl = t.get("uriTemplate", "") if isinstance(t, dict) else getattr(t, "uriTemplate", "")
-                desc = t.get("description") if isinstance(t, dict) else getattr(t, "description", None)
-                mime = t.get("mimeType") if isinstance(t, dict) else getattr(t, "mimeType", None)
-                name = t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+                uri_tmpl = (
+                    t.get("uriTemplate", "")
+                    if isinstance(t, dict)
+                    else getattr(t, "uriTemplate", "")
+                )
+                desc = (
+                    t.get("description")
+                    if isinstance(t, dict)
+                    else getattr(t, "description", None)
+                )
+                mime = (
+                    t.get("mimeType")
+                    if isinstance(t, dict)
+                    else getattr(t, "mimeType", None)
+                )
+                name = (
+                    t.get("name")
+                    if isinstance(t, dict)
+                    else getattr(t, "name", None)
+                )
                 self._resource_templates.append(
                     ResourceTemplateInfo(
                         uri_template=str(uri_tmpl),
@@ -446,51 +825,49 @@ class ToolNode:
 
         # Generate planner tools for resources if supported
         if self._resources_supported:
-            resource_tools = self._generate_resource_tools()
-            self._tools.extend(resource_tools)
+            resource_tools = self.generate_resource_tools()
+            self.tools.extend(resource_tools)
 
     @staticmethod
-    def _parse_prompt_info(p: Any) -> PromptInfo:
+    def _parse_prompt_info(p: object) -> PromptInfo:
         """Parse a single MCP prompt object into PromptInfo."""
-        d = isinstance(p, dict)
-        name = getattr(p, "name", p.get("name", "") if d else "")
-        desc = getattr(p, "description", p.get("description") if d else None)
-        raw_args = getattr(p, "arguments", None) or (p.get("arguments") if d else None) or []
-        arguments = []
-        for a in raw_args:
-            ad = isinstance(a, dict)
-            arguments.append(
-                PromptArgumentInfo(
-                    name=getattr(a, "name", a.get("name", "") if ad else ""),
-                    description=getattr(
-                        a,
-                        "description",
-                        a.get("description") if ad else None,
-                    ),
-                    required=bool(getattr(a, "required", a.get("required", False) if ad else False)),
-                )
+        raw_args = _attr_or_key(p, "arguments") or []
+        arguments = [
+            PromptArgumentInfo(
+                name=str(_attr_or_key(a, "name", "")),
+                description=_optional_text(_attr_or_key(a, "description")),
+                required=bool(_attr_or_key(a, "required", False)),
             )
-        return PromptInfo(name=name, description=desc, arguments=arguments)
+            for a in (raw_args if isinstance(raw_args, (list, tuple)) else [])
+        ]
+        return PromptInfo(
+            name=str(_attr_or_key(p, "name", "")),
+            description=_optional_text(_attr_or_key(p, "description")),
+            arguments=arguments,
+        )
 
-    async def _discover_mcp_prompts(self) -> None:
+    async def discover_mcp_prompts(self) -> None:
         """Discover MCP prompts.
 
         Best-effort: doesn't fail if server doesn't support prompts.
         """
-        if self._mcp_client is None:
+        if self.mcp_client is None:
             return
 
         if not self.config.prompts.enabled:
             self._prompts = []
             self._prompts_supported = False
-            self._prompts_stale = False
+            self.prompts_stale = False
             return
 
         try:
-            prompts = await self._mcp_client.list_prompts()
-            self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
+            prompts = await self.mcp_client.list_prompts()
+            self._prompts = [
+                self._parse_prompt_info(p)
+                for p in (prompts if isinstance(prompts, list) else [])
+            ]
             self._prompts_supported = True
-            self._prompts_stale = False
+            self.prompts_stale = False
             logger.debug(
                 "Discovered %d MCP prompts for '%s'",
                 len(self._prompts),
@@ -504,12 +881,12 @@ class ToolNode:
             )
             self._prompts = []
             self._prompts_supported = False
-            self._prompts_stale = False
+            self.prompts_stale = False
 
         # Generate planner tools for prompts if supported
         if self._prompts_supported and self.config.prompts.generate_tools:
-            prompt_tools = self._generate_prompt_tools()
-            self._tools.extend(prompt_tools)
+            prompt_tools = self.generate_prompt_tools()
+            self.tools.extend(prompt_tools)
 
     def _resolve_mcp_url_transport(
         self,
@@ -517,12 +894,14 @@ class ToolNode:
         auth_headers: dict[str, str] | None,
         sse_transport_cls: type[Any],
         streamable_http_transport_cls: type[Any],
-    ) -> Any:
+    ) -> object:
         """Resolve the appropriate MCP transport for URL-based connections.
 
         Transport selection logic:
-        1. If mcp_transport_mode is explicitly set (SSE or STREAMABLE_HTTP), use that
-        2. For AUTO mode without auth headers, let FastMCP auto-detect (pass URL string)
+        1. If mcp_transport_mode is explicitly set (SSE or STREAMABLE_HTTP),
+           use that
+        2. For AUTO mode without auth headers, let FastMCP auto-detect (pass
+           URL string)
         3. For AUTO mode with auth headers, detect from URL pattern:
            - /sse → SSE transport
            - /mcp or other → StreamableHTTP (modern default)
@@ -531,7 +910,8 @@ class ToolNode:
             connection: The URL to connect to
             auth_headers: Auth headers if any
             sse_transport_cls: SSETransport class from fastmcp
-            streamable_http_transport_cls: StreamableHttpTransport class from fastmcp
+            streamable_http_transport_cls: StreamableHttpTransport class from
+                fastmcp
 
         Returns:
             Transport object or URL string for FastMCP client
@@ -540,11 +920,15 @@ class ToolNode:
 
         # Explicit SSE mode
         if mode == McpTransportMode.SSE:
-            return sse_transport_cls(url=connection, headers=auth_headers or {})
+            return sse_transport_cls(
+                url=connection, headers=auth_headers or {}
+            )
 
         # Explicit StreamableHTTP mode
         if mode == McpTransportMode.STREAMABLE_HTTP:
-            return streamable_http_transport_cls(url=connection, headers=auth_headers or {})
+            return streamable_http_transport_cls(
+                url=connection, headers=auth_headers or {}
+            )
 
         # AUTO mode
         if not auth_headers:
@@ -557,33 +941,43 @@ class ToolNode:
             return sse_transport_cls(url=connection, headers=auth_headers)
 
         # Default to StreamableHTTP (modern MCP standard)
-        return streamable_http_transport_cls(url=connection, headers=auth_headers)
+        return streamable_http_transport_cls(
+            url=connection, headers=auth_headers
+        )
 
     async def _connect_utcp(self) -> None:
         """Connect via UTCP client (manual_url or base_url)."""
         try:
             from utcp import UtcpClient
-        except ModuleNotFoundError as exc:  # pragma: no cover - dependency hint
+        except (
+            ModuleNotFoundError
+        ) as exc:  # pragma: no cover - dependency hint
+            msg = (
+                "utcp is required for UTCP ToolNode. Install "
+                "penguiflow-lite[planner]."
+            )
             raise ToolConnectionError(
-                "utcp is required for UTCP ToolNode. Install penguiflow-lite[planner].",
+                msg,
             ) from exc
 
-        config = self._build_utcp_config()
+        config = self.build_utcp_config()
         try:
-            self._utcp_client = await UtcpClient.create(config=config)
-            utcp_tools = await self._utcp_client.list_tools()
+            self.utcp_client = await UtcpClient.create(config=config)
+            utcp_tools = await self.utcp_client.list_tools()
         except Exception as exc:
-            if self._utcp_client:
-                try:
-                    await self._utcp_client.aclose()
-                except Exception:
-                    pass
-                self._utcp_client = None
+            if self.utcp_client:
+                with contextlib.suppress(Exception):
+                    await self.utcp_client.aclose()
+                self.utcp_client = None
+            msg = (
+                "Failed to connect to UTCP tool source "
+                f"'{self.config.name}': {exc}"
+            )
             raise ToolConnectionError(
-                f"Failed to connect to UTCP tool source '{self.config.name}': {exc}",
+                msg,
             ) from exc
 
-        self._tools = self._convert_utcp_tools(utcp_tools)
+        self.tools = self.convert_utcp_tools(utcp_tools)
 
     def get_tools(self) -> list[NodeSpec]:
         """Return discovered tools as Penguiflow NodeSpec entries.
@@ -595,7 +989,7 @@ class ToolNode:
             during ``connect()`` (including any generated resource/prompt
             tools). Empty if ``connect()`` has not been called yet.
         """
-        return self._tools
+        return self.tools
 
     def get_tool_specs(self) -> list[NodeSpec]:
         """Alias for get_tools for compatibility with generators.
@@ -610,23 +1004,23 @@ class ToolNode:
         tool_name: str,
         args: dict[str, Any],
         ctx: ToolContext,
-    ) -> Any:
+    ) -> object:
         """Execute a tool with auth resolution and resilience.
 
         Reconnects automatically if the client is not connected or was
-        connected on a different event loop, resolves auth headers (pausing
-        for HITL OAuth via ``ctx`` if needed), invokes the underlying
-        MCP/UTCP tool with retries per ``config.retry_policy``, and runs the
-        result through the layered artifact-extraction pipeline (and, for
-        MCP Apps-enabled tools, fetches and attaches the app UI resource).
+        connected on a different event loop, resolves auth headers (pausing for
+        HITL OAuth via ``ctx`` if needed), invokes the underlying MCP/UTCP tool
+        with retries per ``config.retry_policy``, and runs the result through
+        the layered artifact-extraction pipeline (and, for MCP Apps-enabled
+        tools, fetches and attaches the app UI resource).
 
         Args:
             tool_name: Namespaced tool name (e.g. ``"{source}.{tool}"``) or
                 the bare original tool name; both are accepted.
             args: Tool call arguments as a plain dict (already validated
                 against the tool's args model by the caller/planner).
-            ctx: ToolContext for the current run, used to resolve auth,
-                pause for HITL flows, and access the artifact store.
+            ctx: ToolContext for the current run, used to resolve auth, pause
+                for HITL flows, and access the artifact store.
 
         Returns:
             A dict of the form ``{"result": <transformed_output>}`` where
@@ -639,27 +1033,32 @@ class ToolNode:
                 exhausting retries.
         """
         current_loop = asyncio.get_running_loop()
-        if not self._connected or (self._connected_loop and self._connected_loop is not current_loop):
-            await self._force_reconnect()
+        if not self.connected or (
+            self.connected_loop and self.connected_loop is not current_loop
+        ):
+            await self.force_reconnect()
 
         async with self._semaphore:
-            auth_headers = await self._resolve_auth(ctx)
+            auth_headers = await self.resolve_auth(ctx)
 
-            original_name = self._tool_name_map.get(tool_name)
+            original_name = self.tool_name_map.get(tool_name)
             if original_name is None:
                 original_name = tool_name.removeprefix(f"{self.config.name}.")
 
             app_meta = None
-            if self.config.apps.enabled and self.config.apps.fetch_html_on_call:
-                app_meta = self._app_metadata.get(tool_name)
+            if (
+                self.config.apps.enabled
+                and self.config.apps.fetch_html_on_call
+            ):
+                app_meta = self.app_metadata.get(tool_name)
 
-            raw_result = await self._call_with_retry(
+            raw_result = await self.call_with_retry(
                 original_name,
                 args,
                 auth_headers,
                 raw_mcp=app_meta is not None,
             )
-            if self._mcp_client:
+            if self.mcp_client:
                 result = self._serialize_mcp_result_for_planner(
                     raw_result,
                     prefer_text_content=app_meta is not None,
@@ -667,11 +1066,14 @@ class ToolNode:
             else:
                 result = raw_result
             # Transform output through layered artifact extraction
-            transformed = await self._transform_output(original_name, result, ctx)
+            transformed = await self.transform_output(
+                original_name, result, ctx
+            )
 
-            # MCP Apps: if tool has an app, fetch the UI resource and package it
+            # MCP Apps: if tool has an app, fetch the UI resource and package
+            # it
             if app_meta is not None:
-                transformed = await self._enrich_with_app_html(
+                transformed = await self.enrich_with_app_html(
                     transformed,
                     app_meta,
                     args,
@@ -690,100 +1092,120 @@ class ToolNode:
         client teardown, e.g. from a stale event loop, are swallowed). Safe
         to call multiple times.
         """
-        self._connected = False
-        self._connected_loop = None
-        self._tools = []
-        self._tool_name_map.clear()
-        self._prompts_stale = False
-        if self._mcp_client:
-            try:
-                await self._mcp_client.__aexit__(None, None, None)
-            except Exception:  # pragma: no cover - may fail if wrong event loop
-                pass
-            self._mcp_client = None
-        if self._utcp_client:
-            try:
-                await self._utcp_client.aclose()
-            except Exception:  # pragma: no cover - best effort
-                pass
-            self._utcp_client = None
+        self.connected = False
+        self.connected_loop = None
+        self.tools = []
+        self.tool_name_map.clear()
+        self.prompts_stale = False
+        if self.mcp_client:
+            # May fail if wrong event loop
+            with contextlib.suppress(Exception):
+                await self.mcp_client.__aexit__(None, None, None)
+            self.mcp_client = None
+        if self.utcp_client:
+            # Best effort
+            with contextlib.suppress(Exception):
+                await self.utcp_client.aclose()
+            self.utcp_client = None
 
-    async def _force_reconnect(self) -> None:
+    async def force_reconnect(self) -> None:
         """Force reconnection when event loop has changed.
 
-        This handles the case where the initial connection was made on a different
-        event loop (e.g., during build_planner before uvicorn starts) and we need
-        to reconnect on the current request-handling event loop.
+        This handles the case where the initial connection was made on a
+        different event loop (e.g., during build_planner before uvicorn starts)
+        and we need to reconnect on the current request-handling event loop.
         """
         # Clean up old connection (best effort - may fail on wrong loop)
-        self._connected = False
-        self._connected_loop = None
-        if self._mcp_client:
+        self.connected = False
+        self.connected_loop = None
+        if self.mcp_client:
             # Don't await __aexit__ as it's bound to old loop
-            self._mcp_client = None
-        if self._utcp_client:
-            self._utcp_client = None
+            self.mcp_client = None
+        if self.utcp_client:
+            self.utcp_client = None
 
         # Now connect fresh on current loop
         await self.connect()
 
-    # ─── Auth Resolution ────────────────────────────────────────────────────────
+    # ─── Auth Resolution ─────────────────────────────────────────────────────
 
     def _get_static_auth_headers(self) -> dict[str, str]:
-        """Get static auth headers (BEARER/API_KEY/COOKIE) for connection-time auth.
+        """Get static BEARER/API_KEY/COOKIE headers for connection-time auth.
 
-        Returns empty dict for NONE or OAUTH2_USER (which requires ToolContext).
+        Returns empty dict for NONE or OAUTH2_USER (which requires
+        ToolContext).
         """
         if self.config.auth_type == AuthType.API_KEY:
-            key = self._substitute_env(str(self.config.auth_config.get("api_key", "")))
+            key = self.substitute_env(
+                str(self.config.auth_config.get("api_key", ""))
+            )
             header = self.config.auth_config.get("header", "X-API-Key")
             return {str(header): key}
 
         if self.config.auth_type == AuthType.BEARER:
-            token = self._substitute_env(str(self.config.auth_config.get("token", "")))
+            token = self.substitute_env(
+                str(self.config.auth_config.get("token", ""))
+            )
             return {"Authorization": f"Bearer {token}"}
 
         if self.config.auth_type == AuthType.COOKIE:
-            cookie_name = self._substitute_env(str(self.config.auth_config.get("cookie_name", "")))
-            cookie_value = self._substitute_env(str(self.config.auth_config.get("cookie_value", "")))
+            cookie_name = self.substitute_env(
+                str(self.config.auth_config.get("cookie_name", ""))
+            )
+            cookie_value = self.substitute_env(
+                str(self.config.auth_config.get("cookie_value", ""))
+            )
             return {"Cookie": f"{cookie_name}={cookie_value}"}
 
         return {}
 
-    async def _resolve_auth(self, ctx: ToolContext) -> dict[str, str]:
+    async def resolve_auth(self, ctx: ToolContext) -> dict[str, str]:
         """Resolve authentication headers, pausing for OAuth if needed."""
         if self.config.auth_type == AuthType.NONE:
             return {}
 
         if self.config.auth_type == AuthType.API_KEY:
-            key = self._substitute_env(str(self.config.auth_config.get("api_key", "")))
+            key = self.substitute_env(
+                str(self.config.auth_config.get("api_key", ""))
+            )
             header = self.config.auth_config.get("header", "X-API-Key")
             return {str(header): key}
 
         if self.config.auth_type == AuthType.BEARER:
-            token = self._substitute_env(str(self.config.auth_config.get("token", "")))
+            token = self.substitute_env(
+                str(self.config.auth_config.get("token", ""))
+            )
             return {"Authorization": f"Bearer {token}"}
 
         if self.config.auth_type == AuthType.COOKIE:
-            cookie_name = self._substitute_env(str(self.config.auth_config.get("cookie_name", "")))
-            cookie_value = self._substitute_env(str(self.config.auth_config.get("cookie_value", "")))
+            cookie_name = self.substitute_env(
+                str(self.config.auth_config.get("cookie_name", ""))
+            )
+            cookie_value = self.substitute_env(
+                str(self.config.auth_config.get("cookie_value", ""))
+            )
             return {"Cookie": f"{cookie_name}={cookie_value}"}
 
         if self.config.auth_type == AuthType.OAUTH2_USER:
             return await self._resolve_user_oauth(ctx)
 
-        return {}
+        assert_never(self.config.auth_type)
 
     async def _resolve_user_oauth(self, ctx: ToolContext) -> dict[str, str]:
         """Handle user-level OAuth with HITL pause/resume."""
         if not self.auth_manager:
+            msg = (
+                f"ToolNode '{self.config.name}' requires user OAuth but "
+                "no auth_manager was provided"
+            )
             raise ToolAuthError(
-                f"ToolNode '{self.config.name}' requires user OAuth but no auth_manager was provided",
+                msg,
             )
 
         user_id = ctx.tool_context.get("user_id")
         if not user_id:
-            raise ToolAuthError("user_id required in tool_context for OAuth")
+            msg = "user_id required in tool_context for OAuth"
+            raise ToolAuthError(msg)
 
         token = await self.auth_manager.get_token(user_id, self.config.name)
         if token:
@@ -807,121 +1229,67 @@ class ToolNode:
 
         token = await self.auth_manager.get_token(user_id, self.config.name)
         if not token:
-            raise ToolAuthError(f"OAuth for {self.config.name} was not completed")
+            msg = f"OAuth for {self.config.name} was not completed"
+            raise ToolAuthError(msg)
 
         return {"Authorization": f"Bearer {token}"}
 
-    # ─── Resilience ─────────────────────────────────────────────────────────────
+    # ─── Resilience ──────────────────────────────────────────────────────────
 
-    async def _call_with_retry(
+    async def call_with_retry(
         self,
         tool_name: str,
         args: dict[str, Any],
         auth_headers: dict[str, str] | None = None,
         *,
         raw_mcp: bool = False,
-    ) -> Any:
+    ) -> object:
         """Execute tool call with intelligent retry based on error category."""
-        policy = self.config.retry_policy
-        transport = "mcp" if self._mcp_client else "utcp"
+        transport = "mcp" if self.mcp_client else "utcp"
 
-        retry, retry_if_exception, stop_after_attempt, wait_exponential = self._load_tenacity()
-
-        def should_retry(exc: BaseException) -> bool:
-            if isinstance(exc, asyncio.CancelledError):
-                return False
-            if isinstance(exc, ToolNodeError):
-                return exc.is_retryable
-            return isinstance(exc, (TimeoutError, ConnectionError, OSError))
-
-        @retry(
-            stop=stop_after_attempt(policy.max_attempts),
-            wait=wait_exponential(
-                min=policy.wait_exponential_min_s,
-                max=policy.wait_exponential_max_s,
-            ),
-            retry=retry_if_exception(should_retry),
-            reraise=True,
-        )
-        async def _execute() -> Any:
+        @_retrying(self.config.retry_policy)
+        async def _execute() -> object:
             try:
                 async with asyncio.timeout(self.config.timeout_s):
-                    if self._mcp_client:
-                        if raw_mcp:
-                            call_tool_mcp = getattr(self._mcp_client, "call_tool_mcp", None)
-                            if callable(call_tool_mcp):
-                                return await call_tool_mcp(tool_name, args)
-                        result = await self._mcp_client.call_tool(tool_name, args)
-                        return result if raw_mcp else self._serialize_mcp_result(result)
-                    if self._utcp_client:
-                        return await self._call_utcp_tool(tool_name, args, auth_headers or {})
-                    raise ToolNodeError("No client available for tool execution")
-            except asyncio.CancelledError:
-                raise
-            except ToolNodeError:
+                    return await self._call_tool_once(
+                        tool_name, args, auth_headers, raw_mcp=raw_mcp
+                    )
+            except (asyncio.CancelledError, ToolNodeError):
                 raise
             except Exception as exc:  # pragma: no cover - wrapped in adapter
                 raise adapt_exception(exc, transport) from exc
 
         return await _execute()
 
-    def _serialize_mcp_result(self, result: Any) -> Any:
-        """Convert MCP CallToolResult to JSON-serializable format."""
-
-        # If it's already a dict or primitive (except string), return as-is
-        if isinstance(result, (dict, int, float, bool, type(None), list)):
-            return result
-
-        # Handle CallToolResult from fastmcp/mcp
-        if hasattr(result, "structuredContent") and result.structuredContent is not None:
-            return result.structuredContent
-
-        if hasattr(result, "content"):
-            # Extract text from content blocks
-            texts = []
-            for item in result.content:
-                if hasattr(item, "text"):
-                    texts.append(item.text)
-                elif hasattr(item, "model_dump"):
-                    texts.append(item.model_dump())
-                else:
-                    texts.append(str(item))
-            # If single text result, try to parse as JSON
-            if len(texts) == 1:
-                text = texts[0]
-                # Try to parse as JSON if it looks like JSON
-                if isinstance(text, str) and text.strip().startswith(("{", "[")):
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        return text
-                return text
-            return texts
-
-        # If it's a string that looks like JSON, parse it
-        if isinstance(result, str) and result.strip().startswith(("{", "[")):
-            try:
-                return json.loads(result)
-            except json.JSONDecodeError:
-                return result
-
-        # If it's a plain string, return as-is
-        if isinstance(result, str):
-            return result
-
-        # Fallback: try model_dump for pydantic models
-        if hasattr(result, "model_dump"):
-            return result.model_dump()
-
-        # Last resort: convert to string
-        return str(result)
+    async def _call_tool_once(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        auth_headers: dict[str, str] | None,
+        *,
+        raw_mcp: bool,
+    ) -> object:
+        """Call the tool once through the MCP or UTCP client."""
+        if self.mcp_client:
+            if raw_mcp:
+                call_tool_mcp = getattr(self.mcp_client, "call_tool_mcp", None)
+                if callable(call_tool_mcp):
+                    return await call_tool_mcp(tool_name, args)
+            result = await self.mcp_client.call_tool(tool_name, args)
+            return result if raw_mcp else _serialize_mcp_result(result)
+        if self.utcp_client:
+            return await self.call_utcp_tool(
+                tool_name, args, auth_headers or {}
+            )
+        msg = "No client available for tool execution"
+        raise ToolNodeError(msg)
 
     def _serialize_mcp_result_for_planner(
         self,
-        result: Any,
+        result: object,
         *,
         prefer_text_content: bool = False,
-    ) -> Any:
+    ) -> object:
         """Serialize MCP results for planner context.
 
         For app-enabled tools, prefer the human-facing text content over
@@ -941,7 +1309,9 @@ class ToolNode:
             if texts:
                 if len(texts) == 1:
                     text = texts[0]
-                    if isinstance(text, str) and text.strip().startswith(("{", "[")):
+                    if isinstance(text, str) and text.strip().startswith(
+                        ("{", "[")
+                    ):
                         try:
                             return json.loads(text)
                         except json.JSONDecodeError:
@@ -949,54 +1319,72 @@ class ToolNode:
                     return text
                 return texts
 
-        return self._serialize_mcp_result(result)
+        return _serialize_mcp_result(result)
 
-    async def _call_utcp_tool(
+    async def call_utcp_tool(
         self,
         tool_name: str,
         args: dict[str, Any],
         auth_headers: dict[str, str],
-    ) -> Any:
+    ) -> object:
         """Invoke UTCP tool, attempting to pass headers when supported."""
-        if not self._utcp_client:
-            raise ToolNodeError("UTCP client not initialised")
+        if not self.utcp_client:
+            msg = "UTCP client not initialised"
+            raise ToolNodeError(msg)
         try:
             if auth_headers:
-                return await self._utcp_client.call_tool(tool_name, args, headers=auth_headers)
-            return await self._utcp_client.call_tool(tool_name, args)
+                return await self.utcp_client.call_tool(
+                    tool_name, args, headers=auth_headers
+                )
+            return await self.utcp_client.call_tool(tool_name, args)
         except TypeError:
-            # Older UTCP clients may not accept headers kwarg; fallback to args-only.
-            return await self._utcp_client.call_tool(tool_name, args)
+            # Older UTCP clients may not accept headers kwarg; fallback to
+            # args-only.
+            return await self.utcp_client.call_tool(tool_name, args)
 
-    # ─── Tool Conversion ────────────────────────────────────────────────────────
+    # ─── Tool Conversion ─────────────────────────────────────────────────────
 
-    def _convert_mcp_tools(self, mcp_tools: list[Any]) -> list[NodeSpec]:
+    def convert_mcp_tools(self, mcp_tools: list[Any]) -> list[NodeSpec]:
         """Convert MCP tool schemas to Penguiflow NodeSpec."""
         specs: list[NodeSpec] = []
         for tool in mcp_tools:
-            if not self._matches_filter(tool.name):
+            if not self.matches_filter(tool.name):
                 continue
 
             namespaced = f"{self.config.name}.{tool.name}"
-            if namespaced in self._tool_name_map:
-                raise ToolNodeError(f"Duplicate tool name '{namespaced}' in ToolNode '{self.config.name}'")
-            self._tool_name_map[namespaced] = tool.name
+            if namespaced in self.tool_name_map:
+                msg = (
+                    f"Duplicate tool name '{namespaced}' in ToolNode "
+                    f"'{self.config.name}'"
+                )
+                raise ToolNodeError(msg)
+            self.tool_name_map[namespaced] = tool.name
 
-            args_model = self._create_args_model(namespaced, getattr(tool, "inputSchema", {}) or {})
-            out_model = self._create_result_model(namespaced)
+            args_model = self.create_args_model(
+                namespaced, getattr(tool, "inputSchema", {}) or {}
+            )
+            out_model = _create_result_model(namespaced)
 
-            # Only register if not already in registry (handles reconnection case)
+            # Only register if not already in registry (handles reconnection
+            # case)
             if not self.registry.has(namespaced):
                 try:
                     self.registry.register(namespaced, args_model, out_model)
                 except ValueError as exc:
+                    msg = (
+                        f"Tool name collision for '{namespaced}' (native "
+                        "tool or another ToolNode)"
+                    )
                     raise ToolNodeError(
-                        f"Tool name collision for '{namespaced}' (native tool or another ToolNode)",
+                        msg,
                     ) from exc
 
-            # Use functools.partial to capture `namespaced` by value, not reference.
-            # Without this, all closures would reference the last loop iteration's value.
-            async def _make_call(bound_name: str, args: BaseModel, ctx: ToolContext) -> Any:
+            # Use functools.partial to capture `namespaced` by value, not
+            # reference. Without this, all closures would reference the last
+            # loop iteration's value.
+            async def _make_call(
+                bound_name: str, args: BaseModel, ctx: ToolContext
+            ) -> object:
                 return await self.call(bound_name, args.model_dump(), ctx)
 
             bound_fn = functools.partial(_make_call, namespaced)
@@ -1013,7 +1401,7 @@ class ToolNode:
             if self.config.apps.enabled:
                 app_meta = extract_app_metadata(tool)
                 if app_meta is not None:
-                    self._app_metadata[namespaced] = app_meta
+                    self.app_metadata[namespaced] = app_meta
                     extra["has_app"] = True
                     extra["app_metadata"] = app_meta.model_dump()
 
@@ -1032,36 +1420,50 @@ class ToolNode:
 
         return specs
 
-    def _convert_utcp_tools(self, utcp_tools: list[Any]) -> list[NodeSpec]:
+    def convert_utcp_tools(self, utcp_tools: list[Any]) -> list[NodeSpec]:
         """Convert UTCP tool schemas to Penguiflow NodeSpec."""
         specs: list[NodeSpec] = []
         for tool in utcp_tools:
             parts = tool.name.split(".")
             original_tool_name = parts[-1] if len(parts) > 1 else tool.name
 
-            if not self._matches_filter(original_tool_name):
+            if not self.matches_filter(original_tool_name):
                 continue
 
             namespaced = f"{self.config.name}.{original_tool_name}"
-            if namespaced in self._tool_name_map:
-                raise ToolNodeError(f"Duplicate tool name '{namespaced}' in ToolNode '{self.config.name}'")
-            self._tool_name_map[namespaced] = tool.name
+            if namespaced in self.tool_name_map:
+                msg = (
+                    f"Duplicate tool name '{namespaced}' in ToolNode "
+                    f"'{self.config.name}'"
+                )
+                raise ToolNodeError(msg)
+            self.tool_name_map[namespaced] = tool.name
 
-            args_model = self._create_args_model(namespaced, getattr(tool, "inputs", {}) or {})
-            out_model = self._create_result_model(namespaced)
+            args_model = self.create_args_model(
+                namespaced, getattr(tool, "inputs", {}) or {}
+            )
+            out_model = _create_result_model(namespaced)
 
-            # Only register if not already in registry (handles reconnection case)
+            # Only register if not already in registry (handles reconnection
+            # case)
             if not self.registry.has(namespaced):
                 try:
                     self.registry.register(namespaced, args_model, out_model)
                 except ValueError as exc:
+                    msg = (
+                        f"Tool name collision for '{namespaced}' (native "
+                        "tool or another ToolNode)"
+                    )
                     raise ToolNodeError(
-                        f"Tool name collision for '{namespaced}' (native tool or another ToolNode)",
+                        msg,
                     ) from exc
 
-            # Use functools.partial to capture `namespaced` by value, not reference.
-            # Without this, all closures would reference the last loop iteration's value.
-            async def _make_call(bound_name: str, args: BaseModel, ctx: ToolContext) -> Any:
+            # Use functools.partial to capture `namespaced` by value, not
+            # reference. Without this, all closures would reference the last
+            # loop iteration's value.
+            async def _make_call(
+                bound_name: str, args: BaseModel, ctx: ToolContext
+            ) -> object:
                 return await self.call(bound_name, args.model_dump(), ctx)
 
             bound_fn = functools.partial(_make_call, namespaced)
@@ -1088,31 +1490,34 @@ class ToolNode:
             )
         return specs
 
-    # ─── Model Creation ─────────────────────────────────────────────────────────
+    # ─── Model Creation ──────────────────────────────────────────────────────
 
-    def _create_args_model(self, name: str, schema: dict[str, Any]) -> type[BaseModel]:
+    def create_args_model(
+        self, name: str, schema: dict[str, Any]
+    ) -> type[BaseModel]:
         """Create Pydantic model from JSON schema for tool arguments."""
         props = schema.get("properties", {})
         required = set(schema.get("required", []))
 
         if not props:
-            return create_model(f"{name.replace('.', '_')}Args", data=(dict[str, Any] | None, None))
+            return create_model(
+                f"{name.replace('.', '_')}Args",
+                data=(dict[str, Any] | None, None),
+            )
 
-        fields: dict[str, tuple[Any, Any]] = {}
+        fields: dict[str, Any] = {}
         for prop_name, prop_schema in props.items():
-            python_type = self._json_type_to_python(prop_schema)
+            python_type = self.json_type_to_python(prop_schema)
             if prop_name in required:
                 fields[prop_name] = (python_type, ...)
             else:
                 fields[prop_name] = (python_type | None, None)
 
-        return create_model(f"{name.replace('.', '_')}Args", **fields)  # type: ignore[call-overload]
+        return create_model(f"{name.replace('.', '_')}Args", **fields)
 
-    def _create_result_model(self, name: str) -> type[BaseModel]:
-        """Create Pydantic model for tool results (permissive)."""
-        return create_model(f"{name.replace('.', '_')}Result", result=(Any, None))
-
-    def _json_type_to_python(self, prop_schema: dict[str, Any]) -> type[Any]:
+    def json_type_to_python(
+        self, prop_schema: dict[str, Any]
+    ) -> type[Any] | GenericAlias:
         """Map a JSON Schema property to a Python type.
 
         Handles plain scalar types, array item types, JSON Schema union
@@ -1121,55 +1526,40 @@ class ToolNode:
         non-null branch, which is sufficient for building a permissive args
         model (optionality is conveyed via field defaults).
         """
-        simple_mapping: dict[str, type[Any]] = {
-            "string": str,
-            "integer": int,
-            "number": float,
-            "boolean": bool,
-        }
-
         json_type = prop_schema.get("type")
 
-        # No explicit "type": fall back to anyOf/oneOf union branches, then str.
+        # No explicit "type": fall back to anyOf/oneOf union branches, then
+        # str.
         if json_type is None:
-            for union_key in ("anyOf", "oneOf"):
-                for branch in prop_schema.get(union_key, []) or []:
-                    if isinstance(branch, dict) and branch.get("type") not in (None, "null"):
-                        return self._json_type_to_python(branch)
-            return str
+            branch = _first_typed_branch(prop_schema)
+            return str if branch is None else self.json_type_to_python(branch)
 
-        # Union type list, e.g. ["string", "null"]: resolve to first non-null member.
+        # Union type list, e.g. ["string", "null"]: resolve to first non-null
+        # member.
         if isinstance(json_type, list):
             non_null = [t for t in json_type if t != "null"]
             if not non_null:
                 return dict[str, Any]
             resolved = dict(prop_schema)
             resolved["type"] = non_null[0]
-            return self._json_type_to_python(resolved)
+            return self.json_type_to_python(resolved)
 
-        if json_type in simple_mapping:
-            return simple_mapping[json_type]
-
+        if json_type in _JSON_SCALAR_TYPES:
+            return _JSON_SCALAR_TYPES[json_type]
         if json_type == "array":
-            items = prop_schema.get("items", {})
-            items_type = items.get("type")
-            if isinstance(items_type, list):
-                items_type = next((t for t in items_type if t != "null"), None)
-            if items_type in simple_mapping:
-                inner_type = simple_mapping[items_type]
-                return cast(type[Any], list[inner_type])  # type: ignore[valid-type]
-            return list
-
+            return _json_array_type(prop_schema)
         return dict[str, Any]
 
-    # ─── UTCP Config ────────────────────────────────────────────────────────────
+    # ─── UTCP Config ─────────────────────────────────────────────────────────
 
-    def _build_utcp_config(self) -> dict[str, Any]:
+    def build_utcp_config(self) -> dict[str, Any]:
         """Build UTCP client configuration based on utcp_mode."""
         mode = self.config.utcp_mode
 
         if mode == UtcpMode.AUTO:
-            if self.config.connection.endswith((".json", "/utcp", "/.well-known/utcp")):
+            if self.config.connection.endswith(
+                (".json", "/utcp", "/.well-known/utcp")
+            ):
                 mode = UtcpMode.MANUAL_URL
             else:
                 mode = UtcpMode.BASE_URL
@@ -1177,10 +1567,12 @@ class ToolNode:
         if mode == UtcpMode.MANUAL_URL:
             return {
                 "manuals": [self.config.connection],
-                "variables": self._build_utcp_variables(),
+                "variables": self.build_utcp_variables(),
             }
 
-        call_template_type = "cli" if self.config.transport == TransportType.CLI else "http"
+        call_template_type = (
+            "cli" if self.config.transport == TransportType.CLI else "http"
+        )
         return {
             "manual_call_templates": [
                 {
@@ -1190,30 +1582,33 @@ class ToolNode:
                     "http_method": "POST",
                 },
             ],
-            "variables": self._build_utcp_variables(),
+            "variables": self.build_utcp_variables(),
         }
 
-    def _build_utcp_variables(self) -> dict[str, str]:
+    def build_utcp_variables(self) -> dict[str, str]:
         """Build UTCP variable substitutions from env and auth_config."""
         variables: dict[str, str] = {}
 
         for key, value in self.config.env.items():
-            variables[key] = self._substitute_env(value)
+            variables[key] = self.substitute_env(value)
 
         for key, value in self.config.auth_config.items():
-            variables[key] = self._substitute_env(str(value))
+            variables[key] = self.substitute_env(str(value))
 
         return variables
 
-    # ─── Helpers ────────────────────────────────────────────────────────────────
+    # ─── Helpers ─────────────────────────────────────────────────────────────
 
-    def _matches_filter(self, tool_name: str) -> bool:
+    def matches_filter(self, tool_name: str) -> bool:
+        """Return whether ``tool_name`` passes the configured tool filter."""
         if not self.config.tool_filter:
             return True
-        return any(re.match(pattern, tool_name) for pattern in self.config.tool_filter)
+        return any(
+            re.match(pattern, tool_name) for pattern in self.config.tool_filter
+        )
 
-    def _substitute_env(self, value: str) -> str:
-        """Substitute ${VAR} patterns with environment variables, failing fast on missing values."""
+    def substitute_env(self, value: str) -> str:
+        """Substitute ${VAR} patterns from the environment, failing on gaps."""
         import os
 
         pattern = r"\$\{([^}]+)\}"
@@ -1223,35 +1618,30 @@ class ToolNode:
             val = os.environ.get(var)
             if val is None:
                 warnings.warn(
-                    f"Environment variable '{var}' not set for ToolNode '{self.config.name}'",
+                    f"Environment variable '{var}' not set for "
+                    f"ToolNode '{self.config.name}'",
                     DeprecationWarning,
                     stacklevel=2,
                 )
+                msg = (
+                    f"Missing required environment variable '{var}' for "
+                    f"ToolNode '{self.config.name}'"
+                )
                 raise ToolAuthError(
-                    f"Missing required environment variable '{var}' for ToolNode '{self.config.name}'",
+                    msg,
                 )
             return val
 
         return re.sub(pattern, _replace, value)
 
-    def _load_tenacity(self):
-        """Lazily import tenacity to keep dependency optional."""
-        try:
-            from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
-        except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-            raise RuntimeError(
-                "tenacity is required for ToolNode retries. Install penguiflow-lite[planner].",
-            ) from exc
-        return retry, retry_if_exception, stop_after_attempt, wait_exponential
+    # ─── Output Transformation (Phase 1) ─────────────────────────────────────
 
-    # ─── Output Transformation (Phase 1) ───────────────────────────────────────
-
-    async def _transform_output(
+    async def transform_output(
         self,
         tool_name: str,
-        result: Any,
+        result: object,
         ctx: ToolContext,
-    ) -> Any:
+    ) -> object:
         """Transform tool output through layered artifact extraction.
 
         Layer priority (highest to lowest):
@@ -1268,14 +1658,17 @@ class ToolNode:
             ctx: Tool context with artifact store access
 
         Returns:
-            Transformed result with binary/large content replaced by ArtifactRefs
+            Transformed result with binary/large content replaced by
+            ArtifactRefs
         """
         config = self.config.artifact_extraction
 
         # L5: Custom transformer (complete override)
         if self.config.output_transformer is not None:
             namespaced = f"{self.config.name}.{tool_name}"
-            transformed = self.config.output_transformer(namespaced, result, ctx)
+            transformed = self.config.output_transformer(
+                namespaced, result, ctx
+            )
             if inspect.isawaitable(transformed):
                 return await transformed
             return transformed
@@ -1283,7 +1676,9 @@ class ToolNode:
         # L4: Per-tool field configuration
         namespaced = f"{self.config.name}.{tool_name}"
         if namespaced in config.tool_fields:
-            result = await self._apply_field_extraction(result, config.tool_fields[namespaced], ctx)
+            result = await self._apply_field_extraction(
+                result, config.tool_fields[namespaced], ctx
+            )
 
         # L1: Resource links (MCP resource_link content blocks)
         result = await self._handle_resource_links(result, ctx)
@@ -1297,17 +1692,15 @@ class ToolNode:
             result = await self._detect_and_extract_binary(result, ctx)
 
         # L0: Size safety net
-        result = await self._apply_size_limits(result, ctx)
-
-        return result
+        return await self._apply_size_limits(result, ctx)
 
     async def _apply_field_extraction(
         self,
-        result: Any,
+        result: object,
         field_configs: list[Any],  # list[ArtifactFieldConfig]
         ctx: ToolContext,
-    ) -> Any:
-        """Extract specific fields as artifacts based on per-tool configuration.
+    ) -> object:
+        """Extract configured fields as artifacts, per tool configuration.
 
         Args:
             result: The tool result to process
@@ -1321,7 +1714,11 @@ class ToolNode:
             transformed: list[Any] = []
             for item in result:
                 if isinstance(item, (dict, list)):
-                    transformed.append(await self._apply_field_extraction(item, field_configs, ctx))
+                    transformed.append(
+                        await self._apply_field_extraction(
+                            item, field_configs, ctx
+                        )
+                    )
                 else:
                     transformed.append(item)
             return transformed
@@ -1330,73 +1727,68 @@ class ToolNode:
             return result
 
         for field_config in field_configs:
-            path = field_config.field_path
-            parts = path.split(".")
+            parts = field_config.field_path.split(".")
             targets = self._resolve_field_targets(result, parts)
             # Common wrapper pattern from some MCP servers: {"result": {...}}
             if not targets and isinstance(result.get("result"), (dict, list)):
                 targets = self._resolve_field_targets(result["result"], parts)
 
             for parent, key in targets:
-                if isinstance(parent, dict):
-                    if not isinstance(key, str):
-                        continue
-                    value = parent[key]
-                elif isinstance(parent, list):
-                    if not isinstance(key, int):
-                        continue
-                    value = parent[key]
-                else:
+                value = _container_get(parent, key)
+                if not isinstance(value, str) or len(value) <= 100:
                     continue
-
-                if isinstance(value, str) and len(value) > 100:
-                    try:
-                        if field_config.content_type in ("pdf", "image", "binary"):
-                            data = base64.b64decode(value)
-                        else:
-                            data = value.encode("utf-8")
-
-                        mime = field_config.mime_type
-                        if mime is None:
-                            mime = self._infer_mime_type(field_config.content_type)
-
-                        ref = await ctx.artifacts.upload(
-                            data,
-                            mime_type=mime,
-                            namespace=self.config.name,
-                        )
-
-                        summary = field_config.summary_template.format(
-                            content_type=field_config.content_type,
-                            size=len(data),
-                            artifact_id=ref.id,
-                        )
-                        replacement = {
-                            "artifact": ref.model_dump(),
-                            "summary": summary,
-                        }
-                        if isinstance(parent, dict) and isinstance(key, str):
-                            parent[key] = replacement
-                        elif isinstance(parent, list) and isinstance(key, int):
-                            parent[key] = replacement
-                    except Exception as e:
-                        logger.debug(f"Field extraction failed for {path}: {e}")
+                try:
+                    replacement = await self._field_artifact(
+                        field_config, value, ctx
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Field extraction failed for "
+                        f"{field_config.field_path}: {e}"
+                    )
+                    continue
+                _container_set(parent, key, replacement)
 
         return result
 
+    async def _field_artifact(
+        self, field_config: ArtifactFieldConfig, value: str, ctx: ToolContext
+    ) -> dict[str, Any]:
+        """Upload a field value as an artifact; return its replacement."""
+        if field_config.content_type in ("pdf", "image", "binary"):
+            data = base64.b64decode(value)
+        else:
+            data = value.encode("utf-8")
+
+        mime = field_config.mime_type
+        if mime is None:
+            mime = self._infer_mime_type(field_config.content_type)
+
+        ref = await ctx.artifacts.upload(
+            data,
+            mime_type=mime,
+            namespace=self.config.name,
+        )
+        summary = field_config.summary_template.format(
+            content_type=field_config.content_type,
+            size=len(data),
+            artifact_id=ref.id,
+        )
+        return {"artifact": ref.model_dump(), "summary": summary}
+
     def _resolve_field_targets(
         self,
-        root: Any,
+        root: object,
         parts: list[str],
     ) -> list[tuple[dict[str, Any] | list[Any], str | int]]:
-        """Resolve container/key targets for a dot-path across dict/list shapes."""
+        """Resolve container/key targets for a dot-path in dicts and lists."""
         if not parts:
             return []
         return self._resolve_field_targets_recursive(root, parts)
 
     def _resolve_field_targets_recursive(
         self,
-        current: Any,
+        current: object,
         parts: list[str],
     ) -> list[tuple[dict[str, Any] | list[Any], str | int]]:
         part = parts[0]
@@ -1417,15 +1809,22 @@ class ToolNode:
                     return targets
                 if not rest:
                     return [(current, idx)]
-                return self._resolve_field_targets_recursive(current[idx], rest)
+                return self._resolve_field_targets_recursive(
+                    current[idx], rest
+                )
 
-            # For list roots, apply the same path to each element (content-block lists)
+            # For list roots, apply the same path to each element
+            # (content-block lists)
             for item in current:
-                targets.extend(self._resolve_field_targets_recursive(item, parts))
+                targets.extend(
+                    self._resolve_field_targets_recursive(item, parts)
+                )
 
         return targets
 
-    async def _handle_resource_links(self, result: Any, ctx: ToolContext) -> Any:
+    async def _handle_resource_links(
+        self, result: object, ctx: ToolContext
+    ) -> object:
         """Handle MCP resource_link content blocks.
 
         Converts resource_link references to artifact references with optional
@@ -1447,7 +1846,9 @@ class ToolNode:
             for i, item in enumerate(result.content):
                 if hasattr(item, "type") and item.type == "resource_link":
                     # Convert resource_link to artifact reference stub
-                    resource_uri = getattr(item, "uri", None) or getattr(item, "resource", {}).get("uri")
+                    resource_uri = getattr(item, "uri", None) or getattr(
+                        item, "resource", {}
+                    ).get("uri")
                     if resource_uri:
                         result.content[i] = {
                             "type": "artifact_stub",
@@ -1458,7 +1859,9 @@ class ToolNode:
         elif isinstance(result, dict):
             result = await self._walk_and_transform_resource_links(result, ctx)
         elif isinstance(result, list):
-            result = [await self._handle_resource_links(item, ctx) for item in result]
+            result = [
+                await self._handle_resource_links(item, ctx) for item in result
+            ]
 
         return result
 
@@ -1473,25 +1876,35 @@ class ToolNode:
             if isinstance(value, dict):
                 if value.get("type") == "resource_link":
                     # Transform resource_link to stub
-                    uri = value.get("uri") or value.get("resource", {}).get("uri")
+                    uri = value.get("uri") or value.get("resource", {}).get(
+                        "uri"
+                    )
                     transformed[key] = {
                         "type": "artifact_stub",
                         "resource_uri": str(uri) if uri else None,
                         "summary": f"Resource link: {uri}",
                     }
                 else:
-                    transformed[key] = await self._walk_and_transform_resource_links(value, ctx)
+                    transformed[
+                        key
+                    ] = await self._walk_and_transform_resource_links(
+                        value, ctx
+                    )
             elif isinstance(value, list):
                 transformed[key] = [
-                    await self._walk_and_transform_resource_links(item, ctx) if isinstance(item, dict) else item
+                    await self._walk_and_transform_resource_links(item, ctx)
+                    if isinstance(item, dict)
+                    else item
                     for item in value
                 ]
             else:
                 transformed[key] = value
         return transformed
 
-    async def _transform_mcp_content_blocks(self, result: Any, ctx: ToolContext) -> Any:
-        """Transform MCP typed content blocks (embedded content with mime_type).
+    async def _transform_mcp_content_blocks(
+        self, result: object, ctx: ToolContext
+    ) -> object:
+        """Transform MCP typed content blocks (embedded, with a mime_type).
 
         Handles:
         - EmbeddedResource with blob data
@@ -1512,7 +1925,10 @@ class ToolNode:
                     if resource and hasattr(resource, "blob"):
                         try:
                             data = base64.b64decode(resource.blob)
-                            mime = getattr(resource, "mimeType", None) or "application/octet-stream"
+                            mime = (
+                                getattr(resource, "mimeType", None)
+                                or "application/octet-stream"
+                            )
                             ref = await ctx.artifacts.upload(
                                 data,
                                 mime_type=mime,
@@ -1530,7 +1946,9 @@ class ToolNode:
                                 "summary": summary,
                             }
                         except Exception as e:
-                            logger.debug(f"MCP content block extraction failed: {e}")
+                            logger.debug(
+                                f"MCP content block extraction failed: {e}"
+                            )
 
         elif isinstance(result, dict):
             # Check for blob fields in dict structure
@@ -1538,7 +1956,9 @@ class ToolNode:
                 if isinstance(value, dict) and "blob" in value:
                     try:
                         data = base64.b64decode(value["blob"])
-                        mime = value.get("mimeType", "application/octet-stream")
+                        mime = value.get(
+                            "mimeType", "application/octet-stream"
+                        )
                         ref = await ctx.artifacts.upload(
                             data,
                             mime_type=mime,
@@ -1558,7 +1978,9 @@ class ToolNode:
 
         return result
 
-    async def _detect_and_extract_binary(self, result: Any, ctx: ToolContext) -> Any:
+    async def _detect_and_extract_binary(
+        self, result: object, ctx: ToolContext
+    ) -> object:
         """Detect binary content heuristically and extract as artifacts.
 
         Uses base64 signature matching to identify binary content.
@@ -1572,14 +1994,19 @@ class ToolNode:
         """
         if isinstance(result, str):
             return await self._maybe_extract_binary_string(result, ctx)
-        elif isinstance(result, dict):
+        if isinstance(result, dict):
             return await self._walk_and_extract_binary(result, ctx)
-        elif isinstance(result, list):
-            return [await self._detect_and_extract_binary(item, ctx) for item in result]
+        if isinstance(result, list):
+            return [
+                await self._detect_and_extract_binary(item, ctx)
+                for item in result
+            ]
 
         return result
 
-    async def _maybe_extract_binary_string(self, value: str, ctx: ToolContext) -> Any:
+    async def _maybe_extract_binary_string(
+        self, value: str, ctx: ToolContext
+    ) -> object:
         """Check if a string is base64-encoded binary and extract if so.
 
         Args:
@@ -1596,7 +2023,7 @@ class ToolNode:
             return value
 
         # Check for binary signatures
-        detected = self._detect_binary_signature(value)
+        detected = self.detect_binary_signature(value)
         if detected is None:
             return value
 
@@ -1609,7 +2036,9 @@ class ToolNode:
                 data = data[: config.max_decode_bytes]
 
             # Optional magic byte validation
-            if config.require_magic_bytes and not self._validate_magic_bytes(data, extension):
+            if config.require_magic_bytes and not _validate_magic_bytes(
+                data, extension
+            ):
                 return value
 
             # Store as artifact
@@ -1644,16 +2073,23 @@ class ToolNode:
         transformed: dict[str, Any] = {}
         for key, value in data.items():
             if isinstance(value, str):
-                transformed[key] = await self._maybe_extract_binary_string(value, ctx)
+                transformed[key] = await self._maybe_extract_binary_string(
+                    value, ctx
+                )
             elif isinstance(value, dict):
-                transformed[key] = await self._walk_and_extract_binary(value, ctx)
+                transformed[key] = await self._walk_and_extract_binary(
+                    value, ctx
+                )
             elif isinstance(value, list):
-                transformed[key] = [await self._detect_and_extract_binary(item, ctx) for item in value]
+                transformed[key] = [
+                    await self._detect_and_extract_binary(item, ctx)
+                    for item in value
+                ]
             else:
                 transformed[key] = value
         return transformed
 
-    def _detect_binary_signature(self, value: str) -> tuple[str, str] | None:
+    def detect_binary_signature(self, value: str) -> tuple[str, str] | None:
         """Check if string starts with a known binary signature.
 
         Args:
@@ -1662,35 +2098,13 @@ class ToolNode:
         Returns:
             Tuple of (extension, mime_type) if detected, None otherwise
         """
-        signatures = self.config.artifact_extraction.binary_detection.signatures
+        signatures = (
+            self.config.artifact_extraction.binary_detection.signatures
+        )
         for prefix, (ext, mime) in signatures.items():
             if value.startswith(prefix):
                 return (ext, mime)
         return None
-
-    def _validate_magic_bytes(self, data: bytes, extension: str) -> bool:
-        """Validate binary magic bytes match expected format.
-
-        Args:
-            data: Decoded binary data
-            extension: Expected file extension
-
-        Returns:
-            True if magic bytes match, False otherwise
-        """
-        magic_bytes = {
-            "pdf": b"%PDF",
-            "png": b"\x89PNG",
-            "jpeg": b"\xff\xd8\xff",
-            "gif": b"GIF8",
-            "zip": b"PK\x03\x04",
-        }
-
-        expected = magic_bytes.get(extension)
-        if expected is None:
-            return True  # No validation for unknown types
-
-        return data.startswith(expected)
 
     def _infer_mime_type(self, content_type: str) -> str:
         """Infer MIME type from content type hint.
@@ -1709,7 +2123,9 @@ class ToolNode:
         }
         return mapping.get(content_type, "application/octet-stream")
 
-    async def _apply_size_limits(self, result: Any, ctx: ToolContext) -> Any:
+    async def _apply_size_limits(
+        self, result: object, ctx: ToolContext
+    ) -> object:
         """Apply size limits as safety net for oversized content.
 
         Args:
@@ -1739,14 +2155,18 @@ class ToolNode:
             return {
                 "artifact": ref.model_dump(),
                 "summary": summary,
-                "preview": result[:500] + "..." if len(result) > 500 else result,
+                "preview": result[:500] + "..."
+                if len(result) > 500
+                else result,
             }
 
-        elif isinstance(result, dict):
+        if isinstance(result, dict):
             return await self._walk_and_apply_size_limits(result, ctx)
 
-        elif isinstance(result, list):
-            return [await self._apply_size_limits(item, ctx) for item in result]
+        if isinstance(result, list):
+            return [
+                await self._apply_size_limits(item, ctx) for item in result
+            ]
 
         return result
 
@@ -1773,20 +2193,26 @@ class ToolNode:
                         size=len(value),
                         artifact_id=ref.id,
                     ),
-                    "preview": value[:500] + "..." if len(value) > 500 else value,
+                    "preview": value[:500] + "..."
+                    if len(value) > 500
+                    else value,
                 }
             elif isinstance(value, dict):
-                transformed[key] = await self._walk_and_apply_size_limits(value, ctx)
+                transformed[key] = await self._walk_and_apply_size_limits(
+                    value, ctx
+                )
             elif isinstance(value, list):
-                transformed[key] = [await self._apply_size_limits(item, ctx) for item in value]
+                transformed[key] = [
+                    await self._apply_size_limits(item, ctx) for item in value
+                ]
             else:
                 transformed[key] = value
 
         return transformed
 
-    # ─── MCP Resources Methods (Phase 2) ───────────────────────────────────────
+    # ─── MCP Resources Methods (Phase 2) ─────────────────────────────────────
 
-    def _generate_resource_tools(self) -> list[NodeSpec]:
+    def generate_resource_tools(self) -> list[NodeSpec]:
         """Generate NodeSpecs for MCP resource operations.
 
         Creates tools for:
@@ -1806,27 +2232,31 @@ class ToolNode:
         namespace = self.config.name
 
         # Create models for resources_list
-        ResourceListInput = create_model(f"{namespace}_ResourceListInput")
-        ResourceListOutput = create_model(
+        resource_list_input_model = create_model(
+            f"{namespace}_ResourceListInput"
+        )
+        resource_list_output_model = create_model(
             f"{namespace}_ResourceListOutput",
             resources=(list[dict[str, Any]], []),
             count=(int, 0),
         )
 
         # Create model for resources_read input/output
-        ResourceReadInput = create_model(
+        resource_read_input_model = create_model(
             f"{namespace}_ResourceReadInput",
             uri=(str, ...),
         )
-        ResourceReadOutput = create_model(
+        resource_read_output_model = create_model(
             f"{namespace}_ResourceReadOutput",
             result=(dict[str, Any], {}),
             uri=(str, ""),
         )
 
         # Create model for templates list output
-        TemplatesListInput = create_model(f"{namespace}_TemplatesListInput")
-        TemplatesListOutput = create_model(
+        templates_list_input_model = create_model(
+            f"{namespace}_TemplatesListInput"
+        )
+        templates_list_output_model = create_model(
             f"{namespace}_TemplatesListOutput",
             templates=(list[dict[str, Any]], []),
             count=(int, 0),
@@ -1836,20 +2266,20 @@ class ToolNode:
         if not self.registry.has(f"{namespace}.resources_list"):
             self.registry.register(
                 f"{namespace}.resources_list",
-                ResourceListInput,
-                ResourceListOutput,
+                resource_list_input_model,
+                resource_list_output_model,
             )
         if not self.registry.has(f"{namespace}.resources_read"):
             self.registry.register(
                 f"{namespace}.resources_read",
-                ResourceReadInput,
-                ResourceReadOutput,
+                resource_read_input_model,
+                resource_read_output_model,
             )
         if not self.registry.has(f"{namespace}.resources_templates_list"):
             self.registry.register(
                 f"{namespace}.resources_templates_list",
-                TemplatesListInput,
-                TemplatesListOutput,
+                templates_list_input_model,
+                templates_list_output_model,
             )
 
         # resources_list tool
@@ -1857,11 +2287,19 @@ class ToolNode:
             NodeSpec(
                 name=f"{namespace}.resources_list",
                 desc=f"List available resources from {namespace}",
-                args_model=ResourceListInput,
-                out_model=ResourceListOutput,
-                node=Node(self._handle_resources_list, name=f"{namespace}.resources_list"),
+                args_model=resource_list_input_model,
+                out_model=resource_list_output_model,
+                node=Node(
+                    self.handle_resources_list,
+                    name=f"{namespace}.resources_list",
+                ),
                 tags=["mcp", "resources", namespace],
-                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "resource_tool": True},
+                extra={
+                    "source": "mcp",
+                    "namespace": namespace,
+                    "tool_node": self,
+                    "resource_tool": True,
+                },
             )
         )
 
@@ -1870,11 +2308,19 @@ class ToolNode:
             NodeSpec(
                 name=f"{namespace}.resources_read",
                 desc=f"Read a resource by URI from {namespace}",
-                args_model=ResourceReadInput,
-                out_model=ResourceReadOutput,
-                node=Node(self._handle_resources_read, name=f"{namespace}.resources_read"),
+                args_model=resource_read_input_model,
+                out_model=resource_read_output_model,
+                node=Node(
+                    self.handle_resources_read,
+                    name=f"{namespace}.resources_read",
+                ),
                 tags=["mcp", "resources", namespace],
-                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "resource_tool": True},
+                extra={
+                    "source": "mcp",
+                    "namespace": namespace,
+                    "tool_node": self,
+                    "resource_tool": True,
+                },
             )
         )
 
@@ -1883,18 +2329,28 @@ class ToolNode:
             NodeSpec(
                 name=f"{namespace}.resources_templates_list",
                 desc=f"List resource templates from {namespace}",
-                args_model=TemplatesListInput,
-                out_model=TemplatesListOutput,
-                node=Node(self._handle_resources_templates_list, name=f"{namespace}.resources_templates_list"),
+                args_model=templates_list_input_model,
+                out_model=templates_list_output_model,
+                node=Node(
+                    self.handle_resources_templates_list,
+                    name=f"{namespace}.resources_templates_list",
+                ),
                 tags=["mcp", "resources", namespace],
-                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "resource_tool": True},
+                extra={
+                    "source": "mcp",
+                    "namespace": namespace,
+                    "tool_node": self,
+                    "resource_tool": True,
+                },
             )
         )
 
         # Store tool name mappings
-        self._tool_name_map[f"{namespace}.resources_list"] = "resources_list"
-        self._tool_name_map[f"{namespace}.resources_read"] = "resources_read"
-        self._tool_name_map[f"{namespace}.resources_templates_list"] = "resources_templates_list"
+        self.tool_name_map[f"{namespace}.resources_list"] = "resources_list"
+        self.tool_name_map[f"{namespace}.resources_read"] = "resources_read"
+        self.tool_name_map[f"{namespace}.resources_templates_list"] = (
+            "resources_templates_list"
+        )
 
         logger.debug(
             "Generated %d resource tools for '%s'",
@@ -1904,9 +2360,9 @@ class ToolNode:
 
         return specs
 
-    async def _handle_resources_list(
+    async def handle_resources_list(
         self,
-        _args: Any,
+        _args: object,
         _ctx: ToolContext,
     ) -> dict[str, Any]:
         """Handler for resources_list tool."""
@@ -1916,22 +2372,27 @@ class ToolNode:
             "count": len(resources),
         }
 
-    async def _handle_resources_read(
+    async def handle_resources_read(
         self,
-        args: Any,
+        args: object,
         ctx: ToolContext,
     ) -> dict[str, Any]:
         """Handler for resources_read tool."""
-        uri = getattr(args, "uri", args.get("uri") if isinstance(args, dict) else None)
+        uri = getattr(
+            args, "uri", args.get("uri") if isinstance(args, dict) else None
+        )
         if not uri:
-            return {"result": {"error": "Missing required 'uri' parameter"}, "uri": ""}
+            return {
+                "result": {"error": "Missing required 'uri' parameter"},
+                "uri": "",
+            }
 
         result = await self.read_resource(uri, ctx)
         return {"result": result, "uri": uri}
 
-    async def _handle_resources_templates_list(
+    async def handle_resources_templates_list(
         self,
-        _args: Any,
+        _args: object,
         _ctx: ToolContext,
     ) -> dict[str, Any]:
         """Handler for resources_templates_list tool."""
@@ -1941,27 +2402,48 @@ class ToolNode:
             "count": len(templates),
         }
 
-    async def list_resources(self, refresh: bool = False) -> list[ResourceInfo]:
+    async def list_resources(
+        self, refresh: bool = False
+    ) -> list[ResourceInfo]:
         """List available MCP resources.
 
         Args:
             refresh: Force refresh from server
 
         Returns:
-            List of ResourceInfo objects (empty if not connected or resources not supported)
+            List of ResourceInfo objects (empty if not connected or resources
+            not supported)
         """
-        if not self._connected or not self._resources_supported:
+        if not self.connected or not self._resources_supported:
             return self._resources  # Return cached resources or empty list
 
-        if refresh and self._mcp_client is not None:
+        if refresh and self.mcp_client is not None:
             try:
-                resources = await self._mcp_client.list_resources()
+                resources = await self.mcp_client.list_resources()
                 self._resources = [
                     ResourceInfo(
-                        uri=str(getattr(r, "uri", r.get("uri", "")) if isinstance(r, dict) else r.uri),
-                        name=getattr(r, "name", r.get("name") if isinstance(r, dict) else None),
-                        description=getattr(r, "description", r.get("description") if isinstance(r, dict) else None),
-                        mime_type=getattr(r, "mimeType", r.get("mimeType") if isinstance(r, dict) else None),
+                        uri=str(
+                            getattr(r, "uri", r.get("uri", ""))
+                            if isinstance(r, dict)
+                            else r.uri
+                        ),
+                        name=getattr(
+                            r,
+                            "name",
+                            r.get("name") if isinstance(r, dict) else None,
+                        ),
+                        description=getattr(
+                            r,
+                            "description",
+                            r.get("description")
+                            if isinstance(r, dict)
+                            else None,
+                        ),
+                        mime_type=getattr(
+                            r,
+                            "mimeType",
+                            r.get("mimeType") if isinstance(r, dict) else None,
+                        ),
                     )
                     for r in (resources if isinstance(resources, list) else [])
                 ]
@@ -1970,21 +2452,26 @@ class ToolNode:
 
         return self._resources
 
-    async def list_resource_templates(self, refresh: bool = False) -> list[ResourceTemplateInfo]:
+    async def list_resource_templates(
+        self, refresh: bool = False
+    ) -> list[ResourceTemplateInfo]:
         """List available MCP resource templates.
 
         Args:
             refresh: Force refresh from server
 
         Returns:
-            List of ResourceTemplateInfo objects (empty if not connected or not supported)
+            List of ResourceTemplateInfo objects (empty if not connected or not
+            supported)
         """
-        if not self._connected or not self._resources_supported:
-            return self._resource_templates  # Return cached templates or empty list
+        if not self.connected or not self._resources_supported:
+            return (
+                self._resource_templates
+            )  # Return cached templates or empty list
 
-        if refresh and self._mcp_client is not None:
+        if refresh and self.mcp_client is not None:
             try:
-                templates = await self._mcp_client.list_resource_templates()
+                templates = await self.mcp_client.list_resource_templates()
                 self._resource_templates = [
                     ResourceTemplateInfo(
                         uri_template=str(
@@ -1992,9 +2479,23 @@ class ToolNode:
                             if isinstance(t, dict)
                             else t.uriTemplate
                         ),
-                        name=getattr(t, "name", t.get("name") if isinstance(t, dict) else None),
-                        description=getattr(t, "description", t.get("description") if isinstance(t, dict) else None),
-                        mime_type=getattr(t, "mimeType", t.get("mimeType") if isinstance(t, dict) else None),
+                        name=getattr(
+                            t,
+                            "name",
+                            t.get("name") if isinstance(t, dict) else None,
+                        ),
+                        description=getattr(
+                            t,
+                            "description",
+                            t.get("description")
+                            if isinstance(t, dict)
+                            else None,
+                        ),
+                        mime_type=getattr(
+                            t,
+                            "mimeType",
+                            t.get("mimeType") if isinstance(t, dict) else None,
+                        ),
                     )
                     for t in (templates if isinstance(templates, list) else [])
                 ]
@@ -2021,20 +2522,23 @@ class ToolNode:
             use_cache: Whether to use caching (default True)
 
         Returns:
-            Dict with 'artifact' (ArtifactRef) or 'text' (inline content) or 'error'
+            Dict with 'artifact' (ArtifactRef) or 'text' (inline content) or
+            'error'
         """
-        if not self._connected:
+        if not self.connected:
             return {"error": f"ToolNode '{self.config.name}' not connected"}
 
         if not self._resources_supported:
-            return {"error": f"Resources not supported by '{self.config.name}'"}
+            return {
+                "error": f"Resources not supported by '{self.config.name}'"
+            }
 
-        if self._mcp_client is None:
+        if self.mcp_client is None:
             return {"error": "MCP client not available"}
 
         # Initialize resource cache if needed
-        if self._resource_cache is None:
-            self._resource_cache = ResourceCache(
+        if self.resource_cache is None:
+            self.resource_cache = ResourceCache(
                 namespace=self.config.name,
                 config=ResourceCacheConfig(
                     inline_text_if_under_chars=self.config.artifact_extraction.resources.inline_text_if_under_chars,
@@ -2042,35 +2546,32 @@ class ToolNode:
             )
 
         # Capture client for closure (preserves type narrowing)
-        mcp_client = self._mcp_client
+        mcp_client = self.mcp_client
 
         # Read function for cache
-        async def read_fn(resource_uri: str) -> Any:
+        async def read_fn(resource_uri: str) -> object:
             return await mcp_client.read_resource(resource_uri)
 
         if use_cache:
-            return await self._resource_cache.get_or_fetch(uri, read_fn, ctx)
-        else:
-            # Bypass cache, read directly
-            try:
-                contents = await self._mcp_client.read_resource(uri)
-                # Process contents similar to cache
-                return await self._process_resource_contents(contents, ctx)
-            except Exception as e:
-                return {"error": str(e)}
+            return await self.resource_cache.get_or_fetch(uri, read_fn, ctx)
+        # Bypass cache, read directly
+        try:
+            contents = await self.mcp_client.read_resource(uri)
+            # Process contents similar to cache
+            return await self._process_resource_contents(contents, ctx)
+        except Exception as e:
+            return {"error": str(e)}
 
     async def _process_resource_contents(
         self,
-        contents: Any,
+        contents: object,
         ctx: ToolContext,
     ) -> dict[str, Any]:
         """Process resource contents into artifact or inline text."""
         import base64
 
-        # Extract content from supported response shapes:
-        # - {"contents": [...]}
-        # - [content_item, ...]
-        # - content_item
+        # Supported response shapes: a dict with a "contents" list, a list
+        # of content items, or a single content item.
         if isinstance(contents, dict):
             resource_data = contents.get("contents", [contents])
             if isinstance(resource_data, list) and resource_data:
@@ -2083,13 +2584,19 @@ class ToolNode:
             content_item = contents
 
         text = getattr(content_item, "text", None) or (
-            content_item.get("text") if isinstance(content_item, dict) else None
+            content_item.get("text")
+            if isinstance(content_item, dict)
+            else None
         )
         blob = getattr(content_item, "blob", None) or (
-            content_item.get("blob") if isinstance(content_item, dict) else None
+            content_item.get("blob")
+            if isinstance(content_item, dict)
+            else None
         )
         mime_type = getattr(content_item, "mimeType", None) or (
-            content_item.get("mimeType") if isinstance(content_item, dict) else None
+            content_item.get("mimeType")
+            if isinstance(content_item, dict)
+            else None
         )
 
         if blob is not None:
@@ -2105,23 +2612,23 @@ class ToolNode:
                 return {"error": f"Failed to process blob: {e}"}
 
         elif text is not None:
-            threshold = self.config.artifact_extraction.resources.inline_text_if_under_chars
+            resources_config = self.config.artifact_extraction.resources
+            threshold = resources_config.inline_text_if_under_chars
             if len(text) <= threshold:
                 return {"text": text}
-            else:
-                ref = await ctx.artifacts.upload(
-                    text,
-                    mime_type=mime_type or "text/plain",
-                    namespace=f"{self.config.name}.resource",
-                )
-                return {"artifact": ref.model_dump()}
+            ref = await ctx.artifacts.upload(
+                text,
+                mime_type=mime_type or "text/plain",
+                namespace=f"{self.config.name}.resource",
+            )
+            return {"artifact": ref.model_dump()}
 
         return {"error": "Resource has no content"}
 
     async def subscribe_resource(
         self,
         uri: str,
-        callback: Any | None = None,
+        callback: Callable[[str], object] | None = None,
     ) -> bool:
         """Subscribe to resource updates.
 
@@ -2132,7 +2639,7 @@ class ToolNode:
         Returns:
             True if subscription successful
         """
-        if not self._connected or self._mcp_client is None:
+        if not self.connected or self.mcp_client is None:
             return False
 
         if not self._resources_supported:
@@ -2141,18 +2648,23 @@ class ToolNode:
         if self._subscription_manager is None:
             return False
 
-        subscribe_method = getattr(self._mcp_client, "subscribe_resource", None)
+        subscribe_method = getattr(self.mcp_client, "subscribe_resource", None)
         if not callable(subscribe_method):
-            subscribe_method = getattr(self._mcp_client, "subscribe", None)
+            subscribe_method = getattr(self.mcp_client, "subscribe", None)
         if not callable(subscribe_method):
-            logger.debug("MCP client for '%s' does not support resource subscriptions", self.config.name)
+            logger.debug(
+                "MCP client for '%s' does not support resource subscriptions",
+                self.config.name,
+            )
             return False
 
         # Capture client for closure (preserves type narrowing)
         async def subscribe_fn(resource_uri: str) -> None:
             await subscribe_method(resource_uri)
 
-        return await self._subscription_manager.subscribe(uri, subscribe_fn, callback)
+        return await self._subscription_manager.subscribe(
+            uri, subscribe_fn, callback
+        )
 
     async def unsubscribe_resource(self, uri: str) -> bool:
         """Unsubscribe from resource updates.
@@ -2163,24 +2675,32 @@ class ToolNode:
         Returns:
             True if unsubscription successful
         """
-        if not self._connected or self._mcp_client is None:
+        if not self.connected or self.mcp_client is None:
             return False
 
         if self._subscription_manager is None:
             return False
 
-        unsubscribe_method = getattr(self._mcp_client, "unsubscribe_resource", None)
+        unsubscribe_method = getattr(
+            self.mcp_client, "unsubscribe_resource", None
+        )
         if not callable(unsubscribe_method):
-            unsubscribe_method = getattr(self._mcp_client, "unsubscribe", None)
+            unsubscribe_method = getattr(self.mcp_client, "unsubscribe", None)
         if not callable(unsubscribe_method):
-            logger.debug("MCP client for '%s' does not support resource unsubscriptions", self.config.name)
+            logger.debug(
+                "MCP client for '%s' does not support resource "
+                "unsubscriptions",
+                self.config.name,
+            )
             return False
 
         # Capture client for closure (preserves type narrowing)
         async def unsubscribe_fn(resource_uri: str) -> None:
             await unsubscribe_method(resource_uri)
 
-        return await self._subscription_manager.unsubscribe(uri, unsubscribe_fn)
+        return await self._subscription_manager.unsubscribe(
+            uri, unsubscribe_fn
+        )
 
     def handle_resource_updated(self, uri: str) -> None:
         """Handle a resource updated notification from MCP server.
@@ -2191,8 +2711,8 @@ class ToolNode:
             uri: URI of updated resource
         """
         # Invalidate cache
-        if self._resource_cache is not None:
-            self._resource_cache.invalidate(uri)
+        if self.resource_cache is not None:
+            self.resource_cache.invalidate(uri)
 
         if self._resource_update_callback is not None:
             try:
@@ -2204,12 +2724,18 @@ class ToolNode:
         if self._subscription_manager is not None:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._subscription_manager.handle_update(uri))
             except RuntimeError:
                 # No running loop - skip subscriber notification
-                pass
+                return
+            task = loop.create_task(
+                self._subscription_manager.handle_update(uri)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
-    def set_resource_updated_callback(self, callback: Callable[[str], None] | None) -> None:
+    def set_resource_updated_callback(
+        self, callback: Callable[[str], None] | None
+    ) -> None:
         """Register a callback invoked when MCP resources are updated.
 
         Args:
@@ -2223,29 +2749,41 @@ class ToolNode:
         """Check if MCP resources are supported by this tool source."""
         return self._resources_supported
 
+    @resources_supported.setter
+    def resources_supported(self, value: bool) -> None:
+        self._resources_supported = value
+
     @property
     def resources(self) -> list[ResourceInfo]:
         """Get cached list of resources (call list_resources for refresh)."""
         return self._resources
+
+    @resources.setter
+    def resources(self, value: list[ResourceInfo]) -> None:
+        self._resources = value
 
     @property
     def resource_templates(self) -> list[ResourceTemplateInfo]:
         """Get cached list of resource templates."""
         return self._resource_templates
 
+    @resource_templates.setter
+    def resource_templates(self, value: list[ResourceTemplateInfo]) -> None:
+        self._resource_templates = value
+
     # -------------------------------------------------------------------------
     # MCP Apps
     # -------------------------------------------------------------------------
 
-    async def _enrich_with_app_html(
+    async def enrich_with_app_html(
         self,
-        tool_result: Any,
+        tool_result: object,
         app_meta: AppMetadata,
         tool_input: dict[str, Any],
         ctx: ToolContext,
         *,
-        raw_tool_result: Any | None = None,
-    ) -> Any:
+        raw_tool_result: object = None,
+    ) -> object:
         """Fetch the UI resource and attach it to the tool result.
 
         After an app-enabled tool executes, this method fetches the HTML
@@ -2256,12 +2794,15 @@ class ToolNode:
         Args:
             tool_result: The original transformed tool result
             app_meta: App metadata from tool discovery
+            tool_input: The arguments the tool was called with
             ctx: Tool context with artifact store access
+            raw_tool_result: The untransformed tool result, when available
 
         Returns:
-            Enriched result with ``__mcp_app__`` key, or original result on failure
+            Enriched result with ``__mcp_app__`` key, or the original result on
+            failure
         """
-        html = await self._fetch_app_html(app_meta.resource_uri)
+        html = await self.fetch_app_html(app_meta.resource_uri)
         if html is None:
             return tool_result
 
@@ -2278,7 +2819,9 @@ class ToolNode:
         app_meta_payload: dict[str, Any] = {
             "csp": app_meta.csp.model_dump(),
             "permissions": app_meta.permissions.model_dump(),
-            "tool_data": self._serialize_app_tool_result(raw_tool_result, fallback=tool_result),
+            "tool_data": self._serialize_app_tool_result(
+                raw_tool_result, fallback=tool_result
+            ),
             "tool_input": tool_input,
             "resource_uri": app_meta.resource_uri,
             "prefers_border": app_meta.prefers_border,
@@ -2313,7 +2856,7 @@ class ToolNode:
 
         return {"value": tool_result, "__mcp_app__": app_payload}
 
-    async def _fetch_app_html(self, uri: str) -> str | None:
+    async def fetch_app_html(self, uri: str) -> str | None:
         """Fetch ui:// resource HTML for MCP App rendering.
 
         Args:
@@ -2322,22 +2865,26 @@ class ToolNode:
         Returns:
             HTML string or None on failure
         """
-        if self._mcp_client is None:
+        if self.mcp_client is None:
             return None
 
         try:
-            contents = await self._mcp_client.read_resource(uri)
-            return self._extract_text_from_resource(contents)
+            contents = await self.mcp_client.read_resource(uri)
+            return _extract_text_from_resource(contents)
         except Exception as e:
             logger.warning("Failed to fetch app HTML from %s: %s", uri, e)
             return None
 
     @staticmethod
-    def _serialize_app_tool_result(raw_tool_result: Any, *, fallback: Any) -> Any:
-        """Preserve structured MCP results for apps while falling back safely."""
+    def _serialize_app_tool_result(
+        raw_tool_result: object, *, fallback: object
+    ) -> object:
+        """Keep structured MCP results for apps, falling back safely."""
         if raw_tool_result is None:
             return fallback
-        if isinstance(raw_tool_result, (dict, list, str, int, float, bool, type(None))):
+        if isinstance(
+            raw_tool_result, (dict, list, str, int, float, bool, type(None))
+        ):
             return raw_tool_result
         if hasattr(raw_tool_result, "model_dump"):
             try:
@@ -2345,40 +2892,6 @@ class ToolNode:
             except Exception:
                 return fallback
         return fallback
-
-    @staticmethod
-    def _extract_text_from_resource(contents: Any) -> str | None:
-        """Extract text content from resource read result."""
-        # Handle list of content items
-        if isinstance(contents, list):
-            for item in contents:
-                text = getattr(item, "text", None)
-                if text is not None:
-                    return str(text)
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if text is not None:
-                        return str(text)
-            return None
-
-        # Handle single object
-        text = getattr(contents, "text", None)
-        if text is not None:
-            return str(text)
-
-        # Handle dict
-        if isinstance(contents, dict):
-            text = contents.get("text")
-            if text is not None:
-                return str(text)
-            # Try nested contents
-            nested = contents.get("contents", [])
-            if isinstance(nested, list):
-                for item in nested:
-                    if isinstance(item, dict) and "text" in item:
-                        return str(item["text"])
-
-        return None
 
     def has_app(self, tool_name: str) -> bool:
         """Check if a tool has MCP App metadata.
@@ -2389,7 +2902,7 @@ class ToolNode:
         Returns:
             True if the tool has app metadata
         """
-        return tool_name in self._app_metadata
+        return tool_name in self.app_metadata
 
     def get_app_metadata(self, tool_name: str) -> AppMetadata | None:
         """Get MCP App metadata for a tool.
@@ -2400,23 +2913,24 @@ class ToolNode:
         Returns:
             AppMetadata or None
         """
-        return self._app_metadata.get(tool_name)
+        return self.app_metadata.get(tool_name)
 
     @property
     def app_tools(self) -> dict[str, AppMetadata]:
         """Get all tools with MCP App metadata."""
-        return dict(self._app_metadata)
+        return dict(self.app_metadata)
 
     # -------------------------------------------------------------------------
     # MCP Prompts (Phase 3)
     # -------------------------------------------------------------------------
 
-    def _generate_prompt_tools(self) -> list[NodeSpec]:
+    def generate_prompt_tools(self) -> list[NodeSpec]:
         """Generate NodeSpecs for MCP prompt operations.
 
         Creates tools for:
         - {namespace}.prompts_list: List available prompts
-        - {namespace}.prompts_get: Execute a prompt and return rendered messages
+        - {namespace}.prompts_get: Execute a prompt and return rendered
+          messages
 
         Returns:
             List of NodeSpec for prompt tools
@@ -2429,20 +2943,22 @@ class ToolNode:
         namespace = self.config.name
 
         # Create models for prompts_list
-        PromptsListInput = create_model(f"{namespace}_PromptsListInput")
-        PromptsListOutput = create_model(
+        prompts_list_input_model = create_model(
+            f"{namespace}_PromptsListInput"
+        )
+        prompts_list_output_model = create_model(
             f"{namespace}_PromptsListOutput",
             prompts=(list[dict[str, Any]], []),
             count=(int, 0),
         )
 
         # Create models for prompts_get
-        PromptsGetInput = create_model(
+        prompts_get_input_model = create_model(
             f"{namespace}_PromptsGetInput",
             name=(str, ...),
             arguments=(dict[str, str], {}),
         )
-        PromptsGetOutput = create_model(
+        prompts_get_output_model = create_model(
             f"{namespace}_PromptsGetOutput",
             messages=(list[dict[str, Any]], []),
             description=(str | None, None),
@@ -2452,14 +2968,14 @@ class ToolNode:
         if not self.registry.has(f"{namespace}.prompts_list"):
             self.registry.register(
                 f"{namespace}.prompts_list",
-                PromptsListInput,
-                PromptsListOutput,
+                prompts_list_input_model,
+                prompts_list_output_model,
             )
         if not self.registry.has(f"{namespace}.prompts_get"):
             self.registry.register(
                 f"{namespace}.prompts_get",
-                PromptsGetInput,
-                PromptsGetOutput,
+                prompts_get_input_model,
+                prompts_get_output_model,
             )
 
         # prompts_list tool
@@ -2467,11 +2983,18 @@ class ToolNode:
             NodeSpec(
                 name=f"{namespace}.prompts_list",
                 desc=f"List available prompts from {namespace}",
-                args_model=PromptsListInput,
-                out_model=PromptsListOutput,
-                node=Node(self._handle_prompts_list, name=f"{namespace}.prompts_list"),
+                args_model=prompts_list_input_model,
+                out_model=prompts_list_output_model,
+                node=Node(
+                    self.handle_prompts_list, name=f"{namespace}.prompts_list"
+                ),
                 tags=["mcp", "prompts", namespace],
-                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "prompt_tool": True},
+                extra={
+                    "source": "mcp",
+                    "namespace": namespace,
+                    "tool_node": self,
+                    "prompt_tool": True,
+                },
             )
         )
 
@@ -2479,18 +3002,28 @@ class ToolNode:
         specs.append(
             NodeSpec(
                 name=f"{namespace}.prompts_get",
-                desc=f"Execute a prompt by name from {namespace} and return rendered messages",
-                args_model=PromptsGetInput,
-                out_model=PromptsGetOutput,
-                node=Node(self._handle_prompts_get, name=f"{namespace}.prompts_get"),
+                desc=(
+                    f"Execute a prompt by name from {namespace} and "
+                    "return rendered messages"
+                ),
+                args_model=prompts_get_input_model,
+                out_model=prompts_get_output_model,
+                node=Node(
+                    self.handle_prompts_get, name=f"{namespace}.prompts_get"
+                ),
                 tags=["mcp", "prompts", namespace],
-                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "prompt_tool": True},
+                extra={
+                    "source": "mcp",
+                    "namespace": namespace,
+                    "tool_node": self,
+                    "prompt_tool": True,
+                },
             )
         )
 
         # Store tool name mappings
-        self._tool_name_map[f"{namespace}.prompts_list"] = "prompts_list"
-        self._tool_name_map[f"{namespace}.prompts_get"] = "prompts_get"
+        self.tool_name_map[f"{namespace}.prompts_list"] = "prompts_list"
+        self.tool_name_map[f"{namespace}.prompts_get"] = "prompts_get"
 
         logger.debug(
             "Generated %d prompt tools for '%s'",
@@ -2500,9 +3033,9 @@ class ToolNode:
 
         return specs
 
-    async def _handle_prompts_list(
+    async def handle_prompts_list(
         self,
-        _args: Any,
+        _args: object,
         _ctx: ToolContext,
     ) -> dict[str, Any]:
         """Handler for prompts_list tool."""
@@ -2512,20 +3045,31 @@ class ToolNode:
             "count": len(prompts),
         }
 
-    async def _handle_prompts_get(
+    async def handle_prompts_get(
         self,
-        args: Any,
-        ctx: ToolContext,
+        args: object,
+        _ctx: ToolContext,
     ) -> dict[str, Any]:
         """Handler for prompts_get tool."""
-        name = getattr(args, "name", args.get("name") if isinstance(args, dict) else None)
+        name = getattr(
+            args, "name", args.get("name") if isinstance(args, dict) else None
+        )
         if not name:
-            return {"messages": [], "description": "Missing required 'name' parameter"}
+            return {
+                "messages": [],
+                "description": "Missing required 'name' parameter",
+            }
 
-        arguments = getattr(args, "arguments", args.get("arguments") if isinstance(args, dict) else None) or {}
+        arguments = (
+            getattr(
+                args,
+                "arguments",
+                args.get("arguments") if isinstance(args, dict) else None,
+            )
+            or {}
+        )
 
-        result = await self.get_prompt(name, arguments)
-        return result
+        return await self.get_prompt(name, arguments)
 
     async def list_prompts(self, refresh: bool = False) -> list[PromptInfo]:
         """List available MCP prompts.
@@ -2534,21 +3078,25 @@ class ToolNode:
             refresh: Force refresh from server
 
         Returns:
-            List of PromptInfo objects (empty if not connected or prompts not supported)
+            List of PromptInfo objects (empty if not connected or prompts not
+            supported)
         """
-        if not self._connected:
+        if not self.connected:
             return self._prompts
 
-        needs_refresh = refresh or self._prompts_stale
+        needs_refresh = refresh or self.prompts_stale
         if not self._prompts_supported and not needs_refresh:
             return self._prompts
 
-        if needs_refresh and self._mcp_client is not None:
+        if needs_refresh and self.mcp_client is not None:
             try:
-                prompts = await self._mcp_client.list_prompts()
-                self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
+                prompts = await self.mcp_client.list_prompts()
+                self._prompts = [
+                    self._parse_prompt_info(p)
+                    for p in (prompts if isinstance(prompts, list) else [])
+                ]
                 self._prompts_supported = True
-                self._prompts_stale = False
+                self.prompts_stale = False
             except Exception as e:
                 logger.warning(f"Failed to refresh prompts: {e}")
 
@@ -2566,25 +3114,37 @@ class ToolNode:
             arguments: Optional arguments for the prompt
 
         Returns:
-            Dict with 'messages' (list of serialized messages) and 'description'
+            Dict with 'messages' (list of serialized messages) and
+            'description'
         """
-        if not self._connected:
-            return {"messages": [], "description": f"ToolNode '{self.config.name}' not connected"}
+        if not self.connected:
+            return {
+                "messages": [],
+                "description": f"ToolNode '{self.config.name}' not connected",
+            }
 
         if not self._prompts_supported:
-            return {"messages": [], "description": f"Prompts not supported by '{self.config.name}'"}
+            return {
+                "messages": [],
+                "description": "Prompts not supported by "
+                f"'{self.config.name}'",
+            }
 
-        if self._mcp_client is None:
+        if self.mcp_client is None:
             return {"messages": [], "description": "MCP client not available"}
 
         try:
-            result = await self._mcp_client.get_prompt(name, arguments)
-            messages = serialize_prompt_messages(getattr(result, "messages", []))
-            description = getattr(result, "description", None)
-            return {"messages": messages, "description": description}
+            result = await self.mcp_client.get_prompt(name, arguments)
+            messages = serialize_prompt_messages(
+                getattr(result, "messages", [])
+            )
         except Exception as e:
             logger.warning(f"Failed to get prompt '{name}': {e}")
             return {"messages": [], "description": f"Error: {e}"}
+        return {
+            "messages": messages,
+            "description": getattr(result, "description", None),
+        }
 
     def handle_prompts_changed(self) -> None:
         """Handle a prompts/list_changed notification from MCP server.
@@ -2592,7 +3152,7 @@ class ToolNode:
         Clears cached prompts so they are re-discovered on next access.
         """
         self._prompts = []
-        self._prompts_stale = True
+        self.prompts_stale = True
         logger.debug("Prompts cache invalidated for '%s'", self.config.name)
 
     @property
@@ -2600,10 +3160,18 @@ class ToolNode:
         """Check if MCP prompts are supported by this tool source."""
         return self._prompts_supported
 
+    @prompts_supported.setter
+    def prompts_supported(self, value: bool) -> None:
+        self._prompts_supported = value
+
     @property
     def prompts(self) -> list[PromptInfo]:
         """Get cached list of prompts (call list_prompts for refresh)."""
         return self._prompts
+
+    @prompts.setter
+    def prompts(self, value: list[PromptInfo]) -> None:
+        self._prompts = value
 
 
 __all__ = ["ToolNode"]

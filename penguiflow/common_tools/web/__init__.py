@@ -9,4 +9,3 @@ from __future__ import annotations
 from .specs import BraveWebConfig, build_web_tool_specs
 
 __all__ = ["BraveWebConfig", "build_web_tool_specs"]
-

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from .context import ContextSnapshotV1, GuardrailEvent
-from .models import GuardrailDecision, GuardrailSeverity, RuleCost
-from .routing import RiskRoutingDecision
+if TYPE_CHECKING:
+    from .context import ContextSnapshotV1, GuardrailEvent
+    from .models import GuardrailDecision, GuardrailSeverity, RuleCost
+    from .routing import RiskRoutingDecision
 
 
 class GuardrailRule(Protocol):
@@ -23,7 +24,9 @@ class GuardrailRule(Protocol):
         self,
         event: GuardrailEvent,
         context_snapshot: ContextSnapshotV1,
-    ) -> GuardrailDecision | None: ...
+    ) -> GuardrailDecision | None:
+        """Return a decision for ``event``, or ``None`` if the rule passes."""
+        ...
 
 
 class DecisionPolicy(Protocol):
@@ -34,7 +37,9 @@ class DecisionPolicy(Protocol):
         decisions: list[GuardrailDecision],
         event: GuardrailEvent,
         context_snapshot: ContextSnapshotV1,
-    ) -> GuardrailDecision: ...
+    ) -> GuardrailDecision:
+        """Resolve the rules' decisions into the single decision to apply."""
+        ...
 
 
 class RiskRouter(Protocol):
@@ -44,7 +49,10 @@ class RiskRouter(Protocol):
         self,
         event: GuardrailEvent,
         context_snapshot: ContextSnapshotV1,
-    ) -> RiskRoutingDecision: ...
+    ) -> RiskRoutingDecision:
+        """Choose the async-rule wait and what happens on timeout."""
+        ...
+
 
 __all__ = [
     "DecisionPolicy",

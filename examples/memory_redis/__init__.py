@@ -1,2 +1,1 @@
-"""Short-term memory example: custom persistence via to_dict/from_dict (Redis-like)."""
-
+"""Short-term memory persisted Redis-style via to_dict/from_dict."""

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,9 +31,12 @@ from penguiflow.llm.types import (
     ToolSpec,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 
 @pytest.fixture
-def mock_openai_sdk() -> Any:
+def mock_openai_sdk() -> MagicMock:
     """Mock the OpenAI SDK."""
     mock_sdk = MagicMock()
     mock_client = MagicMock()
@@ -90,9 +93,11 @@ class TestOpenAIProviderInit:
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider("gpt-4o", api_key="test-key", timeout=120.0)
+            provider = OpenAIProvider(
+                "gpt-4o", api_key="test-key", timeout=120.0
+            )
 
-            assert provider._timeout == 120.0
+            assert provider.timeout == 120.0
             call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
             assert call_kwargs["timeout"] == 120.0
 
@@ -107,7 +112,9 @@ class TestOpenAIProviderInit:
                 call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
                 assert call_kwargs["api_key"] == "env-api-key"
 
-    def test_init_with_custom_profile(self, mock_openai_sdk: MagicMock) -> None:
+    def test_init_with_custom_profile(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test initialization with custom model profile."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.profiles import ModelProfile
@@ -118,7 +125,9 @@ class TestOpenAIProviderInit:
                 supports_schema_guided_output=True,
                 max_output_tokens=4096,
             )
-            provider = OpenAIProvider("gpt-4o", api_key="test", profile=custom_profile)
+            provider = OpenAIProvider(
+                "gpt-4o", api_key="test", profile=custom_profile
+            )
 
             assert provider.profile is custom_profile
 
@@ -142,16 +151,23 @@ class TestOpenAIProviderBuildParams:
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider("gpt-4o", api_key="test")
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 temperature=0.7,
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["model"] == "gpt-4o"
             assert params["temperature"] == 0.7
@@ -161,12 +177,19 @@ class TestOpenAIProviderBuildParams:
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider("gpt-4o", api_key="test")
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 tools=(
                     ToolSpec(
                         name="get_weather",
@@ -177,22 +200,31 @@ class TestOpenAIProviderBuildParams:
                 tool_choice="get_weather",
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert "tools" in params
             assert params["tool_choice"]["function"]["name"] == "get_weather"
 
-    def test_build_params_with_structured_output(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_structured_output(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with structured output."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider("gpt-4o", api_key="test")
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 structured_output=StructuredOutputSpec(
                     name="MySchema",
                     json_schema={"type": "object"},
@@ -200,47 +232,63 @@ class TestOpenAIProviderBuildParams:
                 ),
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert "response_format" in params
             assert params["response_format"]["type"] == "json_schema"
 
-    def test_build_params_with_max_tokens(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_max_tokens(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with max tokens."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider("gpt-4o", api_key="test")
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 max_tokens=500,
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["max_tokens"] == 500
 
-    def test_build_params_with_reasoning_effort(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_with_reasoning_effort(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test parameter building with reasoning effort."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider("o1", api_key="test")
-            provider._profile = MagicMock(
-                supports_reasoning=True,
-                reasoning_effort_param="reasoning_effort",
+            provider = OpenAIProvider(
+                "o1",
+                api_key="test",
+                profile=MagicMock(
+                    supports_reasoning=True,
+                    reasoning_effort_param="reasoning_effort",
+                ),
             )
 
             request = LLMRequest(
                 model="o1",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Think")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Think")]),
+                ),
                 extra={"reasoning_effort": "high"},
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params.get("reasoning_effort") == "high"
 
@@ -295,14 +343,18 @@ class TestOpenAIProviderComplete:
 
             mock_response = self._create_mock_response("Hello from OpenAI!")
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=mock_response
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenAIProvider("gpt-4o", api_key="test")
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -312,7 +364,9 @@ class TestOpenAIProviderComplete:
             assert response.usage.output_tokens == 5
 
     @pytest.mark.asyncio
-    async def test_complete_with_tool_calls(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_with_tool_calls(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test completion with tool calls."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
@@ -320,17 +374,27 @@ class TestOpenAIProviderComplete:
 
             mock_response = self._create_mock_response(
                 content="",
-                tool_calls=[{"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}],
+                tool_calls=[
+                    {
+                        "id": "call_123",
+                        "name": "get_weather",
+                        "arguments": '{"city": "NYC"}',
+                    }
+                ],
             )
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=mock_response
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenAIProvider("gpt-4o", api_key="test")
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Weather?")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Weather?")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -346,41 +410,53 @@ class TestOpenAIProviderComplete:
             from penguiflow.llm.providers.openai import OpenAIProvider
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(side_effect=TimeoutError())
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=TimeoutError()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenAIProvider("gpt-4o", api_key="test")
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMTimeoutError):
                 await provider.complete(request)
 
     @pytest.mark.asyncio
-    async def test_complete_cancelled(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_cancelled(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test cancellation handling."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(side_effect=asyncio.CancelledError())
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=asyncio.CancelledError()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenAIProvider("gpt-4o", api_key="test")
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
                 await provider.complete(request)
 
     @pytest.mark.asyncio
-    async def test_complete_with_cancel_token(self, mock_openai_sdk: MagicMock) -> None:
+    async def test_complete_with_cancel_token(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test early cancellation via cancel token."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openai import OpenAIProvider
@@ -394,7 +470,9 @@ class TestOpenAIProviderComplete:
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
@@ -441,12 +519,14 @@ class TestOpenAIProviderStreaming:
             usage_chunk.usage.total_tokens = 14
             chunks.append(usage_chunk)
 
-            async def async_gen():
+            async def async_gen() -> AsyncIterator[object]:
                 for chunk in chunks:
                     yield chunk
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=async_gen())
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=async_gen()
+            )
             mock_openai_sdk.AsyncOpenAI.return_value = mock_client
 
             provider = OpenAIProvider("gpt-4o", api_key="test")
@@ -459,7 +539,9 @@ class TestOpenAIProviderStreaming:
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(
@@ -475,12 +557,14 @@ class TestOpenAIProviderStreaming:
 class TestOpenAIProviderErrorMapping:
     """Test OpenAI provider error mapping."""
 
-    def test_map_unknown_error_without_sdk_imports(self, mock_openai_sdk: MagicMock) -> None:
+    def test_map_unknown_error_without_sdk_imports(
+        self, mock_openai_sdk: MagicMock
+    ) -> None:
         """Test mapping unknown error.
 
         Note: Direct _map_error testing is tricky with mocked SDK because
-        isinstance checks fail on MagicMock exception classes.
-        We test via patch.object to verify the method returns LLMError.
+        isinstance checks fail on MagicMock exception classes. We test via
+        patch.object to verify the method returns LLMError.
         """
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.errors import LLMError
@@ -489,8 +573,10 @@ class TestOpenAIProviderErrorMapping:
             provider = OpenAIProvider("gpt-4o", api_key="test")
 
             # Patch _map_error to simulate correct behavior
-            with patch.object(provider, "_map_error") as mock_map:
-                mock_map.return_value = LLMError(message="Unknown error", provider="openai")
+            with patch.object(provider, "map_error") as mock_map:
+                mock_map.return_value = LLMError(
+                    message="Unknown error", provider="openai"
+                )
                 result = mock_map(ValueError("Unknown error"))
 
                 assert isinstance(result, LLMError)

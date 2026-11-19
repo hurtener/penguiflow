@@ -21,12 +21,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 __all__ = [
-    "AppCSP",
-    "AppMetadata",
     "UI_COMPAT_EXTENSION_IDS",
-    "AppPermissions",
     "UI_EXTENSION_ID",
     "UI_MIME_TYPE",
+    "AppCSP",
+    "AppMetadata",
+    "AppPermissions",
     "extract_app_metadata",
 ]
 
@@ -98,11 +98,11 @@ class AppMetadata(BaseModel):
 # -----------------------------------------------------------------------------
 
 
-def extract_app_metadata(tool: Any) -> AppMetadata | None:
+def extract_app_metadata(tool: object) -> AppMetadata | None:
     """Extract MCP App metadata from an MCP Tool object.
 
-    The MCP Apps extension stores metadata in tool._meta["ui"].
-    The "ui" key can be:
+    The MCP Apps extension stores metadata in tool._meta["ui"]. The "ui" key
+    can be:
     - True (simple marker, no config)
     - dict with resourceUri, visibility, csp, permissions, etc.
 
@@ -112,13 +112,43 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
     Returns:
         AppMetadata if the tool has app metadata, None otherwise.
     """
-    # Get the _meta / meta dict
+    meta = _tool_meta(tool)
+    if meta is None:
+        return None
+    ui_data = _collect_ui_data(meta)
+    if not ui_data:
+        return None
+
+    resource_uri = ui_data.get("resourceUri") or ui_data.get("resource_uri")
+    if not resource_uri:
+        return None  # No resource URI — can't render
+
+    visibility = ui_data.get("visibility", ["app", "model"])
+    if not isinstance(visibility, list):
+        visibility = ["app", "model"]
+
+    return AppMetadata(
+        resource_uri=str(resource_uri),
+        visibility=[str(v) for v in visibility],
+        csp=_parse_csp(ui_data.get("csp", {})),
+        permissions=_parse_permissions(ui_data.get("permissions", {})),
+        domain=ui_data.get("domain"),
+        prefers_border=bool(
+            ui_data.get("prefersBorder") or ui_data.get("prefers_border")
+        ),
+    )
+
+
+def _tool_meta(tool: object) -> Mapping[str, Any] | None:
+    """Return the tool's ``meta`` / ``_meta`` mapping, if any."""
     meta = getattr(tool, "meta", None)
     if meta is None and isinstance(tool, dict):
         meta = tool.get("_meta") or tool.get("meta")
-    if not isinstance(meta, Mapping):
-        return None
+    return meta if isinstance(meta, Mapping) else None
 
+
+def _collect_ui_data(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge the nested, extension-id and flat forms of UI metadata."""
     ui_data: dict[str, Any] = {}
 
     # Legacy nested key support: meta["ui"] = {...}
@@ -133,33 +163,36 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
         if isinstance(raw_ext, Mapping):
             ui_data.update(dict(raw_ext))
 
-    # Flat key support used by MCP Apps:
-    # meta["ui/resourceUri"] = "ui://..."
+    # Flat key support used by MCP Apps: meta["ui/resourceUri"] = "ui://..."
     ui_data.update(_extract_flat_ui_meta(meta))
+    return ui_data
 
-    if not ui_data:
-        return None
 
-    resource_uri = ui_data.get("resourceUri") or ui_data.get("resource_uri")
-    if not resource_uri:
-        return None  # No resource URI — can't render
-
-    # Parse CSP
-    csp_data = ui_data.get("csp", {})
+def _parse_csp(csp_data: object) -> AppCSP:
+    """Parse the app's content security policy domains."""
     if not isinstance(csp_data, Mapping):
         csp_data = {}
-    csp = AppCSP(
-        connect_domains=_list_or_empty(csp_data.get("connectDomains") or csp_data.get("connect_domains")),
-        resource_domains=_list_or_empty(csp_data.get("resourceDomains") or csp_data.get("resource_domains")),
-        frame_domains=_list_or_empty(csp_data.get("frameDomains") or csp_data.get("frame_domains")),
-        base_uri_domains=_list_or_empty(csp_data.get("baseUriDomains") or csp_data.get("base_uri_domains")),
+    return AppCSP(
+        connect_domains=_list_or_empty(
+            csp_data.get("connectDomains") or csp_data.get("connect_domains")
+        ),
+        resource_domains=_list_or_empty(
+            csp_data.get("resourceDomains") or csp_data.get("resource_domains")
+        ),
+        frame_domains=_list_or_empty(
+            csp_data.get("frameDomains") or csp_data.get("frame_domains")
+        ),
+        base_uri_domains=_list_or_empty(
+            csp_data.get("baseUriDomains") or csp_data.get("base_uri_domains")
+        ),
     )
 
-    # Parse permissions — MCP Apps uses {} (empty dict) as "present/enabled"
-    perms_data = ui_data.get("permissions", {})
+
+def _parse_permissions(perms_data: object) -> AppPermissions:
+    """Parse permissions; MCP Apps uses {} (empty dict) as "enabled"."""
     if not isinstance(perms_data, Mapping):
         perms_data = {}
-    permissions = AppPermissions(
+    return AppPermissions(
         camera=_permission_enabled(perms_data.get("camera")),
         microphone=_permission_enabled(perms_data.get("microphone")),
         geolocation=_permission_enabled(perms_data.get("geolocation")),
@@ -169,21 +202,8 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
         ),
     )
 
-    visibility = ui_data.get("visibility", ["app", "model"])
-    if not isinstance(visibility, list):
-        visibility = ["app", "model"]
 
-    return AppMetadata(
-        resource_uri=str(resource_uri),
-        visibility=[str(v) for v in visibility],
-        csp=csp,
-        permissions=permissions,
-        domain=ui_data.get("domain"),
-        prefers_border=bool(ui_data.get("prefersBorder") or ui_data.get("prefers_border")),
-    )
-
-
-def _list_or_empty(val: Any) -> list[str]:
+def _list_or_empty(val: object) -> list[str]:
     """Coerce a value to list[str], defaulting to empty list."""
     if val is None:
         return []
@@ -225,7 +245,7 @@ def _extract_flat_ui_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _permission_enabled(value: Any) -> bool:
+def _permission_enabled(value: object) -> bool:
     """MCP Apps permissions can be bools or marker objects."""
     if value is None:
         return False

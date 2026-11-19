@@ -5,9 +5,12 @@ Exports provider classes and the factory function.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from .base import OpenAICompatibleProvider, Provider
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _DATABRICKS_AUTH_KWARGS = frozenset(
     {
@@ -20,17 +23,24 @@ _DATABRICKS_AUTH_KWARGS = frozenset(
 )
 
 __all__ = [
-    "Provider",
-    "OpenAICompatibleProvider",
-    "create_provider",
-    "OpenAIProvider",
-    "NIMProvider",
     "AnthropicProvider",
-    "GoogleProvider",
     "BedrockProvider",
     "DatabricksProvider",
+    "GoogleProvider",
+    "NIMProvider",
+    "OpenAICompatibleProvider",
+    "OpenAIProvider",
     "OpenRouterProvider",
+    "Provider",
+    "create_provider",
 ]
+
+
+def _build(
+    provider_cls: Callable[..., Provider], model: str, **kwargs: object
+) -> Provider:
+    """Instantiate ``provider_cls``; it validates the forwarded options."""
+    return provider_cls(model, **kwargs)
 
 
 def create_provider(
@@ -38,14 +48,14 @@ def create_provider(
     *,
     api_key: str | None = None,
     base_url: str | None = None,
-    **kwargs: Any,
+    **kwargs: object,
 ) -> Provider:
     """Create a provider instance based on model string.
 
     Model string formats:
     - "openai/gpt-4o" or "gpt-4o" -> OpenAI
-    - "nim/qwen/qwen3.5-397b-a17b", "nvidia/qwen/qwen3.5-397b-a17b",
-      or "nvidia/nemotron-3-nano-30b-a3b" -> NIM
+    - "nim/qwen/qwen3.5-397b-a17b", "nvidia/qwen/qwen3.5-397b-a17b", or
+      "nvidia/nemotron-3-nano-30b-a3b" -> NIM
     - "anthropic/claude-3-5-sonnet" or "claude-*" -> Anthropic
     - "google/gemini-2.0-flash" or "gemini-*" -> Google
     - "bedrock/anthropic.claude-3-5-sonnet" or "anthropic.*" -> Bedrock
@@ -56,7 +66,8 @@ def create_provider(
         model: Model identifier with optional provider prefix.
         api_key: API key (uses environment variable if not provided).
         base_url: Base URL override.
-        **kwargs: Provider-specific configuration.
+        **kwargs: Provider-specific configuration, validated by the
+            provider's constructor.
 
     Returns:
         Configured provider instance.
@@ -72,81 +83,100 @@ def create_provider(
 
     # OpenRouter (must check first as it contains other provider names)
     if model.startswith("openrouter/"):
-        return OpenRouterProvider(model, api_key=api_key, **kwargs)
-
-    # Databricks
-    if model.startswith("databricks/"):
-        if api_key is not None and not any(key in kwargs for key in _DATABRICKS_AUTH_KWARGS):
+        return _build(OpenRouterProvider, model, api_key=api_key, **kwargs)
+    if model.startswith(("databricks/", "databricks-")):
+        if api_key is not None and not _has_databricks_auth(kwargs):
             kwargs["api_key"] = api_key
-        return DatabricksProvider(model.removeprefix("databricks/"), **kwargs)
-    if model.startswith("databricks-"):
-        if api_key is not None and not any(key in kwargs for key in _DATABRICKS_AUTH_KWARGS):
-            kwargs["api_key"] = api_key
-        return DatabricksProvider(model, **kwargs)
-
-    # Bedrock
-    if model.startswith("bedrock/"):
-        return BedrockProvider(model.removeprefix("bedrock/"), **kwargs)
-    if model.startswith(("anthropic.", "amazon.", "meta.")):
-        return BedrockProvider(model, **kwargs)
-
-    # OpenAI
-    if model.startswith("openai/"):
-        return OpenAIProvider(
-            model.removeprefix("openai/"), api_key=api_key, base_url=base_url, **kwargs
+        return _build(
+            DatabricksProvider, model.removeprefix("databricks/"), **kwargs
         )
-    if model.startswith(("gpt", "o1", "o3")):
-        return OpenAIProvider(model, api_key=api_key, base_url=base_url, **kwargs)
-
-    # Anthropic
-    if model.startswith("anthropic/"):
-        return AnthropicProvider(
-            model.removeprefix("anthropic/"), api_key=api_key, **kwargs
+    if model.startswith(("bedrock/", "anthropic.", "amazon.", "meta.")):
+        return _build(
+            BedrockProvider, model.removeprefix("bedrock/"), **kwargs
         )
-    if model.startswith("claude"):
-        return AnthropicProvider(model, api_key=api_key, **kwargs)
-
-    # Google
-    if model.startswith("google/"):
-        return GoogleProvider(model.removeprefix("google/"), api_key=api_key, **kwargs)
-    if model.startswith("gemini"):
-        return GoogleProvider(model, api_key=api_key, **kwargs)
-
-    # NVIDIA NIM
-    if model.startswith("nim/"):
-        return NIMProvider(model.removeprefix("nim/"), api_key=api_key, base_url=base_url, **kwargs)
-    if model.startswith("nvidia/"):
-        remainder = model.removeprefix("nvidia/")
-        # Legacy aliases look like nvidia/<vendor>/<model> and should drop the
-        # provider prefix. Single-segment IDs (nvidia/<model>) are model names.
-        normalized = remainder if "/" in remainder else model
-        return NIMProvider(normalized, api_key=api_key, base_url=base_url, **kwargs)
+    if model.startswith(("openai/", "gpt", "o1", "o3")):
+        return _build(
+            OpenAIProvider,
+            model.removeprefix("openai/"),
+            api_key=api_key,
+            base_url=base_url,
+            **kwargs,
+        )
+    if model.startswith(("anthropic/", "claude")):
+        return _build(
+            AnthropicProvider,
+            model.removeprefix("anthropic/"),
+            api_key=api_key,
+            **kwargs,
+        )
+    if model.startswith(("google/", "gemini")):
+        return _build(
+            GoogleProvider,
+            model.removeprefix("google/"),
+            api_key=api_key,
+            **kwargs,
+        )
+    if model.startswith(("nim/", "nvidia/")):
+        return _build(
+            NIMProvider,
+            _nim_model_name(model),
+            api_key=api_key,
+            base_url=base_url,
+            **kwargs,
+        )
 
     # Default: OpenAI-compatible (requires base_url for non-OpenAI servers)
-    return OpenAIProvider(model, api_key=api_key, base_url=base_url, **kwargs)
+    return _build(
+        OpenAIProvider, model, api_key=api_key, base_url=base_url, **kwargs
+    )
+
+
+def _has_databricks_auth(kwargs: dict[str, object]) -> bool:
+    """Return whether ``kwargs`` already carries Databricks credentials."""
+    return any(key in kwargs for key in _DATABRICKS_AUTH_KWARGS)
+
+
+def _nim_model_name(model: str) -> str:
+    """Strip the NIM provider prefix from ``model``.
+
+    Legacy aliases look like ``nvidia/<vendor>/<model>`` and drop the
+    provider prefix; single-segment ids (``nvidia/<model>``) are model names.
+    """
+    if model.startswith("nim/"):
+        return model.removeprefix("nim/")
+    remainder = model.removeprefix("nvidia/")
+    return remainder if "/" in remainder else model
 
 
 def __getattr__(name: str) -> type:
-    """Lazy import provider classes to avoid loading all SDKs at import time."""
+    """Lazily import provider classes so SDKs load only when used."""
     if name == "OpenAIProvider":
         from .openai import OpenAIProvider
+
         return OpenAIProvider
-    elif name == "AnthropicProvider":
+    if name == "AnthropicProvider":
         from .anthropic import AnthropicProvider
+
         return AnthropicProvider
-    elif name == "GoogleProvider":
+    if name == "GoogleProvider":
         from .google import GoogleProvider
+
         return GoogleProvider
-    elif name == "NIMProvider":
+    if name == "NIMProvider":
         from .nim import NIMProvider
+
         return NIMProvider
-    elif name == "BedrockProvider":
+    if name == "BedrockProvider":
         from .bedrock import BedrockProvider
+
         return BedrockProvider
-    elif name == "DatabricksProvider":
+    if name == "DatabricksProvider":
         from .databricks import DatabricksProvider
+
         return DatabricksProvider
-    elif name == "OpenRouterProvider":
+    if name == "OpenRouterProvider":
         from .openrouter import OpenRouterProvider
+
         return OpenRouterProvider
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

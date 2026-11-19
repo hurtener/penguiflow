@@ -9,7 +9,8 @@ Run with a Python >=3.11 environment where `penguiflow` is importable.
 
 In the PenguiFlow repo, prefer:
 
-    uv run python ~/.codex/skills/penguiflow-statestore/scripts/statestore_inspect.py
+    uv run python
+    ~/.codex/skills/penguiflow-statestore/scripts/statestore_inspect.py
 """
 
 from __future__ import annotations
@@ -23,21 +24,24 @@ from dataclasses import fields as dc_fields
 from dataclasses import is_dataclass
 from enum import Enum
 from importlib import metadata
-from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
 def _eprint(message: str) -> None:
-    print(message, file=sys.stderr)
+    sys.stderr.write(f"{message}\n")
 
 
-def _import_attr(spec: str) -> Any:
+def _import_attr(spec: str) -> object:
     """Import an attribute from 'module:attr.path'."""
     if ":" not in spec:
-        raise ValueError("Expected 'module:attr' (e.g. 'my_pkg.persistence:store').")
+        msg = "Expected 'module:attr' (e.g. 'my_pkg.persistence:store')."
+        raise ValueError(msg)
     module_name, attr_path = spec.split(":", 1)
     module = importlib.import_module(module_name)
-    obj: Any = module
+    obj: object = module
     for part in [p for p in attr_path.split(".") if p]:
         obj = getattr(obj, part)
     return obj
@@ -58,10 +62,14 @@ def _proto_surface(proto: type[Any]) -> dict[str, Any]:
             continue
         if inspect.isfunction(value):
             methods.append(name)
-    return {"name": _safe_name(proto), "methods": sorted(methods), "properties": sorted(props)}
+    return {
+        "name": _safe_name(proto),
+        "methods": sorted(methods),
+        "properties": sorted(props),
+    }
 
 
-def _describe_model(obj: Any) -> dict[str, Any] | None:
+def _describe_model(obj: object) -> dict[str, Any] | None:
     # Dataclasses
     if is_dataclass(obj):
         return {
@@ -81,7 +89,7 @@ def _describe_model(obj: Any) -> dict[str, Any] | None:
         return {
             "kind": "enum",
             "name": _safe_name(obj),
-            "values": [member.value for member in obj],  # type: ignore[union-attr]
+            "values": [member.value for member in obj],
         }
 
     # Pydantic v2 BaseModel
@@ -113,14 +121,18 @@ def _iter_public(module: ModuleType) -> list[tuple[str, Any]]:
 
 
 def _print_section(title: str) -> None:
-    print(f"\n== {title} ==\n")
+    sys.stdout.write(f"\n== {title} ==\n\n")
 
 
-def _print_json(obj: Any) -> None:
-    print(json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True))
+def _print_json(obj: object) -> None:
+    sys.stdout.write(
+        f"{json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True)}\n"
+    )
 
 
-def _capability_report(store: object, *, state_module: Any, artifacts_module: Any) -> dict[str, Any]:
+def _capability_report(
+    store: object, *, state_module: ModuleType, artifacts_module: ModuleType
+) -> dict[str, Any]:
     required = ["save_event", "load_history", "save_remote_binding"]
 
     optional_groups: dict[str, list[str]] = {
@@ -146,12 +158,20 @@ def _capability_report(store: object, *, state_module: Any, artifacts_module: An
 
     report = {
         "type": f"{store.__class__.__module__}.{store.__class__.__name__}",
-        "required": {"missing": _missing(required), "present": [n for n in required if hasattr(store, n)]},
+        "required": {
+            "missing": _missing(required),
+            "present": [n for n in required if hasattr(store, n)],
+        },
         "optional": {
-            group: {"missing": _missing(names), "present": [n for n in names if hasattr(store, n)]}
+            group: {
+                "missing": _missing(names),
+                "present": [n for n in names if hasattr(store, n)],
+            }
             for group, names in optional_groups.items()
         },
-        "artifact_store_discovered": bool(discovered_artifact_store is not None),
+        "artifact_store_discovered": bool(
+            discovered_artifact_store is not None
+        ),
         "artifact_store_type": (
             f"{discovered_artifact_store.__class__.__module__}.{discovered_artifact_store.__class__.__name__}"
             if discovered_artifact_store is not None
@@ -162,7 +182,9 @@ def _capability_report(store: object, *, state_module: Any, artifacts_module: An
     require_capabilities = getattr(state_module, "require_capabilities", None)
     if callable(require_capabilities):
         try:
-            require_capabilities(store, feature="core", methods=tuple(required))
+            require_capabilities(
+                store, feature="core", methods=tuple(required)
+            )
             report["required"]["ok"] = True
         except Exception as exc:  # pragma: no cover - best effort
             report["required"]["ok"] = False
@@ -171,17 +193,36 @@ def _capability_report(store: object, *, state_module: Any, artifacts_module: An
     return report
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Inspect PenguiFlow StateStore/ArtifactStore surface.")
+_PROTOCOL_NAMES = (
+    "StateStore",
+    "SupportsPlannerState",
+    "SupportsMemoryState",
+    "SupportsTasks",
+    "SupportsSteering",
+    "SupportsTrajectories",
+    "SupportsPlannerEvents",
+    "SupportsArtifacts",
+)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Inspect PenguiFlow StateStore/ArtifactStore surface."
+    )
     parser.add_argument(
         "--check",
         metavar="MODULE:ATTR",
-        help="Import and capability-check a concrete backend object/factory (e.g. 'myapp.persistence:store').",
+        help=(
+            "Import and capability-check a concrete backend "
+            "object/factory (e.g. 'myapp.persistence:store')."
+        ),
     )
     parser.add_argument(
         "--call",
         action="store_true",
-        help="If --check resolves to a callable factory, call it with no args.",
+        help=(
+            "If --check resolves to a callable factory, call it with no args."
+        ),
     )
     parser.add_argument(
         "--instantiate",
@@ -193,47 +234,28 @@ def main() -> int:
         action="store_true",
         help="Output machine-readable JSON only (suppresses pretty sections).",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    try:
-        import penguiflow.artifacts as artifacts_module  # type: ignore[import-not-found]
-        import penguiflow.state as state_module  # type: ignore[import-not-found]
-        import penguiflow.state.models as state_models  # type: ignore[import-not-found]
-        import penguiflow.state.protocol as state_protocol  # type: ignore[import-not-found]
-    except Exception as exc:
-        _eprint(f"ERROR: Failed to import penguiflow modules: {exc!r}")
-        _eprint("Hint: run inside a project that depends on PenguiFlow (or from the PenguiFlow repo using `uv run`).")
-        return 2
 
-    payload: dict[str, Any] = {
-        "python": sys.version.split()[0],
-        "penguiflow_version": None,
-        "state_protocols": [],
-        "models": [],
-        "capability_check": None,
-    }
+def _package_version() -> str | None:
     try:
-        payload["penguiflow_version"] = metadata.version("penguiflow-lite")
+        return metadata.version("penguiflow-lite")
     except metadata.PackageNotFoundError:
-        payload["penguiflow_version"] = None
+        return None
 
-    # Protocol surfaces
-    for proto_name in (
-        "StateStore",
-        "SupportsPlannerState",
-        "SupportsMemoryState",
-        "SupportsTasks",
-        "SupportsSteering",
-        "SupportsTrajectories",
-        "SupportsPlannerEvents",
-        "SupportsArtifacts",
-    ):
+
+def _protocol_surfaces(state_protocol: ModuleType) -> list[dict[str, Any]]:
+    surfaces = []
+    for proto_name in _PROTOCOL_NAMES:
         proto = getattr(state_protocol, proto_name, None)
         if inspect.isclass(proto):
-            payload["state_protocols"].append(_proto_surface(proto))
+            surfaces.append(_proto_surface(proto))
+    return surfaces
 
-    # Common models (both from state.models and artifacts)
-    for module in (state_models, artifacts_module):
+
+def _module_models(*modules: ModuleType) -> list[dict[str, Any]]:
+    models = []
+    for module in modules:
         for _name, obj in _iter_public(module):
             if not inspect.isclass(obj):
                 continue
@@ -241,72 +263,110 @@ def main() -> int:
                 continue
             described = _describe_model(obj)
             if described is not None:
-                payload["models"].append(described)
+                models.append(described)
+    return models
 
-    # Optional: capability-check a concrete object
-    if args.check:
+
+def _resolve_target(
+    args: argparse.Namespace,
+) -> tuple[object | None, dict[str, Any] | None]:
+    """Return the object to check, or ``None`` and the error report."""
+    spec = args.check
+    try:
+        target = _import_attr(spec)
+    except Exception as exc:
+        return None, {"error": f"import_failed:{exc!r}", "spec": spec}
+    if args.call:
+        if not callable(target):
+            return None, {"error": "target_not_callable", "spec": spec}
         try:
-            target = _import_attr(args.check)
+            target = target()
         except Exception as exc:
-            payload["capability_check"] = {"error": f"import_failed:{exc!r}", "spec": args.check}
-        else:
-            if args.call:
-                if not callable(target):
-                    payload["capability_check"] = {"error": "target_not_callable", "spec": args.check}
-                else:
-                    try:
-                        target = target()
-                    except Exception as exc:
-                        payload["capability_check"] = {"error": f"call_failed:{exc!r}", "spec": args.check}
-            if args.instantiate:
-                if not inspect.isclass(target):
-                    payload["capability_check"] = {"error": "target_not_class", "spec": args.check}
-                else:
-                    try:
-                        target = target()
-                    except Exception as exc:
-                        payload["capability_check"] = {"error": f"instantiate_failed:{exc!r}", "spec": args.check}
+            return None, {"error": f"call_failed:{exc!r}", "spec": spec}
+    if args.instantiate:
+        if not inspect.isclass(target):
+            return None, {"error": "target_not_class", "spec": spec}
+        try:
+            target = target()
+        except Exception as exc:
+            return None, {"error": f"instantiate_failed:{exc!r}", "spec": spec}
+    return target, None
 
-            if payload["capability_check"] is None and not isinstance(target, object):  # pragma: no cover
-                payload["capability_check"] = {"error": "unexpected_target", "spec": args.check}
-            elif payload["capability_check"] is None:
-                payload["capability_check"] = _capability_report(
-                    target,
-                    state_module=state_module,
-                    artifacts_module=artifacts_module,
-                )
+
+def _print_protocols(protocols: list[dict[str, Any]]) -> None:
+    _print_section("StateStore Protocol Surface")
+    for entry in protocols:
+        sys.stdout.write(f"- {entry['name']}\n")
+        if entry["methods"]:
+            sys.stdout.write(f"  methods: {', '.join(entry['methods'])}\n")
+        if entry["properties"]:
+            sys.stdout.write(
+                f"  properties: {', '.join(entry['properties'])}\n"
+            )
+
+
+def _print_models(models: list[dict[str, Any]]) -> None:
+    _print_section("Models (dataclasses/enums/pydantic)")
+    for model in models:
+        kind = model["kind"]
+        name = model["name"]
+        sys.stdout.write(f"- [{kind}] {name}\n")
+        if kind in {"dataclass", "pydantic"}:
+            for field in model.get("fields", []):
+                sys.stdout.write(f"  - {field['name']}: {field['type']}\n")
+        elif kind == "enum":
+            values = model.get("values", [])
+            sys.stdout.write(f"  - values: {values}\n")
+
+
+def main() -> int:
+    """Inspect a state store from the command line."""
+    args = _parse_args()
+
+    try:
+        import penguiflow.artifacts as artifacts_module
+        import penguiflow.state as state_module
+        import penguiflow.state.models as state_models
+        import penguiflow.state.protocol as state_protocol
+    except Exception as exc:
+        _eprint(f"ERROR: Failed to import penguiflow modules: {exc!r}")
+        _eprint(
+            "Hint: run inside a project that depends on PenguiFlow "
+            "(or from the PenguiFlow repo using `uv run`)."
+        )
+        return 2
+
+    capability_check: dict[str, Any] | None = None
+    if args.check:
+        target, capability_check = _resolve_target(args)
+        if capability_check is None:
+            capability_check = _capability_report(
+                target,
+                state_module=state_module,
+                artifacts_module=artifacts_module,
+            )
+    payload: dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "penguiflow_version": _package_version(),
+        "state_protocols": _protocol_surfaces(state_protocol),
+        "models": _module_models(state_models, artifacts_module),
+        "capability_check": capability_check,
+    }
 
     if args.json:
         _print_json(payload)
         return 0
 
-    # Pretty sections
-    _print_section("StateStore Protocol Surface")
-    for entry in payload["state_protocols"]:
-        print(f"- {entry['name']}")
-        if entry["methods"]:
-            print(f"  methods: {', '.join(entry['methods'])}")
-        if entry["properties"]:
-            print(f"  properties: {', '.join(entry['properties'])}")
-
-    _print_section("Models (dataclasses/enums/pydantic)")
-    for model in payload["models"]:
-        kind = model["kind"]
-        name = model["name"]
-        print(f"- [{kind}] {name}")
-        if kind in {"dataclass", "pydantic"}:
-            fields = model.get("fields", [])
-            for field in fields:
-                print(f"  - {field['name']}: {field['type']}")
-        elif kind == "enum":
-            values = model.get("values", [])
-            print(f"  - values: {values}")
-
-    if payload["capability_check"] is not None:
+    _print_protocols(payload["state_protocols"])
+    _print_models(payload["models"])
+    if capability_check is not None:
         _print_section("Capability Check")
-        _print_json(payload["capability_check"])
+        _print_json(capability_check)
 
-    print("\nTip: for the full method contracts, open references/statestore-implementation-spec.md\n")
+    sys.stdout.write(
+        "\nTip: for the full method contracts, open "
+        "references/statestore-implementation-spec.md\n\n"
+    )
     return 0
 
 

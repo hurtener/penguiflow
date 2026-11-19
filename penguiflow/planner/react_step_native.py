@@ -7,18 +7,21 @@ Decision 9 / Phase 5).
 
 Mapping (Phase 5 design decisions D5.1/D5.5):
 - zero tool calls   → ``final_response`` with the content as the answer
-- one tool call     → direct tool action (args parsed from provider-validated JSON)
+- one tool call     → direct tool action (args parsed from provider-validated
+  JSON)
 - N tool calls      → ``parallel`` plan with one step per call (no join in v1)
 - content alongside an intermediate tool call → ``action.thought`` (preamble)
 
 Structured finishing (``final_response_model``): the one deliberate exception
 to "no text alongside tool calls". When finishing, the model writes the answer
 as plain text AND calls the synthetic ``final_response`` tool carrying only the
-``structured`` object, in the same turn. We keep the streamed text as the answer
-and read ``structured`` from the call — so the answer still streams while the
-payload validates first-pass. See ``build_native_tools`` / ``FINISH_TOOL_NAME``.
+``structured`` object, in the same turn. We keep the streamed text as the
+answer and read ``structured`` from the call — so the answer still streams
+while the payload validates first-pass. See ``build_native_tools`` /
+``FINISH_TOOL_NAME``.
 
-Streaming (D5.3 revised): content deltas stream token-by-token on the ``answer``
+Streaming (D5.3 revised): content deltas stream token-by-token on the
+    ``answer``
 channel (parity with prompted mode). An *intermediate* turn that streams a
 disobedient preamble before a tool call closes the answer stream with
 ``superseded: True`` and re-emits the text on ``thinking``; a structured finish
@@ -30,30 +33,39 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..llm.types import ToolSpec
+from ..llm.protocol import NativeToolCallResult
+from ..llm.types import ToolCallPart, ToolSpec
 from .llm import _coerce_llm_response
-from .models import PlannerAction, PlannerEvent
-from .trajectory import Trajectory
+from .models import NativeToolsLLMClient, PlannerAction, PlannerEvent
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from .react import ReactPlanner
+    from .trajectory import Trajectory
 
 logger = logging.getLogger("penguiflow.planner")
 
 _DOWNGRADE_FLAG = "native_tool_call_downgraded"
 
-# Reserved native tool name used to deliver a schema-validated final answer when
-# the planner is configured with ``final_response_model``. The model "calls" this
-# synthetic tool to finish, so the structured payload arrives as provider-validated
-# function-call args (no extra corrective turn needed). See
+# Reserved native tool name used to deliver a schema-validated final answer
+# when the planner is configured with ``final_response_model``. The model
+# "calls" this synthetic tool to finish, so the structured payload arrives as
+# provider-validated function-call args (no extra corrective turn needed). See
 # ``docs/planner/structured-final-response.md``.
 FINISH_TOOL_NAME = "final_response"
 
 
-def resolve_native_eligibility(planner: Any) -> str | None:
+def resolve_native_eligibility(planner: ReactPlanner) -> str | None:
     """Return None when native mode can run, else a human-readable reason."""
-    client = planner._client
-    if not hasattr(client, "complete_with_tools"):
-        return f"client {type(client).__name__} does not expose complete_with_tools"
+    client = planner.client
+    if not isinstance(client, NativeToolsLLMClient):
+        return (
+            f"client {type(client).__name__} does not expose "
+            "complete_with_tools"
+        )
 
     model = getattr(client, "_model", None)
     if isinstance(model, str) and model:
@@ -67,16 +79,18 @@ def resolve_native_eligibility(planner: Any) -> str | None:
     return None
 
 
-def emit_downgrade_once(planner: Any, trajectory: Trajectory, reason: str) -> None:
+def emit_downgrade_once(
+    planner: ReactPlanner, trajectory: Trajectory, reason: str
+) -> None:
     """Emit the downgrade event once per run (the condition is run-stable)."""
     if trajectory.metadata.get(_DOWNGRADE_FLAG):
         return
     trajectory.metadata[_DOWNGRADE_FLAG] = reason
     logger.warning("tool_call_mode_downgraded", extra={"reason": reason})
-    planner._emit_event(
+    planner.emit_event(
         PlannerEvent(
             event_type="tool_call_mode_downgraded",
-            ts=planner._time_source(),
+            ts=planner.time_source(),
             trajectory_step=len(trajectory.steps),
             extra={"from": "native", "to": "prompted", "reason": reason},
         )
@@ -86,7 +100,9 @@ def emit_downgrade_once(planner: Any, trajectory: Trajectory, reason: str) -> No
 _TOOL_NAME_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
-def build_native_tools(planner: Any) -> tuple[list[ToolSpec], dict[str, str]]:
+def build_native_tools(
+    planner: ReactPlanner,
+) -> tuple[list[ToolSpec], dict[str, str]]:
     """Declare the currently visible catalog as native tool specs.
 
     Catalog names may contain characters that provider function-name patterns
@@ -98,12 +114,12 @@ def build_native_tools(planner: Any) -> tuple[list[ToolSpec], dict[str, str]]:
     tools: list[ToolSpec] = []
     alias_to_name: dict[str, str] = {}
     used: set[str] = set()
-    # When structured final answers are enabled, reserve the finish-tool name so a
-    # real catalog tool can never collide with it.
-    structured_schema = getattr(planner, "_final_response_schema", None)
+    # When structured final answers are enabled, reserve the finish-tool name
+    # so a real catalog tool can never collide with it.
+    structured_schema = getattr(planner, "final_response_schema", None)
     if structured_schema is not None:
         used.add(FINISH_TOOL_NAME)
-    for spec in planner._specs:
+    for spec in planner.specs:
         alias = _TOOL_NAME_UNSAFE_RE.sub("_", spec.name)[:128] or "tool"
         if alias in used:
             base = alias[:120]
@@ -125,10 +141,14 @@ def build_native_tools(planner: Any) -> tuple[list[ToolSpec], dict[str, str]]:
             ToolSpec(
                 name=FINISH_TOOL_NAME,
                 description=(
-                    "FINISH the run. Write your complete human-readable answer as "
-                    "plain text in the same turn (it streams to the user), and call "
-                    "this with 'structured' set to the matching schema object. Use "
-                    "the optional 'answer' field only if you did not write the answer "
+                    "FINISH the run. Write your complete "
+                    "human-readable answer as "
+                    "plain text in the same turn (it streams to the user), "
+                    "and call "
+                    "this with 'structured' set to the matching schema "
+                    "object. Use "
+                    "the optional 'answer' field only if you did not write "
+                    "the answer "
                     "as plain text. Do not call this alongside other tools."
                 ),
                 json_schema={
@@ -138,7 +158,8 @@ def build_native_tools(planner: Any) -> tuple[list[ToolSpec], dict[str, str]]:
                         "answer": {
                             "type": "string",
                             "description": (
-                                "Fallback answer; normally write the answer as plain "
+                                "Fallback answer; normally write the "
+                                "answer as plain "
                                 "text instead so it streams."
                             ),
                         },
@@ -175,83 +196,96 @@ def _parse_tool_args(arguments_json: str, *, tool_name: str) -> dict[str, Any]:
     return {}
 
 
-async def step_native(planner: Any, trajectory: Trajectory) -> PlannerAction:
-    """One native-mode planner step: declare tools, map the reply to a PlannerAction."""
-    had_pending_steering = bool(trajectory.steering_inputs)
-    base_messages = list(await planner._build_messages(trajectory))
-    # Arg-validation repair guidance is delivered via trajectory metadata by the
-    # runtime (same contract as the prompted step) - consume it or it is lost.
-    if isinstance(trajectory.metadata, dict):
-        arg_repair_message = trajectory.metadata.pop("arg_repair_message", None)
-        if arg_repair_message:
-            base_messages.insert(0, {"role": "system", "content": arg_repair_message})
-    tools, alias_to_name = build_native_tools(planner)
-    # The runtime increments _action_seq and emits step_start BEFORE step runs;
-    # chunks must carry the SAME seq or the UI answer gate drops them.
-    current_action_seq = planner._action_seq
-    stream_allowed = bool(planner._stream_final_response)
+class _NativeStream:
+    """Streams one native-mode turn on the answer and thinking channels.
 
-    # D5.3 (revised): the native-mode prompt forbids text alongside tool calls,
-    # so content deltas stream OPTIMISTICALLY to the answer channel,
-    # token-by-token, exactly like prompted mode. If the model disobeys and the
-    # turn turns out to be a tool call, the answer stream is closed with
-    # ``superseded: True`` and the text is re-emitted on the thinking channel
-    # so traces stay coherent (consumers that ignore the marker degrade to
-    # briefly showing preamble text — never broken state).
-    answer_chunks_emitted = 0
+    D5.3 (revised): the native-mode prompt forbids text alongside tool calls,
+    so content deltas stream OPTIMISTICALLY to the answer channel,
+    token-by-token, exactly like prompted mode. If the model disobeys and the
+    turn turns out to be a tool call, the answer stream is closed with
+    ``superseded: True`` and the text is re-emitted on the thinking channel
+    so traces stay coherent (consumers that ignore the marker degrade to
+    briefly showing preamble text — never broken state).
+    """
 
-    def _enqueue_chunk(extra: dict[str, Any]) -> None:
-        # Same path as prompted mode: guardrail redaction applies when enabled.
-        planner._enqueue_llm_stream_chunk(
-            trajectory,
+    def __init__(
+        self, planner: ReactPlanner, trajectory: Trajectory, action_seq: int
+    ) -> None:
+        """Stream chunks of ``trajectory``'s step ``action_seq``."""
+        self._planner = planner
+        self._trajectory = trajectory
+        # The runtime increments the action seq and emits step_start BEFORE
+        # the step runs; chunks must carry the SAME seq or the UI answer gate
+        # drops them.
+        self.action_seq = action_seq
+        self.answer_chunks_emitted = 0
+
+    def enqueue(self, extra: dict[str, Any]) -> None:
+        """Queue a chunk (guardrail redaction applies, as in prompted mode)."""
+        self._planner.enqueue_llm_stream_chunk(
+            self._trajectory,
             {
-                "ts": planner._time_source(),
-                "trajectory_step": len(trajectory.steps),
-                "extra": {"action_seq": current_action_seq, **extra},
+                "ts": self._planner.time_source(),
+                "trajectory_step": len(self._trajectory.steps),
+                "extra": {"action_seq": self.action_seq, **extra},
             },
         )
 
-    def _emit_chunk(text: str, done: bool) -> None:
-        nonlocal answer_chunks_emitted
+    def emit_chunk(self, text: str, _done: bool) -> None:
+        """Stream a content delta on the answer channel.
+
+        The provider's done flag is not forwarded: the answer stream is
+        closed explicitly once the turn's outcome is known.
+        """
         if not text:
             return
-        answer_chunks_emitted += 1
-        _enqueue_chunk({"text": text, "done": False, "phase": "answer", "channel": "answer"})
+        self.answer_chunks_emitted += 1
+        self.enqueue(
+            {
+                "text": text,
+                "done": False,
+                "phase": "answer",
+                "channel": "answer",
+            }
+        )
 
-    def _emit_reasoning_chunk(text: str, done: bool) -> None:
+    def emit_reasoning_chunk(self, text: str, done: bool) -> None:
+        """Stream reasoning on the thinking channel (prompted-mode parity)."""
         if not text and not done:
             return
-        # Parity with prompted mode: reasoning renders on the thinking channel.
-        _enqueue_chunk({"text": text, "done": done, "phase": "thinking", "channel": "thinking"})
+        self.enqueue(
+            {
+                "text": text,
+                "done": done,
+                "phase": "thinking",
+                "channel": "thinking",
+            }
+        )
 
-    use_reasoning = getattr(planner, "_use_native_reasoning", True)
-    result = await planner._client.complete_with_tools(
-        messages=base_messages,
-        tools=tools,
-        stream=stream_allowed,
-        on_stream_chunk=_emit_chunk if stream_allowed else None,
-        on_reasoning_chunk=_emit_reasoning_chunk if (stream_allowed and use_reasoning) else None,
-    )
-    raw_result = getattr(result, "content", None), getattr(result, "cost", None)
-    if raw_result[0] is None:
-        # Defensive: a JSONLLMClient-shaped return slipped through.
-        content, cost = _coerce_llm_response(result)
-        tool_calls: list[Any] = []
-    else:
-        content = result.content
-        cost = result.cost
-        tool_calls = result.tool_calls
-    planner._cost_tracker.record_main_call(cost or 0.0)
+    def emit_text(self, text: str, *, channel: str) -> None:
+        """Emit a whole text on the answer or thinking channel."""
+        self.enqueue(
+            {
+                "text": text,
+                "done": False,
+                "phase": channel,
+                "channel": channel,
+            }
+        )
 
-    # Steering inputs were rendered into this step's messages; clear them so
-    # they are not repeated on every subsequent step (prompted-step parity).
-    if had_pending_steering:
-        trajectory.steering_inputs.clear()
+    def finish_answer(self, answer: str) -> None:
+        """Emit the answer unless it already streamed, then close it.
 
-    content = (content or "").strip()
+        Non-streaming providers hand back the whole answer at once; emitting
+        it keeps the answer channel carrying the text.
+        """
+        if answer and self.answer_chunks_emitted == 0:
+            self.emit_text(answer, channel="answer")
+        self.close_answer(superseded=False)
 
-    def _close_answer_stream(*, superseded: bool) -> None:
-        _enqueue_chunk(
+    def close_answer(self, *, superseded: bool) -> None:
+        """Close the answer stream, marking retracted text as superseded."""
+        self.enqueue(
             {
                 "text": "",
                 "done": True,
@@ -261,77 +295,148 @@ async def step_native(planner: Any, trajectory: Trajectory) -> PlannerAction:
             }
         )
 
-    if not tool_calls:
-        # D5.1: content-only turn is the final answer. It already streamed
-        # token-by-token on the answer channel; emit the full text only when
-        # nothing streamed (non-streaming runs), then close the stream.
-        if content and stream_allowed:
-            if answer_chunks_emitted == 0:
-                _enqueue_chunk({"text": content, "done": False, "phase": "answer", "channel": "answer"})
-            _close_answer_stream(superseded=False)
-        return PlannerAction(
-            next_node="final_response",
-            args={"answer": content, "raw_answer": content},
-            thought="",
-            raw_llm_response=content,
+
+async def _native_messages(
+    planner: ReactPlanner, trajectory: Trajectory
+) -> list[dict[str, Any]]:
+    """Build the step's messages, including any arg repair guidance.
+
+    Arg-validation repair guidance is delivered via trajectory metadata by
+    the runtime (same contract as the prompted step): consume it or it is
+    lost.
+    """
+    base_messages = list(await planner.build_messages(trajectory))
+    arg_repair_message = trajectory.metadata.pop("arg_repair_message", None)
+    if arg_repair_message:
+        base_messages.insert(
+            0, {"role": "system", "content": arg_repair_message}
         )
+    return base_messages
 
-    # Structured final answer (final_response_model). Detect the synthetic finish
-    # tool BEFORE the supersede logic below: a finishing turn legitimately streams
-    # the answer as plain text AND calls final_response with the structured object,
-    # so we KEEP the streamed text as the answer instead of retracting it. The
-    # tool carries only the machine-readable payload; the runtime's
-    # _ensure_structured_final validates it first try (no repair turn).
-    if getattr(planner, "_final_response_schema", None) is not None:
-        finish_call = next((c for c in tool_calls if c.name == FINISH_TOOL_NAME), None)
-        if finish_call is not None:
-            # Finishing ends the run, so any sibling calls in the same turn are
-            # dropped. The prompt tells the model to call final_response alone;
-            # log it so the rare violation is observable rather than silent.
-            if len(tool_calls) > 1:
-                logger.info(
-                    "native_finish_dropped_sibling_calls",
-                    extra={
-                        "dropped": [c.name for c in tool_calls if c is not finish_call],
-                        "action_seq": current_action_seq,
-                    },
-                )
-            finish_args = _parse_tool_args(finish_call.arguments_json, tool_name=finish_call.name)
-            # Prefer the streamed plain-text answer; fall back to an answer carried
-            # inside the tool call if the model put it there instead of as text.
-            fallback = finish_args.get("answer")
-            answer_text = content or (fallback if isinstance(fallback, str) else "")
-            if stream_allowed:
-                # Non-streaming providers hand back the whole answer at once; emit
-                # it so the answer channel still carries the text, then close it.
-                if answer_text and answer_chunks_emitted == 0:
-                    _enqueue_chunk(
-                        {"text": answer_text, "done": False, "phase": "answer", "channel": "answer"}
-                    )
-                _close_answer_stream(superseded=False)
-            final_args: dict[str, Any] = {"answer": answer_text, "raw_answer": answer_text}
-            if "structured" in finish_args:
-                final_args["structured"] = finish_args["structured"]
-            return PlannerAction(
-                next_node="final_response",
-                args=final_args,
-                thought="",
-                raw_llm_response=finish_call.arguments_json or None,
-            )
 
-    # Intermediate tool turn. If the model disobeyed the no-preamble instruction
-    # and text already streamed to the answer channel, retract it: close the
-    # answer stream with the superseded marker and re-emit the text as thinking.
-    if stream_allowed and answer_chunks_emitted > 0:
-        _close_answer_stream(superseded=True)
-        if content:
-            _enqueue_chunk({"text": content, "done": False, "phase": "thinking", "channel": "thinking"})
+async def _complete_native(
+    planner: ReactPlanner,
+    messages: list[dict[str, Any]],
+    tools: list[ToolSpec],
+    stream: _NativeStream,
+) -> tuple[str, list[ToolCallPart]]:
+    """Run the native completion; return its content and tool calls."""
+    client = planner.client
+    if not isinstance(client, NativeToolsLLMClient):
+        msg = (
+            f"client {type(client).__name__} does not expose "
+            "complete_with_tools"
+        )
+        raise TypeError(msg)
+    stream_allowed = bool(planner.stream_final_response)
+    use_reasoning = getattr(planner, "use_native_reasoning", True)
+    # Typed as object: a JSONLLMClient-shaped return is handled below.
+    result: object = await client.complete_with_tools(
+        messages=messages,
+        tools=tools,
+        stream=stream_allowed,
+        on_stream_chunk=stream.emit_chunk if stream_allowed else None,
+        on_reasoning_chunk=stream.emit_reasoning_chunk
+        if (stream_allowed and use_reasoning)
+        else None,
+    )
+    tool_calls: list[ToolCallPart]
+    if isinstance(result, NativeToolCallResult):
+        content = result.content
+        cost = result.cost
+        tool_calls = list(result.tool_calls)
+    else:
+        # Defensive: a JSONLLMClient-shaped return slipped through.
+        content, cost = _coerce_llm_response(result)
+        tool_calls = []
+    planner.cost_tracker.record_main_call(cost or 0.0)
+    return (content or "").strip(), tool_calls
+
+
+def _structured_finish_action(
+    tool_calls: list[ToolCallPart],
+    content: str,
+    stream: _NativeStream | None,
+    *,
+    action_seq: int,
+) -> PlannerAction | None:
+    """Map a ``final_response`` tool call to the structured final answer.
+
+    A finishing turn legitimately streams the answer as plain text AND calls
+    final_response with the structured object, so the streamed text is KEPT
+    as the answer instead of being retracted. The tool carries only the
+    machine-readable payload; the runtime's structured-final check validates
+    it first try (no repair turn).
+    """
+    finish_call = next(
+        (c for c in tool_calls if c.name == FINISH_TOOL_NAME), None
+    )
+    if finish_call is None:
+        return None
+    # Finishing ends the run, so any sibling calls in the same turn are
+    # dropped. The prompt tells the model to call final_response alone; log
+    # it so the rare violation is observable rather than silent.
+    if len(tool_calls) > 1:
         logger.info(
-            "native_answer_stream_superseded",
-            extra={"chars_streamed": len(content), "action_seq": current_action_seq},
+            "native_finish_dropped_sibling_calls",
+            extra={
+                "dropped": [
+                    c.name for c in tool_calls if c is not finish_call
+                ],
+                "action_seq": action_seq,
+            },
         )
+    finish_args = _parse_tool_args(
+        finish_call.arguments_json, tool_name=finish_call.name
+    )
+    # Prefer the streamed plain-text answer; fall back to an answer carried
+    # inside the tool call if the model put it there instead of as text.
+    fallback = finish_args.get("answer")
+    answer_text = content or (fallback if isinstance(fallback, str) else "")
+    if stream is not None:
+        stream.finish_answer(answer_text)
+    final_args: dict[str, Any] = {
+        "answer": answer_text,
+        "raw_answer": answer_text,
+    }
+    if "structured" in finish_args:
+        final_args["structured"] = finish_args["structured"]
+    return PlannerAction(
+        next_node="final_response",
+        args=final_args,
+        thought="",
+        raw_llm_response=finish_call.arguments_json or None,
+    )
 
-    def real_name(call: Any) -> str:
+
+def _retract_streamed_answer(stream: _NativeStream, content: str) -> None:
+    """Move preamble text that streamed as an answer to thinking.
+
+    This handles a model that disobeyed the no-preamble instruction on an
+    intermediate tool turn.
+    """
+    if stream.answer_chunks_emitted == 0:
+        return
+    stream.close_answer(superseded=True)
+    if content:
+        stream.emit_text(content, channel="thinking")
+    logger.info(
+        "native_answer_stream_superseded",
+        extra={
+            "chars_streamed": len(content),
+            "action_seq": stream.action_seq,
+        },
+    )
+
+
+def _tool_calls_action(
+    tool_calls: list[ToolCallPart],
+    alias_to_name: Mapping[str, str],
+    content: str,
+) -> PlannerAction:
+    """Map the turn's tool calls to one tool action or a parallel plan."""
+
+    def real_name(call: ToolCallPart) -> str:
         return alias_to_name.get(call.name, call.name)
 
     if len(tool_calls) == 1:
@@ -343,9 +448,13 @@ async def step_native(planner: Any, trajectory: Trajectory) -> PlannerAction:
             raw_llm_response=content or None,
         )
 
-    # D5.5: N>1 native tool calls map to the existing parallel plan (no join v1).
+    # D5.5: N>1 native tool calls map to the existing parallel plan (no join
+    # v1).
     steps = [
-        {"node": real_name(call), "args": _parse_tool_args(call.arguments_json, tool_name=call.name)}
+        {
+            "node": real_name(call),
+            "args": _parse_tool_args(call.arguments_json, tool_name=call.name),
+        }
         for call in tool_calls
     ]
     return PlannerAction(
@@ -354,6 +463,50 @@ async def step_native(planner: Any, trajectory: Trajectory) -> PlannerAction:
         thought=content,
         raw_llm_response=content or None,
     )
+
+
+async def step_native(
+    planner: ReactPlanner, trajectory: Trajectory
+) -> PlannerAction:
+    """Run one native-mode step: declare tools, map the reply to an action."""
+    had_pending_steering = bool(trajectory.steering_inputs)
+    messages = await _native_messages(planner, trajectory)
+    tools, alias_to_name = build_native_tools(planner)
+    stream = _NativeStream(planner, trajectory, planner.action_seq)
+    content, tool_calls = await _complete_native(
+        planner, messages, tools, stream
+    )
+    # Steering inputs were rendered into this step's messages; clear them so
+    # they are not repeated on every subsequent step (prompted-step parity).
+    if had_pending_steering:
+        trajectory.steering_inputs.clear()
+    streaming = stream if planner.stream_final_response else None
+
+    if not tool_calls:
+        # D5.1: content-only turn is the final answer. It already streamed
+        # token-by-token on the answer channel; emit the full text only when
+        # nothing streamed (non-streaming runs), then close the stream.
+        if content and streaming is not None:
+            streaming.finish_answer(content)
+        return PlannerAction(
+            next_node="final_response",
+            args={"answer": content, "raw_answer": content},
+            thought="",
+            raw_llm_response=content,
+        )
+
+    # Structured final answer (final_response_model). Detect the synthetic
+    # finish tool BEFORE the supersede logic below.
+    if getattr(planner, "final_response_schema", None) is not None:
+        finish = _structured_finish_action(
+            tool_calls, content, streaming, action_seq=stream.action_seq
+        )
+        if finish is not None:
+            return finish
+
+    if streaming is not None:
+        _retract_streamed_answer(streaming, content)
+    return _tool_calls_action(tool_calls, alias_to_name, content)
 
 
 __all__ = [

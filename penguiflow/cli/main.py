@@ -7,7 +7,13 @@ import sys
 import click
 
 from penguiflow import __version__
-from penguiflow.cli.tools import ToolsCLIError, parse_env_overrides, run_tools_connect, run_tools_list
+
+from .tools import (
+    ToolsCLIError,
+    parse_env_overrides,
+    run_tools_connect,
+    run_tools_list,
+)
 
 
 @click.group()

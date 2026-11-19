@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from typing_extensions import override
 
 from ..types import (
     LLMMessage,
@@ -15,14 +15,17 @@ from ..types import (
     StructuredOutputSpec,
     extract_text,
 )
+from .base import ModelT, OutputStrategy
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from ..profiles import ModelProfile
     from ..schema.plan import SchemaPlan
     from ..types import CompletionResponse
 
 
-class NativeOutputStrategy:
+class NativeOutputStrategy(OutputStrategy):
     """Provider-native structured output strategy.
 
     Uses the provider's native mechanism for schema-guided output:
@@ -35,13 +38,14 @@ class NativeOutputStrategy:
     This is the highest-fidelity mode when supported.
     """
 
+    @override
     def build_request(
         self,
         model: str,
         messages: list[LLMMessage],
         response_model: type[BaseModel],
         profile: ModelProfile,
-        plan: SchemaPlan,
+        plan: SchemaPlan | None,
         temperature: float | None = None,
     ) -> LLMRequest:
         """Build a request with native structured output.
@@ -57,6 +61,9 @@ class NativeOutputStrategy:
         Returns:
             LLMRequest configured for native structured output.
         """
+        if plan is None:
+            msg = "The native output strategy requires a schema plan"
+            raise ValueError(msg)
         # Anthropic uses tool_use for structured output, not response_format
         if profile.native_structured_kind == "anthropic_tool_use":
             return self._build_anthropic_request(
@@ -69,7 +76,8 @@ class NativeOutputStrategy:
                 model, messages, response_model, plan, temperature
             )
 
-        # Standard response_format approach (OpenAI, Databricks, Google, OpenRouter)
+        # Standard response_format approach (OpenAI, Databricks, Google,
+        # OpenRouter)
         return LLMRequest(
             model=model,
             messages=tuple(messages),
@@ -98,7 +106,9 @@ class NativeOutputStrategy:
             tools=(
                 ToolSpec(
                     name=response_model.__name__,
-                    description="Return structured data in the specified format.",
+                    description=(
+                        "Return structured data in the specified format."
+                    ),
                     json_schema=plan.transformed_schema,
                 ),
             ),
@@ -123,7 +133,9 @@ class NativeOutputStrategy:
             tools=(
                 ToolSpec(
                     name=response_model.__name__,
-                    description="Return structured data in the specified format.",
+                    description=(
+                        "Return structured data in the specified format."
+                    ),
                     json_schema=plan.transformed_schema,
                 ),
             ),
@@ -131,11 +143,12 @@ class NativeOutputStrategy:
             temperature=temperature,
         )
 
+    @override
     def parse_response(
         self,
         response: CompletionResponse,
-        response_model: type[BaseModel],
-    ) -> BaseModel:
+        response_model: type[ModelT],
+    ) -> ModelT:
         """Parse response from native structured output.
 
         Args:

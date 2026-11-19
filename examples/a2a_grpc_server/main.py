@@ -1,56 +1,83 @@
-"""A2A gRPC server example: serve a ReactPlanner agent over the A2A gRPC binding."""
+"""Serve a ReactPlanner agent over the A2A gRPC binding."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import grpc
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow import ModelRegistry, Node, build_catalog, tool
 from penguiflow.planner import ReactPlanner
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow_a2a import A2AConfig, A2AService
 from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service
 from penguiflow_a2a.grpc import a2a_pb2, a2a_pb2_grpc
-from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+from penguiflow_a2a.models import (
+    AgentCapabilities,
+    AgentCard,
+    AgentInterface,
+    AgentSkill,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from penguiflow.planner.context import ToolContext
 
 
 class EchoArgs(BaseModel):
+    """Arguments of the echo tool."""
+
     text: str
 
 
 class EchoResult(BaseModel):
+    """Output of the echo tool."""
+
     echo: str
 
 
 @tool(desc="Echo the given text back")
-async def echo(args: EchoArgs, _ctx: Any) -> EchoResult:
+async def echo(args: EchoArgs, _ctx: ToolContext) -> EchoResult:
+    """Echo the input back."""
     return EchoResult(echo=f"echo:{args.text}")
 
 
-class ScriptedLLM:
-    """Offline stand-in for an LLM client: call the echo tool once, then answer."""
+class ScriptedLLM(JSONLLMClient):
+    """Offline LLM stand-in: call the echo tool once, then answer."""
 
+    @override
     async def complete(
         self,
         *,
         messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: Any = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
-        del response_format, stream, on_stream_chunk
         if not any(message.get("role") == "assistant" for message in messages):
-            action = {"thought": "echo the request", "next_node": "echo", "args": {"text": "hello grpc"}}
+            action: dict[str, object] = {
+                "thought": "echo the request",
+                "next_node": "echo",
+                "args": {"text": "hello grpc"},
+            }
         else:
-            action = {"thought": "done", "next_node": None, "args": {"raw_answer": "echo:hello grpc"}}
+            action = {
+                "thought": "done",
+                "next_node": None,
+                "args": {"raw_answer": "echo:hello grpc"},
+            }
         return json.dumps(action), 0.0
 
 
 def build_planner() -> ReactPlanner:
+    """Build the planner that the gRPC server serves."""
     registry = ModelRegistry()
     registry.register("echo", EchoArgs, EchoResult)
     catalog = build_catalog([Node(echo, name="echo")], registry)
@@ -62,7 +89,11 @@ def _agent_card(host: str, port: int) -> AgentCard:
         protocol_versions=["0.3"],
         name="A2A gRPC Example",
         description="ReactPlanner echo agent served over gRPC.",
-        supported_interfaces=[AgentInterface(url=f"grpc://{host}:{port}", protocol_binding="GRPC")],
+        supported_interfaces=[
+            AgentInterface(
+                url=f"grpc://{host}:{port}", protocol_binding="GRPC"
+            )
+        ],
         version="1.0.0",
         capabilities=AgentCapabilities(
             streaming=True,
@@ -72,11 +103,19 @@ def _agent_card(host: str, port: int) -> AgentCard:
         ),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
-        skills=[AgentSkill(id="echo", name="Echo", description="Echo payloads", tags=["example"])],
+        skills=[
+            AgentSkill(
+                id="echo",
+                name="Echo",
+                description="Echo payloads",
+                tags=["example"],
+            )
+        ],
     )
 
 
 async def main() -> None:
+    """Run the example."""
     server = grpc.aio.server()
     port = server.add_insecure_port("127.0.0.1:0")
     service = A2AService(
@@ -106,9 +145,13 @@ async def main() -> None:
             metadata=(("a2a-version", "0.3"),),
         )
         state = a2a_pb2.TaskState.Name(response.task.status.state)
-        answer = response.task.artifacts[0].parts[0].text if response.task.artifacts else ""
-        print(f"Task {response.task.id} state: {state}")
-        print(f"Answer: {answer}")
+        answer = (
+            response.task.artifacts[0].parts[0].text
+            if response.task.artifacts
+            else ""
+        )
+        sys.stdout.write(f"Task {response.task.id} state: {state}\n")
+        sys.stdout.write(f"Answer: {answer}\n")
     finally:
         await channel.close()
         await server.stop(None)

@@ -1,3 +1,5 @@
+"""Tests for control policy."""
+
 from __future__ import annotations
 
 from penguiflow.sessions.policy import ControlPolicy
@@ -5,6 +7,7 @@ from penguiflow.steering import SteeringEvent, SteeringEventType
 
 
 def test_control_policy_requires_confirmation_for_agent_destructive() -> None:
+    """Control policy requires confirmation for agent destructive."""
     policy = ControlPolicy()
     event = SteeringEvent(
         session_id="session",
@@ -17,6 +20,7 @@ def test_control_policy_requires_confirmation_for_agent_destructive() -> None:
 
 
 def test_control_policy_allows_user_destructive() -> None:
+    """Control policy allows user destructive."""
     policy = ControlPolicy()
     event = SteeringEvent(
         session_id="session",
@@ -29,6 +33,7 @@ def test_control_policy_allows_user_destructive() -> None:
 
 
 def test_control_policy_allows_confirmed_agent_action() -> None:
+    """Control policy allows confirmed agent action."""
     policy = ControlPolicy()
     event = SteeringEvent(
         session_id="session",
@@ -41,6 +46,7 @@ def test_control_policy_allows_confirmed_agent_action() -> None:
 
 
 def test_control_policy_non_destructive() -> None:
+    """Control policy non destructive."""
     policy = ControlPolicy()
     event = SteeringEvent(
         session_id="session",

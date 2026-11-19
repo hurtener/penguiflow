@@ -1,34 +1,46 @@
-"""ReactPlanner example that streams partial responses via PlannerEvent callbacks."""
+"""Stream partial ReactPlanner answers through PlannerEvent callbacks."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerEvent, ReactPlanner
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from penguiflow.planner.context import ToolContext
 
 
 class Query(BaseModel):
+    """Query payload."""
+
     question: str
 
 
 class Answer(BaseModel):
+    """Answer payload."""
+
     answer: str
 
 
 @tool(desc="Stream answer token-by-token")
-async def stream_answer(args: Query, ctx) -> Answer:
+async def stream_answer(_args: Query, ctx: ToolContext) -> Answer:
     """Emit streaming chunks while assembling the final answer."""
-
     full_text = (
-        "PenguiFlow is a lightweight async agent orchestrator with typed nodes, "
+        "PenguiFlow is a lightweight async agent orchestrator with "
+        "typed nodes, "
         "reliable retries, and a JSON-only ReAct planner."
     )
     tokens = full_text.split()
@@ -42,27 +54,30 @@ async def stream_answer(args: Query, ctx) -> Answer:
     return Answer(answer=full_text)
 
 
-class SequenceLLM:
+class SequenceLLM(JSONLLMClient):
     """Deterministic stub that returns canned planner actions."""
 
     def __init__(self, responses: list[Mapping[str, Any]]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
 
+    @override
     async def complete(
         self,
         *,
-        messages: list[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> str:
-        del messages, response_format
         if not self._responses:
-            raise RuntimeError("SequenceLLM has no responses left")
+            msg = "SequenceLLM has no responses left"
+            raise RuntimeError(msg)
         return self._responses.pop(0)
 
 
 async def main() -> None:
+    """Run the example."""
     registry = ModelRegistry()
     registry.register("stream_answer", Query, Answer)
 
@@ -78,16 +93,20 @@ async def main() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"raw_answer": "PenguiFlow is a lightweight agent orchestrator."},
+                "args": {
+                    "raw_answer": "PenguiFlow is a lightweight "
+                    "agent orchestrator."
+                },
             },
         ]
     )
 
     def stream_logger(event: PlannerEvent) -> None:
         if event.event_type == "stream_chunk":
-            print(event.extra["text"], end="", flush=True)
+            sys.stdout.write(f"{event.extra['text']}")
+            sys.stdout.flush()
             if event.extra["done"]:
-                print()
+                sys.stdout.write("\n")
 
     planner = ReactPlanner(
         llm_client=client,
@@ -95,9 +114,11 @@ async def main() -> None:
         event_callback=stream_logger,
     )
 
-    print("Streaming answer: ", end="")
+    sys.stdout.write("Streaming answer: ")
     result = await planner.run("Describe PenguiFlow")
-    print(f"\nFinal payload: {json.dumps(result.payload, ensure_ascii=False)}")
+    sys.stdout.write(
+        f"\nFinal payload: {json.dumps(result.payload, ensure_ascii=False)}\n"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

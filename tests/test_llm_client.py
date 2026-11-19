@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,60 +20,90 @@ from penguiflow.planner.llm import (
     _supports_reasoning,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 
 class TestExtractJsonFromText:
+    """Tests for extract json from text."""
+
     def test_plain_json(self) -> None:
-        assert _extract_json_from_text('{"key": "value"}') == '{"key": "value"}'
+        """Plain JSON."""
+        assert (
+            _extract_json_from_text('{"key": "value"}') == '{"key": "value"}'
+        )
 
     def test_fenced_json(self) -> None:
+        """Fenced JSON."""
         text = '```json\n{"key": "value"}\n```'
         assert _extract_json_from_text(text) == '{"key": "value"}'
 
     def test_json_with_surrounding_text(self) -> None:
+        """JSON with surrounding text."""
         text = 'Here is the result: {"key": "value"} end'
         assert _extract_json_from_text(text) == '{"key": "value"}'
 
     def test_no_json(self) -> None:
+        """No JSON."""
         assert _extract_json_from_text("no json here") == "no json here"
 
 
 class TestCoerceLlmResponse:
+    """Tests for coerce llm response."""
+
     def test_string_response(self) -> None:
+        """String response."""
         content, cost = _coerce_llm_response('{"result": 1}')
         assert content == '{"result": 1}'
         assert cost == 0.0
 
     def test_tuple_response(self) -> None:
+        """Tuple response."""
         content, cost = _coerce_llm_response(('{"result": 1}', 0.05))
         assert content == '{"result": 1}'
         assert cost == 0.05
 
     def test_invalid_type_raises(self) -> None:
+        """Invalid type raises."""
         with pytest.raises(TypeError):
-            _coerce_llm_response(123)  # type: ignore
+            _coerce_llm_response(123)
 
 
 class TestResponseFormatPolicy:
+    """Tests for response format policy."""
+
     def test_anthropic_returns_json_object(self) -> None:
+        """Anthropic returns JSON object."""
         assert _response_format_policy("anthropic/claude-3") == "json_object"
         assert _response_format_policy("claude-sonnet") == "json_object"
 
     def test_openai_returns_json_object(self) -> None:
+        """OpenAI returns JSON object."""
         assert _response_format_policy("gpt-4o") == "json_object"
         assert _response_format_policy("openai/gpt-4") == "json_object"
 
     def test_gemini_returns_json_object(self) -> None:
-        assert _response_format_policy("gemini/gemini-1.5-pro") == "json_object"
+        """Gemini returns JSON object."""
+        assert (
+            _response_format_policy("gemini/gemini-1.5-pro") == "json_object"
+        )
 
     def test_maverick_returns_json_object(self) -> None:
+        """Maverick returns JSON object."""
         assert _response_format_policy("maverick-model") == "json_object"
 
     def test_unknown_returns_sanitized_schema(self) -> None:
-        assert _response_format_policy("some-unknown-model") == "sanitized_schema"
+        """Unknown returns sanitized schema."""
+        assert (
+            _response_format_policy("some-unknown-model") == "sanitized_schema"
+        )
 
 
 class TestSanitizeJsonSchema:
+    """Tests for sanitize json schema."""
+
     def test_removes_constraints(self) -> None:
+        """Removes constraints."""
         schema = {
             "type": "object",
             "properties": {
@@ -89,6 +118,7 @@ class TestSanitizeJsonSchema:
         assert "maximum" not in result["properties"]["age"]
 
     def test_strict_mode_adds_additional_properties_false(self) -> None:
+        """Strict mode adds additional properties false."""
         schema = {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -97,29 +127,43 @@ class TestSanitizeJsonSchema:
         assert result["additionalProperties"] is False
 
     def test_handles_nested_schemas(self) -> None:
+        """Handles nested schemas."""
         schema = {
             "type": "object",
             "properties": {
                 "nested": {
                     "type": "object",
-                    "properties": {"value": {"type": "string", "pattern": ".*"}},
+                    "properties": {
+                        "value": {"type": "string", "pattern": ".*"}
+                    },
                 }
             },
         }
         result = _sanitize_json_schema(schema, strict_mode=True)
         assert result["additionalProperties"] is False
         assert result["properties"]["nested"]["additionalProperties"] is False
-        assert "pattern" not in result["properties"]["nested"]["properties"]["value"]
+        assert (
+            "pattern"
+            not in result["properties"]["nested"]["properties"]["value"]
+        )
 
 
 class TestLiteLLMJSONClient:
+    """Tests for lite LLMJSON client."""
+
     @pytest.fixture
     def mock_litellm(self) -> MagicMock:
         """Create a mock litellm module."""
         mock = MagicMock()
         mock.acompletion = AsyncMock(
             return_value={
-                "choices": [{"message": {"content": '{"thought": "test", "next_node": null}'}}],
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"thought": "test", "next_node": null}'
+                        }
+                    }
+                ],
                 "usage": {"total_tokens": 100},
                 "_hidden_params": {"response_cost": 0.001},
             }
@@ -128,6 +172,7 @@ class TestLiteLLMJSONClient:
 
     @pytest.mark.asyncio
     async def test_complete_success(self, mock_litellm: MagicMock) -> None:
+        """Complete success."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "gpt-4o",
@@ -142,7 +187,10 @@ class TestLiteLLMJSONClient:
             mock_litellm.acompletion.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_complete_with_json_schema_mode(self, mock_litellm: MagicMock) -> None:
+    async def test_complete_with_json_schema_mode(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete with JSON schema mode."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "gpt-4o",
@@ -153,35 +201,45 @@ class TestLiteLLMJSONClient:
                 "type": "json_schema",
                 "json_schema": {
                     "name": "test_schema",
-                    "schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+                    "schema": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                    },
                 },
             }
-            content, cost = await client.complete(
+            content, _cost = await client.complete(
                 messages=[{"role": "user", "content": "test"}],
                 response_format=response_format,
             )
             assert content is not None
-            # Verify response_format was set (downgraded to json_object for gpt-4o)
+            # Verify response_format was set (downgraded to json_object for
+            # gpt-4o)
             call_kwargs = mock_litellm.acompletion.call_args[1]
             assert "response_format" in call_kwargs
 
     @pytest.mark.asyncio
-    async def test_complete_with_dict_llm_config(self, mock_litellm: MagicMock) -> None:
+    async def test_complete_with_dict_llm_config(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete with dict LLM config."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 {"model": "gpt-4o", "api_key": "test-key"},
                 temperature=0.5,
                 json_schema_mode=False,
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
             call_kwargs = mock_litellm.acompletion.call_args[1]
             assert call_kwargs["model"] == "gpt-4o"
             assert call_kwargs["api_key"] == "test-key"
 
     @pytest.mark.asyncio
-    async def test_complete_strips_unsupported_params_from_databricks_dict_config(
+    async def test_complete_strips_databricks_unsupported_params(
         self, mock_litellm: MagicMock
     ) -> None:
+        """Complete strips unsupported params from databricks dict config."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 {
@@ -194,7 +252,9 @@ class TestLiteLLMJSONClient:
                 temperature=0.0,
                 json_schema_mode=False,
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
 
         call_kwargs = mock_litellm.acompletion.call_args[1]
         assert call_kwargs["model"] == "databricks/databricks-claude-sonnet-5"
@@ -213,9 +273,14 @@ class TestLiteLLMJSONClient:
     async def test_complete_omits_temperature_for_databricks_claude_models(
         self, mock_litellm: MagicMock, model: str
     ) -> None:
+        """Complete omits temperature for Databricks claude models."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
-            client = _LiteLLMJSONClient(model, temperature=0.0, json_schema_mode=False)
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            client = _LiteLLMJSONClient(
+                model, temperature=0.0, json_schema_mode=False
+            )
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
 
         call_kwargs = mock_litellm.acompletion.call_args[1]
         assert "temperature" not in call_kwargs
@@ -229,9 +294,10 @@ class TestLiteLLMJSONClient:
             "databricks/databricks-claude-sonnet-5",
         ],
     )
-    async def test_complete_maps_reasoning_effort_to_adaptive_thinking_for_databricks_claude_models(
+    async def test_complete_databricks_claude_adaptive_thinking(
         self, mock_litellm: MagicMock, model: str
     ) -> None:
+        """Reasoning effort maps to adaptive thinking on Databricks Claude."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 model,
@@ -239,10 +305,15 @@ class TestLiteLLMJSONClient:
                 json_schema_mode=False,
                 reasoning_effort="low",
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
 
         call_kwargs = mock_litellm.acompletion.call_args[1]
-        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
+        assert call_kwargs["thinking"] == {
+            "type": "adaptive",
+            "display": "omitted",
+        }
         assert call_kwargs["output_config"] == {"effort": "low"}
         assert "reasoning_effort" not in call_kwargs
 
@@ -254,10 +325,13 @@ class TestLiteLLMJSONClient:
             "databricks/databricks-claude-sonnet-5",
         ],
     )
-    @pytest.mark.parametrize("reasoning_effort", ["none", "off", "disabled", "false", "0"])
+    @pytest.mark.parametrize(
+        "reasoning_effort", ["none", "off", "disabled", "false", "0"]
+    )
     async def test_complete_disables_thinking_for_databricks_claude_sonnet_5(
         self, mock_litellm: MagicMock, model: str, reasoning_effort: str
     ) -> None:
+        """Complete disables thinking for Databricks claude sonnet 5."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 model,
@@ -265,7 +339,9 @@ class TestLiteLLMJSONClient:
                 json_schema_mode=False,
                 reasoning_effort=reasoning_effort,
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
 
         call_kwargs = mock_litellm.acompletion.call_args[1]
         assert call_kwargs["thinking"] == {"type": "disabled"}
@@ -273,9 +349,10 @@ class TestLiteLLMJSONClient:
         assert "reasoning_effort" not in call_kwargs
 
     @pytest.mark.asyncio
-    async def test_complete_maps_reasoning_display_for_databricks_claude_sonnet_5(
+    async def test_complete_sonnet_5_maps_reasoning_display(
         self, mock_litellm: MagicMock
     ) -> None:
+        """Complete maps reasoning display for databricks claude sonnet 5."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "databricks/databricks-claude-sonnet-5",
@@ -284,17 +361,23 @@ class TestLiteLLMJSONClient:
                 reasoning_effort="high",
                 reasoning_display="summarized",
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
 
         call_kwargs = mock_litellm.acompletion.call_args[1]
-        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert call_kwargs["thinking"] == {
+            "type": "adaptive",
+            "display": "summarized",
+        }
         assert call_kwargs["output_config"] == {"effort": "high"}
         assert "reasoning_display" not in call_kwargs
 
     @pytest.mark.asyncio
-    async def test_complete_omits_reasoning_display_for_databricks_claude_sonnet_5(
+    async def test_complete_sonnet_5_omits_reasoning_display(
         self, mock_litellm: MagicMock
     ) -> None:
+        """Complete omits reasoning display for databricks claude sonnet 5."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "databricks/databricks-claude-sonnet-5",
@@ -302,21 +385,32 @@ class TestLiteLLMJSONClient:
                 json_schema_mode=False,
                 reasoning_effort="high",
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
 
         call_kwargs = mock_litellm.acompletion.call_args[1]
-        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
+        assert call_kwargs["thinking"] == {
+            "type": "adaptive",
+            "display": "omitted",
+        }
         assert call_kwargs["output_config"] == {"effort": "high"}
 
     @pytest.mark.asyncio
-    async def test_complete_retries_on_timeout(self, mock_litellm: MagicMock) -> None:
+    async def test_complete_retries_on_timeout(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete retries on timeout."""
         call_count = 0
 
-        async def timeout_then_succeed(**kwargs: Any) -> dict[str, Any]:
+        async def timeout_then_succeed(
+            **_kwargs: str | float | list[object],
+        ) -> dict[str, Any]:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                raise TimeoutError("Request timed out")
+                msg = "Request timed out"
+                raise TimeoutError(msg)
             return {
                 "choices": [{"message": {"content": '{"result": "ok"}'}}],
                 "usage": {"total_tokens": 50},
@@ -333,15 +427,20 @@ class TestLiteLLMJSONClient:
                 max_retries=3,
                 timeout_s=1.0,
             )
-            content, cost = await client.complete(
+            content, _cost = await client.complete(
                 messages=[{"role": "user", "content": "test"}],
             )
             assert content == '{"result": "ok"}'
             assert call_count == 2
 
     @pytest.mark.asyncio
-    async def test_complete_exhausts_retries_on_timeout(self, mock_litellm: MagicMock) -> None:
-        mock_litellm.acompletion = AsyncMock(side_effect=TimeoutError("timeout"))
+    async def test_complete_exhausts_retries_on_timeout(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete exhausts retries on timeout."""
+        mock_litellm.acompletion = AsyncMock(
+            side_effect=TimeoutError("timeout")
+        )
 
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -352,10 +451,15 @@ class TestLiteLLMJSONClient:
                 timeout_s=0.1,
             )
             with pytest.raises(RuntimeError, match="failed after 2 retries"):
-                await client.complete(messages=[{"role": "user", "content": "test"}])
+                await client.complete(
+                    messages=[{"role": "user", "content": "test"}]
+                )
 
     @pytest.mark.asyncio
-    async def test_complete_raises_on_empty_content(self, mock_litellm: MagicMock) -> None:
+    async def test_complete_raises_on_empty_content(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete raises on empty content."""
         mock_litellm.acompletion = AsyncMock(
             return_value={
                 "choices": [{"message": {"content": None}}],
@@ -371,27 +475,37 @@ class TestLiteLLMJSONClient:
                 json_schema_mode=False,
             )
             with pytest.raises(RuntimeError, match="empty content"):
-                await client.complete(messages=[{"role": "user", "content": "test"}])
+                await client.complete(
+                    messages=[{"role": "user", "content": "test"}]
+                )
 
     @pytest.mark.asyncio
-    async def test_complete_retries_on_rate_limit(self, mock_litellm: MagicMock) -> None:
+    async def test_complete_retries_on_rate_limit(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete retries on rate limit."""
         call_count = 0
 
         class RateLimitError(Exception):
             pass
 
-        async def rate_limit_then_succeed(**kwargs: Any) -> dict[str, Any]:
+        async def rate_limit_then_succeed(
+            **_kwargs: str | float | list[object],
+        ) -> dict[str, Any]:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                raise RateLimitError("Rate limit exceeded")
+                msg = "Rate limit exceeded"
+                raise RateLimitError(msg)
             return {
                 "choices": [{"message": {"content": '{"ok": true}'}}],
                 "usage": {"total_tokens": 10},
                 "_hidden_params": {"response_cost": 0.0001},
             }
 
-        mock_litellm.acompletion = AsyncMock(side_effect=rate_limit_then_succeed)
+        mock_litellm.acompletion = AsyncMock(
+            side_effect=rate_limit_then_succeed
+        )
 
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -409,8 +523,13 @@ class TestLiteLLMJSONClient:
             assert call_count == 2
 
     @pytest.mark.asyncio
-    async def test_complete_raises_non_retryable_error(self, mock_litellm: MagicMock) -> None:
-        mock_litellm.acompletion = AsyncMock(side_effect=ValueError("Invalid request"))
+    async def test_complete_raises_non_retryable_error(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Complete raises non retryable error."""
+        mock_litellm.acompletion = AsyncMock(
+            side_effect=ValueError("Invalid request")
+        )
 
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -419,12 +538,21 @@ class TestLiteLLMJSONClient:
                 json_schema_mode=False,
             )
             with pytest.raises(ValueError, match="Invalid request"):
-                await client.complete(messages=[{"role": "user", "content": "test"}])
+                await client.complete(
+                    messages=[{"role": "user", "content": "test"}]
+                )
 
     @pytest.mark.asyncio
-    async def test_streaming_with_usage_and_chunks(self, mock_litellm: MagicMock) -> None:
+    async def test_streaming_with_usage_and_chunks(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Streaming with usage and chunks."""
+
         async def _stream() -> AsyncIterator[dict[str, Any]]:
-            yield {"choices": [{"delta": {"content": '{"raw_answer": "Hel' }}], "usage": None}
+            yield {
+                "choices": [{"delta": {"content": '{"raw_answer": "Hel'}}],
+                "usage": None,
+            }
             yield {
                 "choices": [{"delta": {"content": 'lo"}'}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
@@ -432,27 +560,35 @@ class TestLiteLLMJSONClient:
 
         mock_litellm.acompletion = AsyncMock(return_value=_stream())
 
-        def completion_cost(completion_response: Any) -> float:
+        def completion_cost(completion_response: MockModelResponse) -> float:
             assert completion_response.model == "gpt-4o"
-            assert completion_response.usage.prompt_tokens == 10
-            assert completion_response.usage.completion_tokens == 5
+            usage = completion_response.usage
+            assert isinstance(usage, MockUsage)
+            assert usage.prompt_tokens == 10
+            assert usage.completion_tokens == 5
             return 0.123
 
-        mock_litellm.completion_cost = completion_cost  # type: ignore[attr-defined]
+        mock_litellm.completion_cost = completion_cost
 
         # Mock ModelResponse and Usage classes for cost calculation
         class MockUsage:
-            def __init__(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+            def __init__(
+                self,
+                prompt_tokens: int = 0,
+                completion_tokens: int = 0,
+                total_tokens: int = 0,
+            ) -> None:
                 self.prompt_tokens = prompt_tokens
                 self.completion_tokens = completion_tokens
                 self.total_tokens = total_tokens
 
         class MockModelResponse:
-            def __init__(self, id: str, model: str, choices: list[Any], usage: Any) -> None:
-                self.id = id
-                self.model = model
-                self.choices = choices
-                self.usage = usage
+            # litellm builds responses with an ``id`` keyword.
+            def __init__(self, **fields: object) -> None:
+                self.id = fields["id"]
+                self.model = fields["model"]
+                self.choices = fields["choices"]
+                self.usage = fields["usage"]
 
         mock_litellm.ModelResponse = MockModelResponse
         # Set up nested module for litellm.types.utils.Usage
@@ -492,7 +628,10 @@ class TestLiteLLMJSONClient:
         assert cost == pytest.approx(0.123)
 
     @pytest.mark.asyncio
-    async def test_non_streaming_emits_reasoning_content_when_available(self, mock_litellm: MagicMock) -> None:
+    async def test_non_streaming_emits_reasoning_content_when_available(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Non streaming emits reasoning content when available."""
         mock_litellm.acompletion = AsyncMock(
             return_value={
                 "choices": [
@@ -526,12 +665,22 @@ class TestLiteLLMJSONClient:
             )
 
         assert content == '{"result": "ok"}'
-        assert reasoning_chunks == [("I reasoned about it.", False), ("", True)]
+        assert reasoning_chunks == [
+            ("I reasoned about it.", False),
+            ("", True),
+        ]
 
     @pytest.mark.asyncio
-    async def test_streaming_emits_reasoning_delta_when_available(self, mock_litellm: MagicMock) -> None:
+    async def test_streaming_emits_reasoning_delta_when_available(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Streaming emits reasoning delta when available."""
+
         async def _stream() -> AsyncIterator[dict[str, Any]]:
-            yield {"choices": [{"delta": {"reasoning_content": "think-"}}], "usage": None}
+            yield {
+                "choices": [{"delta": {"reasoning_content": "think-"}}],
+                "usage": None,
+            }
             yield {
                 "choices": [{"delta": {"content": '{"answer": "hi"}'}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1},
@@ -539,10 +688,12 @@ class TestLiteLLMJSONClient:
 
         mock_litellm.acompletion = AsyncMock(return_value=_stream())
 
-        def completion_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        def completion_cost(
+            _model: str, _prompt_tokens: int, _completion_tokens: int
+        ) -> float:
             return 0.0
 
-        mock_litellm.completion_cost = completion_cost  # type: ignore[attr-defined]
+        mock_litellm.completion_cost = completion_cost
 
         answer_chunks: list[tuple[str, bool]] = []
         reasoning_chunks: list[tuple[str, bool]] = []
@@ -573,22 +724,31 @@ class TestLiteLLMJSONClient:
         assert reasoning_chunks == [("think-", False), ("", True)]
 
     @pytest.mark.asyncio
-    async def test_reasoning_effort_passed_with_drop_params(self, mock_litellm: MagicMock) -> None:
+    async def test_reasoning_effort_passed_with_drop_params(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Reasoning effort passed with drop params."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
-                "openai/o1-preview",  # Must use a reasoning model for reasoning_effort to be passed
+                # Must use a reasoning model for reasoning_effort to be passed
+                "openai/o1-preview",
                 temperature=0.0,
                 json_schema_mode=False,
                 use_native_reasoning=True,
                 reasoning_effort="medium",
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
             call_kwargs = mock_litellm.acompletion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "medium"
             assert call_kwargs["drop_params"] is True
 
     @pytest.mark.asyncio
-    async def test_reasoning_callback_errors_are_swallowed(self, mock_litellm: MagicMock) -> None:
+    async def test_reasoning_callback_errors_are_swallowed(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """Reasoning callback errors are swallowed."""
         mock_litellm.acompletion = AsyncMock(
             return_value={
                 "choices": [
@@ -605,7 +765,8 @@ class TestLiteLLMJSONClient:
         )
 
         def on_reasoning(_: str, __: bool) -> None:
-            raise RuntimeError("boom")
+            msg = "boom"
+            raise RuntimeError(msg)
 
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -623,7 +784,9 @@ class TestLiteLLMJSONClient:
         assert cost == 0.01
 
     @pytest.mark.asyncio
-    async def test_sanitized_schema_policy(self, mock_litellm: MagicMock) -> None:
+    async def test_sanitized_schema_policy(
+        self, mock_litellm: MagicMock
+    ) -> None:
         """Test that unknown models use sanitized_schema policy."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -654,7 +817,10 @@ class TestLiteLLMJSONClient:
 
 
 class TestBuildMinimalPlannerSchema:
+    """Tests for build minimal planner schema."""
+
     def test_builds_valid_schema(self) -> None:
+        """Builds valid schema."""
         schema = _build_minimal_planner_schema()
         assert schema["type"] == "object"
         assert "next_node" in schema["properties"]
@@ -664,7 +830,10 @@ class TestBuildMinimalPlannerSchema:
 
 
 class TestInlineDefs:
+    """Tests for inline defs."""
+
     def test_inlines_simple_ref(self) -> None:
+        """Inlines simple ref."""
         defs = {"MyType": {"type": "string"}}
         schema = {
             "type": "object",
@@ -676,9 +845,13 @@ class TestInlineDefs:
         assert "$defs" not in result
 
     def test_inlines_nested_refs(self) -> None:
+        """Inlines nested refs."""
         defs = {
             "Inner": {"type": "integer"},
-            "Outer": {"type": "object", "properties": {"value": {"$ref": "#/$defs/Inner"}}},
+            "Outer": {
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/Inner"}},
+            },
         }
         schema = {
             "type": "object",
@@ -686,9 +859,12 @@ class TestInlineDefs:
             "$defs": defs,
         }
         result = _inline_defs(schema, defs)
-        assert result["properties"]["nested"]["properties"]["value"] == {"type": "integer"}
+        assert result["properties"]["nested"]["properties"]["value"] == {
+            "type": "integer"
+        }
 
     def test_handles_lists(self) -> None:
+        """Handles lists."""
         defs = {"Item": {"type": "string"}}
         schema = {
             "type": "array",
@@ -700,47 +876,66 @@ class TestInlineDefs:
         assert result["items"][1] == {"type": "number"}
 
     def test_handles_missing_ref(self) -> None:
-        schema = {"type": "object", "properties": {"field": {"$ref": "#/$defs/Missing"}}}
+        """Handles missing ref."""
+        schema = {
+            "type": "object",
+            "properties": {"field": {"$ref": "#/$defs/Missing"}},
+        }
         result = _inline_defs(schema, {})
         # Should keep the ref if not found in defs
         assert result["properties"]["field"] == {"$ref": "#/$defs/Missing"}
 
 
 class TestArtifactPlaceholder:
+    """Tests for artifact placeholder."""
+
     def test_string_artifact(self) -> None:
+        """String artifact."""
         result = _artifact_placeholder("hello world")
         assert result == "<artifact:str size=11>"
 
     def test_bytes_artifact(self) -> None:
+        """Bytes artifact."""
         result = _artifact_placeholder(b"binary data")
         assert result == "<artifact:bytes size=11>"
 
     def test_list_artifact(self) -> None:
+        """List artifact."""
         result = _artifact_placeholder([1, 2, 3])
         assert result == "<artifact:list size=3>"
 
     def test_dict_artifact(self) -> None:
+        """Dict artifact."""
         result = _artifact_placeholder({"a": 1, "b": 2})
         assert result == "<artifact:dict size=2>"
 
     def test_object_without_len(self) -> None:
+        """Object without len."""
+
         class NoLen:
             pass
+
         result = _artifact_placeholder(NoLen())
         assert result == "<artifact:NoLen>"
 
 
 class TestSanitizeJsonSchemaAdvanced:
+    """Tests for sanitize json schema advanced."""
+
     def test_require_all_fields(self) -> None:
+        """Require all fields."""
         schema = {
             "type": "object",
             "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
             "required": ["a"],
         }
-        result = _sanitize_json_schema(schema, strict_mode=True, require_all_fields=True)
+        result = _sanitize_json_schema(
+            schema, strict_mode=True, require_all_fields=True
+        )
         assert set(result["required"]) == {"a", "b"}
 
     def test_inline_defs_option(self) -> None:
+        """Inline defs option."""
         schema = {
             "type": "object",
             "properties": {"field": {"$ref": "#/$defs/MyType"}},
@@ -751,15 +946,20 @@ class TestSanitizeJsonSchemaAdvanced:
         assert result["properties"]["field"] == {"type": "string"}
 
     def test_all_of_sanitization(self) -> None:
+        """All of sanitization."""
         schema = {
             "allOf": [
-                {"type": "object", "properties": {"x": {"type": "string", "minLength": 1}}},
+                {
+                    "type": "object",
+                    "properties": {"x": {"type": "string", "minLength": 1}},
+                },
             ]
         }
         result = _sanitize_json_schema(schema, strict_mode=True)
         assert "minLength" not in result["allOf"][0]["properties"]["x"]
 
     def test_one_of_sanitization(self) -> None:
+        """One of sanitization."""
         schema = {
             "oneOf": [
                 {"type": "string", "maxLength": 100},
@@ -771,6 +971,7 @@ class TestSanitizeJsonSchemaAdvanced:
         assert "maximum" not in result["oneOf"][1]
 
     def test_any_of_sanitization(self) -> None:
+        """Any of sanitization."""
         schema = {
             "anyOf": [
                 {"type": "string", "pattern": ".*"},
@@ -781,6 +982,7 @@ class TestSanitizeJsonSchemaAdvanced:
         assert "pattern" not in result["anyOf"][0]
 
     def test_defs_sanitization(self) -> None:
+        """Defs sanitization."""
         schema = {
             "type": "object",
             "$defs": {
@@ -791,6 +993,7 @@ class TestSanitizeJsonSchemaAdvanced:
         assert "minLength" not in result["$defs"]["MyDef"]
 
     def test_additional_properties_dict_sanitized(self) -> None:
+        """Additional properties dict sanitized."""
         schema = {
             "type": "object",
             "additionalProperties": {"type": "string", "maxLength": 50},
@@ -801,44 +1004,70 @@ class TestSanitizeJsonSchemaAdvanced:
 
 
 class TestResponseFormatPolicyExtended:
+    """Tests for response format policy extended."""
+
     def test_xai_returns_json_object(self) -> None:
+        """Xai returns JSON object."""
         assert _response_format_policy("xai/grok-2") == "json_object"
 
     def test_grok_returns_json_object(self) -> None:
+        """Grok returns JSON object."""
         assert _response_format_policy("grok-beta") == "json_object"
 
     def test_mistral_returns_json_object(self) -> None:
-        assert _response_format_policy("mistral/mistral-large") == "json_object"
+        """Mistral returns JSON object."""
+        assert (
+            _response_format_policy("mistral/mistral-large") == "json_object"
+        )
 
     def test_llama_returns_json_object(self) -> None:
+        """Llama returns JSON object."""
         assert _response_format_policy("meta-llama/llama-3") == "json_object"
 
     def test_qwen_returns_json_object(self) -> None:
+        """Qwen returns JSON object."""
         assert _response_format_policy("qwen/qwen-2.5") == "json_object"
 
     def test_deepseek_returns_json_object(self) -> None:
-        assert _response_format_policy("deepseek/deepseek-coder") == "json_object"
+        """Deepseek returns JSON object."""
+        assert (
+            _response_format_policy("deepseek/deepseek-coder") == "json_object"
+        )
 
     def test_cohere_returns_json_object(self) -> None:
+        """Cohere returns JSON object."""
         assert _response_format_policy("cohere/command-r") == "json_object"
 
     def test_openrouter_gpt_returns_json_object(self) -> None:
+        """OpenRouter gpt returns JSON object."""
         assert _response_format_policy("openrouter/gpt-4") == "json_object"
 
     def test_o1_model_returns_json_object(self) -> None:
-        assert _response_format_policy("openrouter/o1-preview") == "json_object"
+        """O1 model returns JSON object."""
+        assert (
+            _response_format_policy("openrouter/o1-preview") == "json_object"
+        )
 
     def test_o3_model_returns_json_object(self) -> None:
+        """O3 model returns JSON object."""
         assert _response_format_policy("openrouter/o3-mini") == "json_object"
 
     def test_nim_model_returns_json_object(self) -> None:
-        assert _response_format_policy("nim/qwen/qwen3.5-397b-a17b") == "json_object"
+        """NIM model returns JSON object."""
+        assert (
+            _response_format_policy("nim/qwen/qwen3.5-397b-a17b")
+            == "json_object"
+        )
 
     def test_nvidia_model_returns_json_object(self) -> None:
-        assert _response_format_policy("nvidia/qwen/qwen3.5-397b-a17b") == "json_object"
+        """Nvidia model returns JSON object."""
+        assert (
+            _response_format_policy("nvidia/qwen/qwen3.5-397b-a17b")
+            == "json_object"
+        )
 
 
-# ─── RFC_UNIFIED_ACTION_SCHEMA: Native reasoning support tests ────────────────
+# ─── RFC_UNIFIED_ACTION_SCHEMA: Native reasoning support tests ───────────────
 
 
 class TestSupportsReasoning:
@@ -880,6 +1109,7 @@ class TestReasoningEffortGuard:
 
     @pytest.fixture
     def mock_litellm(self) -> MagicMock:
+        """Provide a stand-in for the litellm module."""
         mock = MagicMock()
         mock.acompletion = AsyncMock(
             return_value={
@@ -894,7 +1124,7 @@ class TestReasoningEffortGuard:
     async def test_reasoning_effort_not_passed_for_non_reasoning_model(
         self, mock_litellm: MagicMock
     ) -> None:
-        """reasoning_effort should NOT be passed to models that don't support reasoning."""
+        """reasoning_effort is not sent to models without reasoning."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "databricks/gpt-oss-120b",  # Non-reasoning model
@@ -903,7 +1133,9 @@ class TestReasoningEffortGuard:
                 use_native_reasoning=True,
                 reasoning_effort="medium",
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
             call_kwargs = mock_litellm.acompletion.call_args[1]
             # reasoning_effort should NOT be in params for non-reasoning models
             assert "reasoning_effort" not in call_kwargs
@@ -912,7 +1144,7 @@ class TestReasoningEffortGuard:
     async def test_reasoning_effort_passed_for_reasoning_model(
         self, mock_litellm: MagicMock
     ) -> None:
-        """reasoning_effort SHOULD be passed to models that support reasoning."""
+        """reasoning_effort is sent to models that support reasoning."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "openai/o1-preview",  # Reasoning model
@@ -921,7 +1153,9 @@ class TestReasoningEffortGuard:
                 use_native_reasoning=True,
                 reasoning_effort="medium",
             )
-            await client.complete(messages=[{"role": "user", "content": "test"}])
+            await client.complete(
+                messages=[{"role": "user", "content": "test"}]
+            )
             call_kwargs = mock_litellm.acompletion.call_args[1]
             # reasoning_effort SHOULD be in params for reasoning models
             assert call_kwargs.get("reasoning_effort") == "medium"
@@ -959,7 +1193,7 @@ After careful consideration, here's my response:
         assert '"next_node"' in result
 
     def test_multiple_json_objects_returns_outer(self) -> None:
-        """When multiple JSON objects exist, should extract from first { to last }."""
+        """With several JSON objects, extract from the first { to last }."""
         text = '{"a": 1} some text {"b": 2}'
         result = _extract_json_from_text(text)
         # Should get the full span from first { to last }

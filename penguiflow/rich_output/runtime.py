@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from penguiflow.node import Node
-from penguiflow.registry import ModelRegistry
 
 from .prompting import generate_component_system_prompt
-from .registry import ComponentDefinition, ComponentRegistry, RegistryError, get_registry
+from .registry import (
+    ComponentDefinition,
+    ComponentRegistry,
+    RegistryError,
+    get_registry,
+)
 from .tools import (
     BuildAccordionArgs,
     BuildChartEChartsArgs,
@@ -37,6 +40,11 @@ from .tools import (
     UISelectOptionArgs,
 )
 from .validate import ValidationLimits, validate_component_payload
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from penguiflow.registry import ModelRegistry
 
 DEFAULT_ALLOWLIST = (
     "markdown",
@@ -73,6 +81,8 @@ class RichOutputExtension:
 
 @dataclass(frozen=True)
 class RichOutputConfig:
+    """Rich-output settings: allowlist, size limits and prompt options."""
+
     enabled: bool = False
     allowlist: Sequence[str] = DEFAULT_ALLOWLIST
     include_prompt_catalog: bool = True
@@ -85,25 +95,32 @@ class RichOutputConfig:
 
 @dataclass
 class RichOutputRuntime:
+    """Rich-output configuration bound to a component registry."""
+
     config: RichOutputConfig
     registry: ComponentRegistry
     extensions: tuple[RichOutputExtension, ...] = ()
 
     @property
     def allowlist(self) -> set[str]:
+        """The allowed component names."""
         return set(self.config.allowlist or [])
 
     @property
     def limits(self) -> ValidationLimits:
+        """The payload size and depth limits."""
         return ValidationLimits(
             max_payload_bytes=self.config.max_payload_bytes,
             max_total_bytes=self.config.max_total_bytes,
         )
 
     def enabled_components(self) -> dict[str, Any]:
+        """Return the allowed components' registry payloads."""
         return {
             name: payload
-            for name, payload in self.registry.raw.get("components", {}).items()
+            for name, payload in self.registry.raw.get(
+                "components", {}
+            ).items()
             if not self.allowlist or name in self.allowlist
         }
 
@@ -114,6 +131,7 @@ class RichOutputRuntime:
         *,
         tool_context: MutableMapping[str, Any] | None,
     ) -> None:
+        """Validate a component's props against the registry and limits."""
         validate_component_payload(
             component,
             props,
@@ -124,15 +142,22 @@ class RichOutputRuntime:
         )
 
     def prompt_section(self, *, include_examples: bool | None = None) -> str:
+        """Return the rich-output section of the system prompt."""
         base = ""
         if self.config.include_prompt_catalog:
-            include = self.config.include_prompt_examples if include_examples is None else bool(include_examples)
+            include = (
+                self.config.include_prompt_examples
+                if include_examples is None
+                else bool(include_examples)
+            )
             base = generate_component_system_prompt(
                 self.registry,
                 allowlist=list(self.allowlist) if self.allowlist else None,
                 include_examples=include,
             )
-        extras = [ext.prompt_extra for ext in self.extensions if ext.prompt_extra]
+        extras = [
+            ext.prompt_extra for ext in self.extensions if ext.prompt_extra
+        ]
         if not extras:
             return base
         appendix = "\n\n".join(extras)
@@ -141,12 +166,14 @@ class RichOutputRuntime:
         return f"{base}\n\n{appendix}"
 
     def describe_component(self, name: str) -> dict[str, Any]:
+        """Return a component's registry entry; raise KeyError if unknown."""
         component = self.registry.raw.get("components", {}).get(name)
         if not isinstance(component, Mapping):
             raise KeyError(name)
         return dict(component)
 
     def registry_payload(self) -> dict[str, Any]:
+        """Return the registry version, settings and allowed components."""
         return {
             "version": self.registry.version,
             "enabled": self.config.enabled,
@@ -164,7 +191,9 @@ def configure_rich_output(config: RichOutputConfig) -> RichOutputRuntime:
     registry = get_registry(config.registry_path)
     extensions = _collect_extensions(config)
     registry = _apply_extensions_to_registry(registry, extensions)
-    runtime = RichOutputRuntime(config=config, registry=registry, extensions=tuple(extensions))
+    runtime = RichOutputRuntime(
+        config=config, registry=registry, extensions=tuple(extensions)
+    )
     global _ACTIVE_RUNTIME
     _ACTIVE_RUNTIME = runtime
     return runtime
@@ -183,19 +212,27 @@ def reset_runtime() -> None:
     _ACTIVE_RUNTIME = None
 
 
-def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfig) -> list[Node]:
+def attach_rich_output_nodes(
+    registry: ModelRegistry, *, config: RichOutputConfig
+) -> list[Node]:
     """Register rich output tool models and return Node entries."""
     extensions = _collect_extensions(config)
     runtime = configure_rich_output(config)
     if not runtime.config.enabled:
         return []
 
-    registry.register("render_component", RenderComponentArgs, RenderComponentResult)
+    registry.register(
+        "render_component", RenderComponentArgs, RenderComponentResult
+    )
     registry.register("list_artifacts", ListArtifactsArgs, ListArtifactsResult)
     registry.register("ui_form", UIFormArgs, UIInteractionResult)
     registry.register("ui_confirm", UIConfirmArgs, UIInteractionResult)
-    registry.register("ui_select_option", UISelectOptionArgs, UIInteractionResult)
-    registry.register("describe_component", DescribeComponentArgs, DescribeComponentResult)
+    registry.register(
+        "ui_select_option", UISelectOptionArgs, UIInteractionResult
+    )
+    registry.register(
+        "describe_component", DescribeComponentArgs, DescribeComponentResult
+    )
 
     from .nodes import (
         build_accordion,
@@ -226,15 +263,25 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
         Node(describe_component, name="describe_component"),
     ]
     if not runtime.allowlist or "echarts" in runtime.allowlist:
-        registry.register("render_chart_echarts", RenderChartEChartsArgs, RenderComponentResult)
+        registry.register(
+            "render_chart_echarts",
+            RenderChartEChartsArgs,
+            RenderComponentResult,
+        )
         nodes.append(Node(render_chart_echarts, name="render_chart_echarts"))
-        registry.register("build_chart_echarts", BuildChartEChartsArgs, BuildComponentResult)
+        registry.register(
+            "build_chart_echarts", BuildChartEChartsArgs, BuildComponentResult
+        )
         nodes.append(Node(build_chart_echarts, name="build_chart_echarts"))
     if not runtime.allowlist or "report" in runtime.allowlist:
-        registry.register("render_report", RenderReportArgs, RenderComponentResult)
+        registry.register(
+            "render_report", RenderReportArgs, RenderComponentResult
+        )
         nodes.append(Node(render_report, name="render_report"))
     if not runtime.allowlist or "datagrid" in runtime.allowlist:
-        registry.register("render_table", RenderTableArgs, RenderComponentResult)
+        registry.register(
+            "render_table", RenderTableArgs, RenderComponentResult
+        )
         nodes.append(Node(render_table, name="render_table"))
         registry.register("build_table", BuildTableArgs, BuildComponentResult)
         nodes.append(Node(build_table, name="build_table"))
@@ -249,9 +296,13 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
         registry.register("build_tabs", BuildTabsArgs, BuildComponentResult)
         nodes.append(Node(build_tabs, name="build_tabs"))
     if not runtime.allowlist or "accordion" in runtime.allowlist:
-        registry.register("render_accordion", RenderAccordionArgs, RenderComponentResult)
+        registry.register(
+            "render_accordion", RenderAccordionArgs, RenderComponentResult
+        )
         nodes.append(Node(render_accordion, name="render_accordion"))
-        registry.register("build_accordion", BuildAccordionArgs, BuildComponentResult)
+        registry.register(
+            "build_accordion", BuildAccordionArgs, BuildComponentResult
+        )
         nodes.append(Node(build_accordion, name="build_accordion"))
     for extension in extensions:
         if extension.register_nodes:
@@ -296,7 +347,9 @@ def _apply_extensions_to_registry(
         patch_components = _extract_components_patch(patch)
         if patch_components:
             components.update(patch_components)
-        patch_version = patch.get("version") if isinstance(patch, Mapping) else None
+        patch_version = (
+            patch.get("version") if isinstance(patch, Mapping) else None
+        )
         if patch_version:
             raw["version"] = patch_version
     if components:
@@ -304,7 +357,8 @@ def _apply_extensions_to_registry(
     parsed: dict[str, ComponentDefinition] = {}
     for name, definition in components.items():
         if not isinstance(definition, Mapping):
-            raise RegistryError(f"Component '{name}' must be an object")
+            msg = f"Component '{name}' must be an object"
+            raise RegistryError(msg)
         parsed[name] = ComponentDefinition.from_payload(definition)
     version = str(raw.get("version", registry.version))
     return ComponentRegistry(version=version, components=parsed, raw=raw)
@@ -322,14 +376,14 @@ def _extract_components_patch(patch: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_ALLOWLIST",
-    "RichOutputExtension",
     "RichOutputConfig",
+    "RichOutputExtension",
     "RichOutputRuntime",
     "attach_rich_output_nodes",
+    "clear_rich_output_extensions",
     "configure_rich_output",
     "get_runtime",
-    "reset_runtime",
-    "register_rich_output_extension",
-    "clear_rich_output_extensions",
     "list_rich_output_extensions",
+    "register_rich_output_extension",
+    "reset_runtime",
 ]

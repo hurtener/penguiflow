@@ -15,19 +15,32 @@ import json
 from collections import ChainMap
 from collections.abc import Callable, Mapping, MutableMapping
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from typing_extensions import override
 
-from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore, ScopedArtifacts
-from penguiflow.catalog import NodeSpec
+from penguiflow.artifacts import (
+    ArtifactStore,
+    NoOpArtifactStore,
+    ScopedArtifacts,
+)
 from penguiflow.planner.context import PlannerPauseReason, ToolContext
 
 from .models import ContextPatch, TaskContextSnapshot, TaskType, UpdateType
+from .persistence import StateStoreSessionAdapter
 from .session import TaskPipeline, TaskResult, TaskRuntime
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+    from penguiflow.catalog import NodeSpec
+
+    from .session_kv import SessionKVFacade
 
 
 class ToolJobContext(ToolContext):
+    """ToolContext for a tool call that runs as a background job."""
+
     def __init__(
         self,
         *,
@@ -35,31 +48,44 @@ class ToolJobContext(ToolContext):
         tool_context: dict[str, Any],
         artifacts: ArtifactStore | None,
         state_store: object | None = None,
-        checkpoint_publisher: Callable[[Mapping[str, Any]], None] | None = None,
+        checkpoint_publisher: Callable[[Mapping[str, Any]], None]
+        | None = None,
     ) -> None:
+        """Bind the job's context, artifact store and state store."""
         self._llm_context = dict(llm_context)
         self._tool_context = dict(tool_context)
         self._artifacts_store = artifacts or NoOpArtifactStore()
         self._state_store = state_store
         self._checkpoint_publisher = checkpoint_publisher
-        self._kv = None
+        self._kv: SessionKVFacade | None = None
         self._scoped_artifacts = ScopedArtifacts(
             self._artifacts_store,
-            tenant_id=str(tool_context["tenant_id"]) if tool_context.get("tenant_id") is not None else None,
-            user_id=str(tool_context["user_id"]) if tool_context.get("user_id") is not None else None,
-            session_id=str(tool_context["session_id"]) if tool_context.get("session_id") is not None else None,
-            trace_id=str(tool_context["trace_id"]) if tool_context.get("trace_id") is not None else None,
+            tenant_id=str(tool_context["tenant_id"])
+            if tool_context.get("tenant_id") is not None
+            else None,
+            user_id=str(tool_context["user_id"])
+            if tool_context.get("user_id") is not None
+            else None,
+            session_id=str(tool_context["session_id"])
+            if tool_context.get("session_id") is not None
+            else None,
+            trace_id=str(tool_context["trace_id"])
+            if tool_context.get("trace_id") is not None
+            else None,
         )
 
     @property
+    @override
     def llm_context(self) -> Mapping[str, Any]:
         return MappingProxyType(self._llm_context)
 
     @property
+    @override
     def tool_context(self) -> dict[str, Any]:
         return self._tool_context
 
     @property
+    @override
     def meta(self) -> MutableMapping[str, Any]:
         # Deprecated; keep minimal but mutable for ToolContext compatibility.
         return ChainMap(self._tool_context, self._llm_context)
@@ -74,7 +100,8 @@ class ToolJobContext(ToolContext):
         return self._scoped_artifacts
 
     @property
-    def kv(self):
+    def kv(self) -> SessionKVFacade:
+        """Session-scoped key/value storage, created on first use."""
         from .session_kv import SessionKVFacade
 
         if self._kv is None:
@@ -86,14 +113,16 @@ class ToolJobContext(ToolContext):
             )
         return self._kv
 
+    @override
     async def pause(
         self,
         reason: PlannerPauseReason,
         payload: Mapping[str, Any] | None = None,
-    ) -> Any:
-        _ = reason, payload
-        raise RuntimeError("pause_not_supported_in_tool_job")
+    ) -> object:
+        msg = "pause_not_supported_in_tool_job"
+        raise RuntimeError(msg)
 
+    @override
     async def emit_chunk(
         self,
         stream_id: str,
@@ -103,23 +132,22 @@ class ToolJobContext(ToolContext):
         done: bool = False,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
-        _ = stream_id, seq, text, done, meta
-        return None
+        return
 
+    @override
     async def emit_artifact(
         self,
         stream_id: str,
-        chunk: Any,
+        chunk: object,
         *,
         done: bool = False,
         artifact_type: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
-        _ = stream_id, chunk, done, artifact_type, meta
-        return None
+        return
 
 
-def _extract_digest(payload: Any) -> list[str]:
+def _extract_digest(payload: object) -> list[str]:
     if payload is None:
         return []
     if isinstance(payload, str):
@@ -131,7 +159,7 @@ def _extract_digest(payload: Any) -> list[str]:
     return [str(payload)[:5000]]
 
 
-def _infer_artifact_type(payload: Any) -> str | None:
+def _infer_artifact_type(payload: object) -> str | None:
     if isinstance(payload, Mapping):
         component = payload.get("component")
         if isinstance(component, str) and component:
@@ -142,7 +170,7 @@ def _infer_artifact_type(payload: Any) -> str | None:
     return None
 
 
-def _extract_compact_metadata(payload: Any) -> dict[str, Any]:
+def _extract_compact_metadata(payload: object) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         return {}
     allowed_keys = {
@@ -162,6 +190,43 @@ def _extract_compact_metadata(payload: Any) -> dict[str, Any]:
     return compact
 
 
+async def _store_artifact_item(
+    item: object,
+    *,
+    node_name: str,
+    field_name: str,
+    item_index: int | None,
+    artifacts: ScopedArtifacts,
+) -> dict[str, Any]:
+    """Upload one artifact value; return its observation entry."""
+    ref = await artifacts.upload(
+        json.dumps(item, ensure_ascii=False),
+        mime_type="application/json",
+        filename=f"{node_name}.{field_name}.json",
+        namespace=f"tool_artifact.{node_name}.{field_name}",
+        meta={
+            "node": node_name,
+            "field": field_name,
+            "item_index": item_index,
+        },
+    )
+    stub: dict[str, Any] = {
+        "artifact": ref.model_dump(mode="json"),
+        **_extract_compact_metadata(item),
+    }
+    artifact_type = _infer_artifact_type(item)
+    if artifact_type:
+        stub["type"] = artifact_type
+    entry: dict[str, Any] = {
+        "node": node_name,
+        "field": field_name,
+        "artifact": stub,
+    }
+    if item_index is not None:
+        entry["item_index"] = item_index
+    return entry
+
+
 async def _extract_artifacts_from_observation(
     *,
     node_name: str,
@@ -174,55 +239,24 @@ async def _extract_artifacts_from_observation(
         extra = field_info.json_schema_extra
         if not isinstance(extra, Mapping) or not extra.get("artifact"):
             continue
-        if field_name not in observation:
-            continue
         value = observation.get(field_name)
         if value is None:
             continue
-
-        async def _store(
-            item: Any,
-            *,
-            item_index: int | None,
-            _field_name: str = field_name,
-            _node_name: str = node_name,
-        ) -> None:
-            serialized = json.dumps(item, ensure_ascii=False)
-            ref = await artifacts.upload(
-                serialized,
-                mime_type="application/json",
-                filename=f"{_node_name}.{_field_name}.json",
-                namespace=f"tool_artifact.{_node_name}.{_field_name}",
-                meta={
-                    "node": _node_name,
-                    "field": _field_name,
-                    "item_index": item_index,
-                },
+        items: list[tuple[int | None, object]] = (
+            [(idx, item) for idx, item in enumerate(value) if item is not None]
+            if isinstance(value, list)
+            else [(None, value)]
+        )
+        for item_index, item in items:
+            collected.append(
+                await _store_artifact_item(
+                    item,
+                    node_name=node_name,
+                    field_name=field_name,
+                    item_index=item_index,
+                    artifacts=artifacts,
+                )
             )
-            artifact_type = _infer_artifact_type(item)
-            compact_meta = _extract_compact_metadata(item)
-            stub: dict[str, Any] = {
-                "artifact": ref.model_dump(mode="json"),
-                **compact_meta,
-            }
-            if artifact_type:
-                stub["type"] = artifact_type
-            entry: dict[str, Any] = {
-                "node": _node_name,
-                "field": _field_name,
-                "artifact": stub,
-            }
-            if item_index is not None:
-                entry["item_index"] = item_index
-            collected.append(entry)
-
-        if isinstance(value, list):
-            for idx, item in enumerate(value):
-                if item is None:
-                    continue
-                await _store(item, item_index=idx)
-        else:
-            await _store(value, item_index=None)
     return collected
 
 
@@ -239,23 +273,32 @@ def build_tool_job_pipeline(
             UpdateType.TOOL_CALL,
             {
                 "tool_name": spec.name,
-                "args": json.loads(json.dumps(args_payload, ensure_ascii=False)),
+                "args": json.loads(
+                    json.dumps(args_payload, ensure_ascii=False)
+                ),
                 "mode": "background_job",
             },
         )
         snapshot: TaskContextSnapshot = runtime.context_snapshot
-        # SessionStateStore may be an adapter over a core StateStore; Session KV needs
-        # access to the core store for save_memory_state/load_memory_state.
-        kv_store = getattr(runtime.session._state_store, "_store", runtime.session._state_store)
+        # SessionStateStore may be an adapter over a core StateStore; Session
+        # KV needs access to the core store for
+        # save_memory_state/load_memory_state.
+        session_store = runtime.session.state_store
+        kv_store = (
+            session_store.store
+            if isinstance(session_store, StateStoreSessionAdapter)
+            else session_store
+        )
         tool_call_id = f"job:{runtime.state.task_id}"
         trace_id = (
             runtime.state.trace_id
             or runtime.context_snapshot.trace_id
             or tool_call_id
         )
+
         def _publish_checkpoint(payload: Mapping[str, Any]) -> None:
             runtime.emit_update(UpdateType.CHECKPOINT, dict(payload))
-            return None
+            return
 
         ctx = ToolJobContext(
             llm_context=snapshot.llm_context or {},
@@ -293,7 +336,9 @@ def build_tool_job_pipeline(
         )
         return TaskResult(
             payload=payload,
-            context_patch=patch if runtime.state.task_type == TaskType.BACKGROUND else None,
+            context_patch=patch
+            if runtime.state.task_type == TaskType.BACKGROUND
+            else None,
             digest=patch.digest,
             artifacts=extracted_artifacts,
             sources=[],

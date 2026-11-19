@@ -1,22 +1,36 @@
+"""The ``skill_propose`` planner tool."""
+
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ...catalog import ToolLoadingMode, tool
 from ...planner.llm import _coerce_llm_response, _sanitize_json_schema
 from ...planner.models import PlannerEvent
-from ..models import SkillProposalDraft, SkillProposeRequest, SkillProposeResponse
+from ..models import (
+    SkillProposalDraft,
+    SkillProposeRequest,
+    SkillProposeResponse,
+)
+from ._env import context_planner
+
+if TYPE_CHECKING:
+    from ...planner.context import ToolContext
 
 
 class SkillProposeArgs(SkillProposeRequest):
+    """Arguments for ``skill_propose``."""
+
     pass
 
 
 _SKILL_PROPOSAL_SCHEMA_NAME = "skill_proposal"
 
 
-def _build_skill_proposal_messages(args: SkillProposeArgs) -> list[dict[str, str]]:
+def _build_skill_proposal_messages(
+    args: SkillProposeArgs,
+) -> list[dict[str, str]]:
     hint_lines: list[str] = []
     if args.title_hint:
         hint_lines.append(f"title_hint: {args.title_hint}")
@@ -25,22 +39,34 @@ def _build_skill_proposal_messages(args: SkillProposeArgs) -> list[dict[str, str
     if args.task_type:
         hint_lines.append(f"task_type: {args.task_type}")
     if args.required_tool_names:
-        hint_lines.append(f"required_tool_names: {json.dumps(args.required_tool_names, ensure_ascii=False)}")
+        hint_lines.append(
+            "required_tool_names: "
+            f"{json.dumps(args.required_tool_names, ensure_ascii=False)}"
+        )
     if args.required_namespaces:
-        hint_lines.append(f"required_namespaces: {json.dumps(args.required_namespaces, ensure_ascii=False)}")
+        hint_lines.append(
+            "required_namespaces: "
+            f"{json.dumps(args.required_namespaces, ensure_ascii=False)}"
+        )
     if args.required_tags:
-        hint_lines.append(f"required_tags: {json.dumps(args.required_tags, ensure_ascii=False)}")
+        hint_lines.append(
+            "required_tags: "
+            f"{json.dumps(args.required_tags, ensure_ascii=False)}"
+        )
     hints = "\n".join(hint_lines) if hint_lines else "(none)"
 
     return [
         {
             "role": "system",
             "content": (
-                "Draft a reusable skill playbook from the provided source material. "
-                "Return JSON only. The draft must be implementation-ready, concise, and safe. "
+                "Draft a reusable skill playbook from the provided "
+                "source material. "
+                "Return JSON only. The draft must be implementation-ready, "
+                "concise, and safe. "
                 "Do not claim to save or persist anything. "
                 "Prefer neutral names and clear operational steps. "
-                "Only include required_tool_names, required_namespaces, and required_tags "
+                "Only include required_tool_names, required_namespaces, and "
+                "required_tags "
                 "when they are well-supported by the source or hints."
             ),
         },
@@ -55,31 +81,40 @@ def _build_skill_proposal_messages(args: SkillProposeArgs) -> list[dict[str, str
     ]
 
 
-@tool(desc="Draft a structured skill playbook from freeform source material.", loading_mode=ToolLoadingMode.ALWAYS)
-async def skill_propose(args: SkillProposeArgs, ctx: Any) -> SkillProposeResponse:
-    planner = getattr(ctx, "_planner", None)
-    if planner is None or getattr(planner, "_client", None) is None:
-        raise RuntimeError("skill_propose is not configured")
+@tool(
+    desc="Draft a structured skill playbook from freeform source material.",
+    loading_mode=ToolLoadingMode.ALWAYS,
+)
+async def skill_propose(
+    args: SkillProposeArgs, ctx: ToolContext
+) -> SkillProposeResponse:
+    """Draft a new skill from the conversation with the planner's LLM."""
+    planner = context_planner(ctx)
+    if planner is None or getattr(planner, "client", None) is None:
+        msg = "skill_propose is not configured"
+        raise RuntimeError(msg)
 
     response_format = {
         "type": "json_schema",
         "json_schema": {
             "name": _SKILL_PROPOSAL_SCHEMA_NAME,
-            "schema": _sanitize_json_schema(SkillProposalDraft.model_json_schema()),
+            "schema": _sanitize_json_schema(
+                SkillProposalDraft.model_json_schema()
+            ),
         },
     }
-    llm_result = await planner._client.complete(
+    llm_result = await planner.client.complete(
         messages=_build_skill_proposal_messages(args),
         response_format=response_format,
     )
     raw, cost = _coerce_llm_response(llm_result)
-    planner._cost_tracker.record_main_call(cost)
+    planner.cost_tracker.record_main_call(cost)
     draft = SkillProposalDraft.model_validate_json(raw)
 
-    planner._emit_event(
+    planner.emit_event(
         PlannerEvent(
             event_type="skill_propose",
-            ts=planner._time_source(),
+            ts=planner.time_source(),
             trajectory_step=0,
             extra={
                 "task_type": args.task_type,

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass(slots=True)
@@ -41,18 +43,20 @@ class NodePolicy:
     max_backoff: float | None = None
 
     def __post_init__(self) -> None:
+        """Validate the ``validate`` mode."""
         if self.validate not in {"both", "in", "out", "none"}:
-            raise ValueError("validate must be one of 'both', 'in', 'out', 'none'")
+            msg = "validate must be one of 'both', 'in', 'out', 'none'"
+            raise ValueError(msg)
 
 
 @dataclass(slots=True)
 class Node:
     """Wraps an async callable so it can be exposed to the planner as a tool.
 
-    A ``Node`` pairs a coroutine function of the form
-    ``async def handler(args, ctx) -> result`` with a name (used for registry
-    lookups and the tool catalog) and a :class:`NodePolicy`. Nodes are hashable
-    by their generated ``node_id``.
+    A ``Node`` pairs a coroutine function of the form ``async def handler(args,
+    ctx) -> result`` with a name (used for registry lookups and the tool
+    catalog) and a :class:`NodePolicy`. Nodes are hashable by their generated
+    ``node_id``.
 
     Attributes:
         func: The async callable implementing the tool. Must be declared with
@@ -78,8 +82,10 @@ class Node:
     node_id: str = field(init=False)
 
     def __post_init__(self) -> None:
+        """Check the node function's signature and assign its name and id."""
         if not asyncio.iscoroutinefunction(self.func):
-            raise TypeError("Node function must be declared with async def")
+            msg = "Node function must be declared with async def"
+            raise TypeError(msg)
 
         self.name = self.name or self.func.__name__
         assert self.name is not None  # narrow for type-checkers
@@ -88,19 +94,26 @@ class Node:
         signature = inspect.signature(self.func)
         params = list(signature.parameters.values())
         if len(params) != 2:
-            raise ValueError(f"Node '{self.name}' must accept exactly two parameters (args, ctx); got {len(params)}")
+            msg = (
+                f"Node '{self.name}' must accept exactly two parameters "
+                f"(args, ctx); got {len(params)}"
+            )
+            raise ValueError(msg)
 
         ctx_param = params[1]
         if ctx_param.kind not in (
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
         ):
-            raise ValueError("Context parameter must be positional")
+            msg = "Context parameter must be positional"
+            raise ValueError(msg)
 
     def __hash__(self) -> int:
+        """Hash by the node's unique id."""
         return hash(self.node_id)
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
+        """Return a short debug representation."""
         return f"Node(name={self.name!r}, node_id={self.node_id})"
 
 

@@ -31,6 +31,27 @@ class ParsedModel:
     sub_provider: str | None = None  # For OpenRouter: the underlying provider
 
 
+# ``<prefix>/<model>`` prefixes that name a provider directly.
+_PREFIXED_PROVIDERS: dict[str, ProviderType] = {
+    "openai": "openai",
+    "nim": "nim",
+    "anthropic": "anthropic",
+    "google": "google",
+    "bedrock": "bedrock",
+    "databricks": "databricks",
+}
+
+# Bare model-name prefixes, checked in order. Bedrock inference profiles
+# (anthropic.*, amazon.*, meta.*) come first.
+_BARE_MODEL_PREFIXES: tuple[tuple[tuple[str, ...], ProviderType], ...] = (
+    (("anthropic.", "amazon.", "meta."), "bedrock"),
+    (("gpt", "o1", "o3"), "openai"),
+    (("claude",), "anthropic"),
+    (("gemini",), "google"),
+    (("databricks-",), "databricks"),
+)
+
+
 def parse_model_string(model: str) -> ParsedModel:
     """Parse a model string into provider and model components.
 
@@ -43,11 +64,15 @@ def parse_model_string(model: str) -> ParsedModel:
     - "anthropic/claude-3-5-sonnet" -> (anthropic, claude-3-5-sonnet)
     - "gemini-2.0-flash" -> (google, gemini-2.0-flash)
     - "google/gemini-2.0-flash" -> (google, gemini-2.0-flash)
-    - "anthropic.claude-3-5-sonnet-v2" -> (bedrock, anthropic.claude-3-5-sonnet-v2)
-    - "bedrock/anthropic.claude-3-5-sonnet" -> (bedrock, anthropic.claude-3-5-sonnet)
+    - "anthropic.claude-3-5-sonnet-v2" -> (bedrock,
+      anthropic.claude-3-5-sonnet-v2)
+    - "bedrock/anthropic.claude-3-5-sonnet" -> (bedrock,
+      anthropic.claude-3-5-sonnet)
     - "databricks-dbrx-instruct" -> (databricks, databricks-dbrx-instruct)
-    - "databricks/databricks-dbrx-instruct" -> (databricks, databricks-dbrx-instruct)
-    - "openrouter/anthropic/claude-3-5-sonnet" -> (openrouter, anthropic/claude-3-5-sonnet, anthropic)
+    - "databricks/databricks-dbrx-instruct" -> (databricks,
+      databricks-dbrx-instruct)
+    - "openrouter/anthropic/claude-3-5-sonnet" -> (openrouter,
+      anthropic/claude-3-5-sonnet, anthropic)
 
     Args:
         model: Model identifier string.
@@ -55,72 +80,45 @@ def parse_model_string(model: str) -> ParsedModel:
     Returns:
         ParsedModel with provider and model_id.
     """
-    original = model
-
     # OpenRouter (check first as it contains other provider names)
     if model.startswith("openrouter/"):
         rest = model.removeprefix("openrouter/")
-        # Try to extract sub-provider
-        if "/" in rest:
-            sub_provider = rest.split("/", 1)[0]
-            return ParsedModel(
-                provider="openrouter",
-                model_id=rest,
-                original=original,
-                sub_provider=sub_provider,
-            )
         return ParsedModel(
             provider="openrouter",
             model_id=rest,
-            original=original,
+            original=model,
+            sub_provider=rest.split("/", 1)[0] if "/" in rest else None,
         )
 
     # Explicit provider prefix
     if "/" in model:
-        provider_prefix, model_id = model.split("/", 1)
-        provider_prefix = provider_prefix.lower()
+        parsed = _parse_prefixed_model(model)
+        if parsed is not None:
+            return parsed
 
-        if provider_prefix == "openai":
-            return ParsedModel(provider="openai", model_id=model_id, original=original)
-        elif provider_prefix == "nim":
-            return ParsedModel(provider="nim", model_id=model_id, original=original)
-        elif provider_prefix == "nvidia":
-            # Legacy alias style: nvidia/<vendor>/<model> -> <vendor>/<model>.
-            # Direct NVIDIA model IDs: nvidia/<model> should keep the prefix.
-            if "/" in model_id:
-                return ParsedModel(provider="nim", model_id=model_id, original=original)
-            return ParsedModel(provider="nim", model_id=f"nvidia/{model_id}", original=original)
-        elif provider_prefix == "anthropic":
-            return ParsedModel(provider="anthropic", model_id=model_id, original=original)
-        elif provider_prefix == "google":
-            return ParsedModel(provider="google", model_id=model_id, original=original)
-        elif provider_prefix == "bedrock":
-            return ParsedModel(provider="bedrock", model_id=model_id, original=original)
-        elif provider_prefix == "databricks":
-            return ParsedModel(provider="databricks", model_id=model_id, original=original)
-
-    # Bedrock inference profile format (anthropic.*, amazon.*, meta.*)
-    if model.startswith(("anthropic.", "amazon.", "meta.")):
-        return ParsedModel(provider="bedrock", model_id=model, original=original)
-
-    # OpenAI models
-    if model.startswith(("gpt", "o1", "o3")):
-        return ParsedModel(provider="openai", model_id=model, original=original)
-
-    # Anthropic models
-    if model.startswith("claude"):
-        return ParsedModel(provider="anthropic", model_id=model, original=original)
-
-    # Google models
-    if model.startswith("gemini"):
-        return ParsedModel(provider="google", model_id=model, original=original)
-
-    # Databricks models
-    if model.startswith("databricks-"):
-        return ParsedModel(provider="databricks", model_id=model, original=original)
+    for prefixes, provider in _BARE_MODEL_PREFIXES:
+        if model.startswith(prefixes):
+            return ParsedModel(
+                provider=provider, model_id=model, original=model
+            )
 
     # Unknown provider - could be OpenAI-compatible
-    return ParsedModel(provider="unknown", model_id=model, original=original)
+    return ParsedModel(provider="unknown", model_id=model, original=model)
+
+
+def _parse_prefixed_model(model: str) -> ParsedModel | None:
+    """Parse ``<provider>/<model>``; ``None`` for an unknown prefix."""
+    provider_prefix, model_id = model.split("/", 1)
+    provider_prefix = provider_prefix.lower()
+    if provider_prefix == "nvidia":
+        # Legacy alias style: nvidia/<vendor>/<model> -> <vendor>/<model>.
+        # Direct NVIDIA model IDs: nvidia/<model> should keep the prefix.
+        nim_id = model_id if "/" in model_id else f"nvidia/{model_id}"
+        return ParsedModel(provider="nim", model_id=nim_id, original=model)
+    provider = _PREFIXED_PROVIDERS.get(provider_prefix)
+    if provider is None:
+        return None
+    return ParsedModel(provider=provider, model_id=model_id, original=model)
 
 
 def normalize_model_id(model: str) -> str:
@@ -269,11 +267,11 @@ def build_model_string(
 __all__ = [
     "ParsedModel",
     "ProviderType",
-    "parse_model_string",
-    "normalize_model_id",
+    "build_model_string",
+    "estimate_context_window",
     "get_provider_for_model",
     "is_reasoning_model",
     "is_vision_model",
-    "estimate_context_window",
-    "build_model_string",
+    "normalize_model_id",
+    "parse_model_string",
 ]

@@ -11,6 +11,8 @@ import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from ..errors import (
     LLMAuthError,
     LLMCancelledError,
@@ -38,7 +40,246 @@ from ._params import resolve_temperature
 from .base import Provider
 
 if TYPE_CHECKING:
-    from ..types import CancelToken, StreamCallback
+    from anthropic import AsyncAnthropic
+    from anthropic.types import Message
+
+    from ..types import (
+        CancelToken,
+        ContentPart,
+        StreamCallback,
+        StructuredOutputSpec,
+    )
+
+
+_THINKING_BLOCKS = ("thinking", "redacted_thinking")
+
+
+def _thinking_text(source: object) -> str:
+    """Return the ``thinking`` (or ``text``) text of a block or delta."""
+    value = getattr(source, "thinking", None) or getattr(source, "text", None)
+    return str(value) if value else ""
+
+
+class _AnthropicStreamState:
+    """Accumulates Anthropic stream events into a completion response."""
+
+    def __init__(self, on_stream_event: StreamCallback) -> None:
+        self._emit = on_stream_event
+        self._text: list[str] = []
+        self._reasoning: list[str] = []
+        self._tool_calls: list[dict[str, str]] = []
+        self._current_tool: dict[str, str] | None = None
+        self._block_type: str | None = None
+        self._usage: Usage | None = None
+        self._finish_reason: str | None = None
+
+    def handle(self, event: object) -> None:
+        """Dispatch one stream event by its ``type``."""
+        event_type = getattr(event, "type", None)
+        if event_type == "content_block_start":
+            self._start_block(getattr(event, "content_block", None))
+        elif event_type == "content_block_delta":
+            self._add_delta(getattr(event, "delta", None))
+        elif event_type == "content_block_stop":
+            if self._current_tool:
+                self._tool_calls.append(self._current_tool)
+                self._current_tool = None
+            self._block_type = None
+        elif event_type == "message_delta":
+            self._finish_reason = getattr(
+                getattr(event, "delta", None), "stop_reason", None
+            )
+        elif event_type == "message_start":
+            usage = getattr(getattr(event, "message", None), "usage", None)
+            if usage:
+                self._usage = Usage(
+                    input_tokens=usage.input_tokens,
+                    output_tokens=0,
+                    total_tokens=usage.input_tokens,
+                )
+
+    def _add_reasoning(self, text: str) -> None:
+        self._reasoning.append(text)
+        self._emit(StreamEvent(delta_reasoning=text))
+
+    def _start_block(self, block: object) -> None:
+        block_type = getattr(block, "type", None)
+        self._block_type = block_type
+        if block_type in _THINKING_BLOCKS:
+            initial = _thinking_text(block)
+            if initial:
+                self._add_reasoning(initial)
+        if block_type == "tool_use":
+            self._current_tool = {
+                "id": getattr(block, "id", ""),
+                "name": getattr(block, "name", ""),
+                "input": "",
+            }
+
+    def _add_delta(self, delta: object) -> None:
+        if self._block_type in _THINKING_BLOCKS:
+            thinking = _thinking_text(delta)
+            if thinking:
+                self._add_reasoning(thinking)
+        elif hasattr(delta, "text"):
+            self._text.append(delta.text)
+            self._emit(StreamEvent(delta_text=delta.text))
+        elif hasattr(delta, "partial_json") and self._current_tool:
+            self._current_tool["input"] += delta.partial_json
+
+    def set_final_usage(self, final_message: object) -> None:
+        """Take the final token usage from the completed message."""
+        usage = getattr(final_message, "usage", None)
+        if usage is None:
+            return
+        self._usage = Usage(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.input_tokens + usage.output_tokens,
+        )
+
+    def response(self) -> CompletionResponse:
+        """Emit the ``done`` event and build the completion response."""
+        parts: list[ContentPart] = []
+        full_text = "".join(self._text)
+        if full_text:
+            parts.append(TextPart(text=full_text))
+        parts.extend(
+            ToolCallPart(
+                name=call["name"],
+                arguments_json=call["input"],
+                call_id=call["id"],
+            )
+            for call in self._tool_calls
+        )
+        self._emit(
+            StreamEvent(
+                done=True, usage=self._usage, finish_reason=self._finish_reason
+            )
+        )
+        return CompletionResponse(
+            message=LLMMessage(role="assistant", parts=parts),
+            usage=self._usage or Usage.zero(),
+            raw_response=None,
+            reasoning_content="".join(self._reasoning) or None,
+            finish_reason=self._finish_reason,
+        )
+
+
+def _to_anthropic_messages(
+    messages: tuple[Any, ...] | list[Any],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Convert typed messages to Anthropic format.
+
+    Returns:
+        Tuple of (system_text, messages_list).
+    """
+    system_text: str | None = None
+    result: list[dict[str, Any]] = []
+
+    for msg in messages:
+        if msg.role == "system":
+            # Anthropic uses a separate system parameter
+            system_text = msg.text
+            continue
+
+        content: list[dict[str, Any]] = []
+
+        for part in msg.parts:
+            if isinstance(part, TextPart):
+                content.append({"type": "text", "text": part.text})
+            elif isinstance(part, ImagePart):
+                import base64
+
+                b64 = base64.b64encode(part.data).decode("utf-8")
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": part.media_type,
+                            "data": b64,
+                        },
+                    }
+                )
+            elif isinstance(part, ToolCallPart):
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": part.call_id or f"call_{uuid.uuid4().hex[:16]}",
+                        "name": part.name,
+                        "input": json.loads(part.arguments_json)
+                        if part.arguments_json
+                        else {},
+                    }
+                )
+            elif isinstance(part, ToolResultPart):
+                # Tool results are separate messages in Anthropic
+                result.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": part.call_id or "",
+                                "content": part.result_json,
+                                "is_error": part.is_error,
+                            }
+                        ],
+                    }
+                )
+                continue
+
+        if content:
+            result.append(
+                {
+                    "role": msg.role if msg.role != "tool" else "user",
+                    "content": content,
+                }
+            )
+
+    return system_text, result
+
+
+def _from_anthropic_response(response: Message) -> CompletionResponse:
+    """Convert Anthropic response to CompletionResponse."""
+    parts: list[Any] = []
+    reasoning_acc: list[str] = []
+
+    for block in response.content:
+        if block.type == "text":
+            parts.append(TextPart(text=block.text))
+        elif block.type in ("thinking", "redacted_thinking"):
+            thinking_text = (
+                getattr(block, "thinking", None)
+                or getattr(block, "text", None)
+                or ""
+            )
+            if thinking_text:
+                reasoning_acc.append(str(thinking_text))
+        elif block.type == "tool_use":
+            parts.append(
+                ToolCallPart(
+                    name=block.name,
+                    arguments_json=json.dumps(block.input),
+                    call_id=block.id,
+                )
+            )
+
+    usage = Usage(
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+        total_tokens=response.usage.input_tokens
+        + response.usage.output_tokens,
+    )
+
+    return CompletionResponse(
+        message=LLMMessage(role="assistant", parts=parts),
+        usage=usage,
+        raw_response=response,
+        reasoning_content="".join(reasoning_acc) or None,
+        finish_reason=response.stop_reason,
+    )
 
 
 class AnthropicProvider(Provider):
@@ -63,21 +304,29 @@ class AnthropicProvider(Provider):
         api_key: str | None = None,
         profile: ModelProfile | None = None,
         timeout: float = 360.0,
+        client: AsyncAnthropic | None = None,
         max_tokens: int = 8192,
-    ):
+    ) -> None:
         """Initialize the Anthropic provider.
 
         Args:
-            model: Model identifier (e.g., "claude-sonnet-4-5-20250929", "claude-opus-4-5").
-            api_key: Anthropic API key (uses ANTHROPIC_API_KEY env var if not provided).
+            model: Model identifier (e.g., "claude-sonnet-4-5-20250929",
+                "claude-opus-4-5").
+            api_key: Anthropic API key (uses ANTHROPIC_API_KEY env var if not
+                provided).
             profile: Model profile override.
             timeout: Default timeout in seconds.
+            client: Pre-built SDK client to use instead of creating one.
             max_tokens: Default max tokens for responses.
         """
         try:
             from anthropic import AsyncAnthropic
         except ImportError as e:
-            raise ImportError("Anthropic SDK not installed. Install with: pip install anthropic>=0.75.0") from e
+            msg = (
+                "Anthropic SDK not installed. Install with: pip install "
+                "anthropic>=0.75.0"
+            )
+            raise ImportError(msg) from e
 
         self._model = model
         self._profile = profile or get_profile(model)
@@ -85,23 +334,46 @@ class AnthropicProvider(Provider):
         self._default_max_tokens = max_tokens
 
         api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self._client = AsyncAnthropic(
-            api_key=api_key,
-            timeout=timeout,
+        self._client = (
+            client
+            if client is not None
+            else AsyncAnthropic(
+                api_key=api_key,
+                timeout=timeout,
+            )
         )
 
     @property
+    def default_max_tokens(self) -> int:
+        """The max_tokens sent when a request sets none."""
+        return self._default_max_tokens
+
+    @property
+    @override
     def provider_name(self) -> str:
         return "anthropic"
 
     @property
+    @override
     def profile(self) -> ModelProfile:
         return self._profile
 
     @property
+    @override
     def model(self) -> str:
         return self._model
 
+    @property
+    def client(self) -> AsyncAnthropic:
+        """The SDK client the provider sends requests with."""
+        return self._client
+
+    @property
+    def timeout(self) -> float:
+        """The default request timeout, in seconds."""
+        return self._timeout
+
+    @override
     async def complete(
         self,
         request: LLMRequest,
@@ -113,20 +385,34 @@ class AnthropicProvider(Provider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="anthropic", retryable=False)
+            raise LLMCancelledError(
+                message="Request cancelled",
+                provider="anthropic",
+                retryable=False,
+            )
 
-        system_text, messages = self._to_anthropic_messages(request.messages)
-        params = self._build_params(request, system_text, messages)
+        system_text, messages = _to_anthropic_messages(request.messages)
+        params = self.build_params(request, system_text, messages)
         timeout = timeout_s or self._timeout
 
         try:
             if stream and on_stream_event:
-                return await self._stream_completion(params, on_stream_event, timeout, cancel)
+                try:
+                    async with asyncio.timeout(timeout):
+                        return await self.stream_completion(
+                            params, on_stream_event, cancel
+                        )
+                except TimeoutError as e:
+                    raise LLMTimeoutError(
+                        message=f"Stream timed out after {timeout}s",
+                        provider="anthropic",
+                        raw=e,
+                    ) from e
 
             async with asyncio.timeout(timeout):
                 response = await self._client.messages.create(**params)
 
-            return self._from_anthropic_response(response)
+            return _from_anthropic_response(response)
 
         except TimeoutError as e:
             raise LLMTimeoutError(
@@ -135,193 +421,35 @@ class AnthropicProvider(Provider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(message="Request cancelled", provider="anthropic") from None
+            raise LLMCancelledError(
+                message="Request cancelled", provider="anthropic"
+            ) from None
         except Exception as e:
-            raise self._map_error(e) from e
+            raise self.map_error(e) from e
 
-    async def _stream_completion(
+    async def stream_completion(
         self,
         params: dict[str, Any],
         on_stream_event: StreamCallback,
-        timeout: float,
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
-        text_acc: list[str] = []
-        reasoning_acc: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        current_tool: dict[str, Any] | None = None
-        current_block_type: str | None = None
-        usage: Usage | None = None
-        finish_reason: str | None = None
-
-        try:
-            async with asyncio.timeout(timeout):
-                async with self._client.messages.stream(**params) as stream:
-                    async for event in stream:
-                        if cancel and cancel.is_cancelled():
-                            raise LLMCancelledError(message="Request cancelled", provider="anthropic", retryable=False)
-
-                        if event.type == "content_block_start":
-                            current_block_type = event.content_block.type
-                            if event.content_block.type in ("thinking", "redacted_thinking"):
-                                initial = (
-                                    getattr(event.content_block, "thinking", None)
-                                    or getattr(event.content_block, "text", None)
-                                    or ""
-                                )
-                                if initial:
-                                    reasoning_acc.append(str(initial))
-                                    on_stream_event(StreamEvent(delta_reasoning=str(initial)))
-                            if event.content_block.type == "tool_use":
-                                current_tool = {
-                                    "id": event.content_block.id,
-                                    "name": event.content_block.name,
-                                    "input": "",
-                                }
-
-                        elif event.type == "content_block_delta":
-                            if current_block_type in ("thinking", "redacted_thinking"):
-                                delta_thinking = (
-                                    getattr(event.delta, "thinking", None) or getattr(event.delta, "text", None) or ""
-                                )
-                                if delta_thinking:
-                                    reasoning_acc.append(str(delta_thinking))
-                                    on_stream_event(StreamEvent(delta_reasoning=str(delta_thinking)))
-                            elif hasattr(event.delta, "text"):
-                                text_acc.append(event.delta.text)
-                                on_stream_event(StreamEvent(delta_text=event.delta.text))
-                            elif hasattr(event.delta, "partial_json") and current_tool:
-                                current_tool["input"] += event.delta.partial_json
-
-                        elif event.type == "content_block_stop":
-                            if current_tool:
-                                tool_calls.append(current_tool)
-                                current_tool = None
-                            current_block_type = None
-
-                        elif event.type == "message_delta":
-                            finish_reason = event.delta.stop_reason
-
-                        elif event.type == "message_start":
-                            if event.message.usage:
-                                usage = Usage(
-                                    input_tokens=event.message.usage.input_tokens,
-                                    output_tokens=0,
-                                    total_tokens=event.message.usage.input_tokens,
-                                )
-
-                        elif event.type == "message_stop":
-                            final_message = await stream.get_final_message()
-                            usage = Usage(
-                                input_tokens=final_message.usage.input_tokens,
-                                output_tokens=final_message.usage.output_tokens,
-                                total_tokens=final_message.usage.input_tokens + final_message.usage.output_tokens,
-                            )
-
-        except TimeoutError as e:
-            raise LLMTimeoutError(
-                message=f"Stream timed out after {timeout}s",
-                provider="anthropic",
-                raw=e,
-            ) from e
-
-        # Build final message
-        parts: list[Any] = []
-        full_text = "".join(text_acc)
-        if full_text:
-            parts.append(TextPart(text=full_text))
-
-        for tc in tool_calls:
-            parts.append(
-                ToolCallPart(
-                    name=tc["name"],
-                    arguments_json=tc["input"],
-                    call_id=tc["id"],
-                )
-            )
-
-        on_stream_event(StreamEvent(done=True, usage=usage, finish_reason=finish_reason))
-
-        return CompletionResponse(
-            message=LLMMessage(role="assistant", parts=parts),
-            usage=usage or Usage.zero(),
-            raw_response=None,
-            reasoning_content="".join(reasoning_acc) or None,
-            finish_reason=finish_reason,
-        )
-
-    def _to_anthropic_messages(self, messages: tuple[Any, ...] | list[Any]) -> tuple[str | None, list[dict[str, Any]]]:
-        """Convert typed messages to Anthropic format.
-
-        Returns:
-            Tuple of (system_text, messages_list).
-        """
-        system_text: str | None = None
-        result: list[dict[str, Any]] = []
-
-        for msg in messages:
-            if msg.role == "system":
-                # Anthropic uses a separate system parameter
-                system_text = msg.text
-                continue
-
-            content: list[dict[str, Any]] = []
-
-            for part in msg.parts:
-                if isinstance(part, TextPart):
-                    content.append({"type": "text", "text": part.text})
-                elif isinstance(part, ImagePart):
-                    import base64
-
-                    b64 = base64.b64encode(part.data).decode("utf-8")
-                    content.append(
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": part.media_type,
-                                "data": b64,
-                            },
-                        }
+        state = _AnthropicStreamState(on_stream_event)
+        async with self._client.messages.stream(**params) as stream:
+            async for event in stream:
+                if cancel and cancel.is_cancelled():
+                    raise LLMCancelledError(
+                        message="Request cancelled",
+                        provider="anthropic",
+                        retryable=False,
                     )
-                elif isinstance(part, ToolCallPart):
-                    content.append(
-                        {
-                            "type": "tool_use",
-                            "id": part.call_id or f"call_{uuid.uuid4().hex[:16]}",
-                            "name": part.name,
-                            "input": json.loads(part.arguments_json) if part.arguments_json else {},
-                        }
-                    )
-                elif isinstance(part, ToolResultPart):
-                    # Tool results are separate messages in Anthropic
-                    result.append(
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": part.call_id or "",
-                                    "content": part.result_json,
-                                    "is_error": part.is_error,
-                                }
-                            ],
-                        }
-                    )
-                    continue
+                if event.type == "message_stop":
+                    state.set_final_usage(await stream.get_final_message())
+                else:
+                    state.handle(event)
+        return state.response()
 
-            if content:
-                result.append(
-                    {
-                        "role": msg.role if msg.role != "tool" else "user",
-                        "content": content,
-                    }
-                )
-
-        return system_text, result
-
-    def _build_params(
+    def build_params(
         self,
         request: LLMRequest,
         system_text: str | None,
@@ -350,18 +478,25 @@ class AnthropicProvider(Provider):
             params["tools"] = self._to_anthropic_tools(request.tools)
 
         if request.tool_choice:
-            params["tool_choice"] = {"type": "tool", "name": request.tool_choice}
+            params["tool_choice"] = {
+                "type": "tool",
+                "name": request.tool_choice,
+            }
 
         # Handle structured output via tool use
         if request.structured_output:
-            params = self._add_structured_output(params, request.structured_output)
+            params = self._add_structured_output(
+                params, request.structured_output
+            )
 
         if request.extra:
             params.update(request.extra)
 
         return params
 
-    def _to_anthropic_tools(self, tools: tuple[Any, ...] | list[Any] | None) -> list[dict[str, Any]] | None:
+    def _to_anthropic_tools(
+        self, tools: tuple[Any, ...] | list[Any] | None
+    ) -> list[dict[str, Any]] | None:
         """Convert typed tools to Anthropic format."""
         if not tools:
             return None
@@ -375,7 +510,9 @@ class AnthropicProvider(Provider):
             for tool in tools
         ]
 
-    def _add_structured_output(self, params: dict[str, Any], structured_output: Any) -> dict[str, Any]:
+    def _add_structured_output(
+        self, params: dict[str, Any], structured_output: StructuredOutputSpec
+    ) -> dict[str, Any]:
         """Add structured output via forced tool use."""
         # Anthropic uses tool_use for structured output
         tool_def = {
@@ -387,46 +524,14 @@ class AnthropicProvider(Provider):
         if "tools" not in params:
             params["tools"] = []
         params["tools"].append(tool_def)
-        params["tool_choice"] = {"type": "tool", "name": structured_output.name}
+        params["tool_choice"] = {
+            "type": "tool",
+            "name": structured_output.name,
+        }
 
         return params
 
-    def _from_anthropic_response(self, response: Any) -> CompletionResponse:
-        """Convert Anthropic response to CompletionResponse."""
-        parts: list[Any] = []
-        reasoning_acc: list[str] = []
-
-        for block in response.content:
-            if block.type == "text":
-                parts.append(TextPart(text=block.text))
-            elif block.type in ("thinking", "redacted_thinking"):
-                thinking_text = getattr(block, "thinking", None) or getattr(block, "text", None) or ""
-                if thinking_text:
-                    reasoning_acc.append(str(thinking_text))
-            elif block.type == "tool_use":
-                parts.append(
-                    ToolCallPart(
-                        name=block.name,
-                        arguments_json=json.dumps(block.input),
-                        call_id=block.id,
-                    )
-                )
-
-        usage = Usage(
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
-        )
-
-        return CompletionResponse(
-            message=LLMMessage(role="assistant", parts=parts),
-            usage=usage,
-            raw_response=response,
-            reasoning_content="".join(reasoning_acc) or None,
-            finish_reason=response.stop_reason,
-        )
-
-    def _map_error(self, exc: Exception) -> LLMError:
+    def map_error(self, exc: Exception) -> LLMError:
         """Map Anthropic SDK exceptions to LLMError."""
         try:
             from anthropic import (

@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from penguiflow.artifacts import ArtifactStore
     from penguiflow.planner import PlannerEvent, Trajectory
     from penguiflow.state.models import StateUpdate, SteeringEvent, TaskState
 
-from .models import RemoteBinding, StoredEvent
+    from .models import RemoteBinding, StoredEvent
 
 
 @runtime_checkable
@@ -27,32 +28,28 @@ class StateStore(Protocol):
         Implementations may choose any storage backend (Postgres, Redis, etc.).
         The method must be idempotent since retries can emit duplicate events.
         """
-
         raise NotImplementedError()
-        return None
 
     async def load_history(self, trace_id: str) -> Sequence[StoredEvent]:
         """Return the ordered history for a trace id."""
-
         raise NotImplementedError()
-        return []
 
     async def save_remote_binding(self, binding: RemoteBinding) -> None:
         """Persist the mapping between a trace and an external worker."""
-
         raise NotImplementedError()
-        return None
 
 
 @runtime_checkable
 class SupportsPlannerState(Protocol):
     """Optional StateStore capability for persisting planner checkpoint state.
 
-    Detected via duck-typing (``hasattr``); a store need not implement this unless the
-    planner checkpoint/resume feature is used.
+    Detected via duck-typing (``hasattr``); a store need not implement this
+    unless the planner checkpoint/resume feature is used.
     """
 
-    async def save_planner_state(self, token: str, payload: dict[str, Any]) -> None:
+    async def save_planner_state(
+        self, token: str, payload: dict[str, Any]
+    ) -> None:
         """Persist planner state under an opaque resumption token.
 
         Args:
@@ -75,10 +72,10 @@ class SupportsPlannerState(Protocol):
 
 @runtime_checkable
 class SupportsConversationBindings(Protocol):
-    """Optional StateStore capability for tracking remote-agent conversation bindings.
+    """Optional StateStore capability for remote-agent conversation bindings.
 
-    A binding associates a router session with a remote agent/skill invocation so that
-    follow-up turns can be routed back to the same remote task/context.
+    A binding associates a router session with a remote agent/skill invocation
+    so that follow-up turns can be routed back to the same remote task/context.
     """
 
     async def find_binding(
@@ -90,7 +87,7 @@ class SupportsConversationBindings(Protocol):
         tenant_id: str | None = None,
         user_id: str | None = None,
     ) -> RemoteBinding | None:
-        """Find an existing, non-terminal binding matching the given coordinates.
+        """Find a non-terminal binding matching the given coordinates.
 
         Args:
             router_session_id: Local session id issuing the remote call.
@@ -104,7 +101,9 @@ class SupportsConversationBindings(Protocol):
         """
         ...
 
-    async def list_bindings(self, *, router_session_id: str) -> Sequence[RemoteBinding]:
+    async def list_bindings(
+        self, *, router_session_id: str
+    ) -> Sequence[RemoteBinding]:
         """List all bindings recorded for a router session.
 
         Args:
@@ -115,8 +114,10 @@ class SupportsConversationBindings(Protocol):
         """
         ...
 
-    async def mark_binding_terminal(self, *, trace_id: str, context_id: str | None, task_id: str) -> None:
-        """Mark a binding as terminal so it is no longer reused for follow-up turns.
+    async def mark_binding_terminal(
+        self, *, trace_id: str, context_id: str | None, task_id: str
+    ) -> None:
+        """Mark a binding as terminal so follow-up turns no longer reuse it.
 
         Args:
             trace_id: Trace id of the binding to mark.
@@ -128,7 +129,7 @@ class SupportsConversationBindings(Protocol):
 
 @runtime_checkable
 class SupportsMemoryState(Protocol):
-    """Optional StateStore capability for persisting arbitrary keyed memory state."""
+    """Optional StateStore capability for persisting keyed memory state."""
 
     async def save_memory_state(self, key: str, state: dict[str, Any]) -> None:
         """Persist memory state under a key.
@@ -153,7 +154,7 @@ class SupportsMemoryState(Protocol):
 
 @runtime_checkable
 class SupportsTasks(Protocol):
-    """Optional StateStore capability for persisting background/foreground task state."""
+    """Optional StateStore capability for persisting task state."""
 
     async def save_task(self, state: TaskState) -> None:
         """Persist (create or update) a task's state.
@@ -190,12 +191,13 @@ class SupportsTasks(Protocol):
         since_id: str | None = None,
         limit: int = 500,
     ) -> Sequence[StateUpdate]:
-        """List updates recorded for a session, optionally filtered and paginated.
+        """List a session's updates, optionally filtered and paginated.
 
         Args:
             session_id: Session id to look up updates for.
             task_id: Optional task id to restrict results to.
-            since_id: Optional update id; only updates after this one are returned.
+            since_id: Optional update id; only updates after this one are
+                returned.
             limit: Maximum number of updates to return.
 
         Returns:
@@ -208,8 +210,8 @@ class SupportsTasks(Protocol):
 class SupportsSteering(Protocol):
     """Optional StateStore capability for persisting mid-run steering events.
 
-    Steering events represent externally injected control actions (pause, resume,
-    redirect, cancel, user messages, etc.) applied to a running task.
+    Steering events represent externally injected control actions (pause,
+    resume, redirect, cancel, user messages, etc.) applied to a running task.
     """
 
     async def save_steering(self, event: SteeringEvent) -> None:
@@ -228,25 +230,29 @@ class SupportsSteering(Protocol):
         since_id: str | None = None,
         limit: int = 500,
     ) -> Sequence[SteeringEvent]:
-        """List steering events recorded for a session, optionally filtered and paginated.
+        """List a session's steering events, optionally filtered and paginated.
 
         Args:
             session_id: Session id to look up steering events for.
             task_id: Optional task id to restrict results to.
-            since_id: Optional event id; only events after this one are returned.
+            since_id: Optional event id; only events after this one are
+                returned.
             limit: Maximum number of events to return.
 
         Returns:
-            Matching steering events in chronological order, bounded by `limit`.
+            Matching steering events in chronological order, bounded by
+            `limit`.
         """
         ...
 
 
 @runtime_checkable
 class SupportsTrajectories(Protocol):
-    """Optional StateStore capability for persisting ReactPlanner trajectories."""
+    """Optional StateStore capability for persisting planner trajectories."""
 
-    async def save_trajectory(self, trace_id: str, session_id: str, trajectory: Trajectory) -> None:
+    async def save_trajectory(
+        self, trace_id: str, session_id: str, trajectory: Trajectory
+    ) -> None:
         """Persist a planner trajectory for a trace.
 
         Args:
@@ -256,7 +262,9 @@ class SupportsTrajectories(Protocol):
         """
         ...
 
-    async def get_trajectory(self, trace_id: str, session_id: str) -> Trajectory | None:
+    async def get_trajectory(
+        self, trace_id: str, session_id: str
+    ) -> Trajectory | None:
         """Load a previously saved trajectory.
 
         Args:
@@ -283,9 +291,11 @@ class SupportsTrajectories(Protocol):
 
 @runtime_checkable
 class SupportsPlannerEvents(Protocol):
-    """Optional StateStore capability for persisting ReactPlanner events for a trace."""
+    """Optional StateStore capability for persisting planner trace events."""
 
-    async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None:
+    async def save_planner_event(
+        self, trace_id: str, event: PlannerEvent
+    ) -> None:
         """Persist a planner event.
 
         Args:
@@ -308,30 +318,32 @@ class SupportsPlannerEvents(Protocol):
 
 @runtime_checkable
 class SupportsArtifacts(Protocol):
-    """Optional StateStore capability for exposing an associated artifact store."""
+    """Optional StateStore capability for exposing an artifact store."""
 
     @property
     def artifact_store(self) -> ArtifactStore | None:
         """The artifact store associated with this state store, if any.
 
         Returns:
-            An `ArtifactStore` instance, or None if artifacts are not configured.
+            An `ArtifactStore` instance, or None if artifacts are not
+            configured.
         """
         ...
 
 
 def missing_capabilities(store: object, methods: Sequence[str]) -> list[str]:
     """Return missing attribute names from ``methods``."""
-
     return [method for method in methods if not hasattr(store, method)]
 
 
-def require_capabilities(store: object, *, feature: str, methods: Sequence[str]) -> None:
-    """Fail fast when a StateStore is missing required optional capabilities."""
-
+def require_capabilities(
+    store: object, *, feature: str, methods: Sequence[str]
+) -> None:
+    """Fail fast when a StateStore lacks required optional capabilities."""
     missing = missing_capabilities(store, methods)
     if missing:
-        raise TypeError(f"StateStore missing {missing} required for feature={feature}")
+        msg = f"StateStore missing {missing} required for feature={feature}"
+        raise TypeError(msg)
 
 
 __all__ = [

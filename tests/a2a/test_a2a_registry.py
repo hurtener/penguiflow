@@ -1,11 +1,18 @@
+"""Tests for A2A registry."""
+
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from typing_extensions import override
 
-from penguiflow.remote import RemoteCallResult
+from penguiflow.remote import (
+    RemoteCallRequest,
+    RemoteCallResult,
+    RemoteStreamEvent,
+    RemoteTransport,
+)
 from penguiflow_a2a.registry import (
     A2ARouterToolset,
     AgentRegistry,
@@ -15,8 +22,16 @@ from penguiflow_a2a.registry import (
     load_agent_registry_config,
 )
 
+from ..tool_context_doubles import FakeToolContext
 
-def _card(name: str, skill_id: str, description: str, *, streaming: bool = False) -> dict[str, Any]:
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+
+def _card(
+    name: str, skill_id: str, description: str, *, streaming: bool = False
+) -> dict[str, Any]:
     return {
         "name": name,
         "description": description,
@@ -36,46 +51,65 @@ def _card(name: str, skill_id: str, description: str, *, streaming: bool = False
 
 
 def test_agent_registry_scores_by_skill_metadata_and_tenant() -> None:
+    """Agent registry scores by skill metadata and tenant."""
     registry = AgentRegistry()
     registry.register_card(
         agent_url="http://weather",
-        card=_card("Weather Agent", "forecast", "weather forecast and climate lookup"),
+        card=_card(
+            "Weather Agent", "forecast", "weather forecast and climate lookup"
+        ),
         tenant_id="tenant-a",
         trust_tier="trusted",
         latency_tier="interactive",
     )
     registry.register_card(
         agent_url="http://math",
-        card=_card("Math Agent", "calculate", "numeric calculation and algebra"),
+        card=_card(
+            "Math Agent", "calculate", "numeric calculation and algebra"
+        ),
         tenant_id="tenant-a",
         trust_tier="standard",
         latency_tier="standard",
     )
 
-    best = registry.best(AgentRouteRequest(query="need a weather forecast", tenant_id="tenant-a"))
+    best = registry.best(
+        AgentRouteRequest(
+            query="need a weather forecast", tenant_id="tenant-a"
+        )
+    )
 
     assert best is not None
     assert best.agent.agent_url == "http://weather"
     assert best.skill.skill_id == "forecast"
     assert any(reason.startswith("query_overlap:") for reason in best.reasons)
-    assert registry.best(AgentRouteRequest(query="weather", tenant_id="tenant-b")) is None
+    assert (
+        registry.best(AgentRouteRequest(query="weather", tenant_id="tenant-b"))
+        is None
+    )
 
 
 def test_agent_registry_filters_required_streaming_mode() -> None:
+    """Agent registry filters required streaming mode."""
     registry = AgentRegistry()
-    registry.register_card(agent_url="http://batch", card=_card("Batch", "report", "report generation"))
+    registry.register_card(
+        agent_url="http://batch",
+        card=_card("Batch", "report", "report generation"),
+    )
     registry.register_card(
         agent_url="http://stream",
         card=_card("Stream", "report", "report generation", streaming=True),
     )
 
-    best = registry.best(AgentRouteRequest(query="report", required_execution_mode="stream"))
+    best = registry.best(
+        AgentRouteRequest(query="report", required_execution_mode="stream")
+    )
 
     assert best is not None
     assert best.agent.agent_url == "http://stream"
 
 
 def test_agent_registry_policy_filters_agents_and_auth() -> None:
+    """Agent registry policy filters agents and auth."""
     registry = AgentRegistry()
     registry.register_card(
         agent_url="http://low",
@@ -108,10 +142,13 @@ def test_agent_registry_policy_filters_agents_and_auth() -> None:
         ),
     )
 
-    assert [candidate.agent.agent_url for candidate in candidates] == ["http://trusted"]
+    assert [candidate.agent.agent_url for candidate in candidates] == [
+        "http://trusted"
+    ]
 
 
 def test_agent_registry_policy_fallback_does_not_bypass_guardrails() -> None:
+    """Agent registry policy fallback does not bypass guardrails."""
     registry = AgentRegistry()
     registry.register_card(
         agent_url="http://fallback",
@@ -121,14 +158,19 @@ def test_agent_registry_policy_fallback_does_not_bypass_guardrails() -> None:
     )
 
     candidates = registry.route(
-        AgentRouteRequest(query="unmatched", skill="unknown", tenant_id="tenant-a"),
-        policy=RouterPolicy(fallback_agent_url="http://fallback", min_trust_tier="trusted"),
+        AgentRouteRequest(
+            query="unmatched", skill="unknown", tenant_id="tenant-a"
+        ),
+        policy=RouterPolicy(
+            fallback_agent_url="http://fallback", min_trust_tier="trusted"
+        ),
     )
 
     assert candidates == []
 
 
-def test_agent_registry_loads_declarative_yaml_config(tmp_path) -> None:
+def test_agent_registry_loads_declarative_yaml_config(tmp_path: Path) -> None:
+    """Agent registry loads declarative yaml config."""
     config_path = tmp_path / "agents.yaml"
     config_path.write_text(
         """
@@ -154,7 +196,9 @@ agents:
     )
 
     registry = load_agent_registry_config(config_path)
-    best = registry.best(AgentRouteRequest(query="weather forecast", tenant_id="tenant-a"))
+    best = registry.best(
+        AgentRouteRequest(query="weather forecast", tenant_id="tenant-a")
+    )
 
     assert best is not None
     assert best.agent.agent_url == "http://weather"
@@ -162,56 +206,57 @@ agents:
     assert best.agent.streaming is True
 
 
-class _FakeCtx:
+class _FakeCtx(FakeToolContext):
+    """Tool context for a router session of tenant ``tenant-a``."""
+
     def __init__(self) -> None:
-        self._tool_context = {"tenant": "tenant-a", "session_id": "router-session"}
-
-    @property
-    def llm_context(self) -> Mapping[str, Any]:
-        return {}
-
-    @property
-    def tool_context(self) -> dict[str, Any]:
-        return self._tool_context
-
-    @property
-    def meta(self) -> dict[str, Any]:
-        return dict(self._tool_context)
-
-    async def pause(self, reason: str, payload: Mapping[str, Any] | None = None) -> Any:  # pragma: no cover
-        del reason, payload
-        raise AssertionError("pause not expected")
-
-    async def emit_chunk(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
-        del args, kwargs
-
-    async def emit_artifact(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
-        del args, kwargs
+        """Bind the tenant and router session ids."""
+        super().__init__(
+            tool_context={
+                "tenant": "tenant-a",
+                "session_id": "router-session",
+            }
+        )
 
 
-class _FakeTransport:
+class _FakeTransport(RemoteTransport):
+    """Echoes each request's agent URL and payload; records requests."""
+
     def __init__(self) -> None:
-        self.requests = []
+        """Start with no recorded requests or cancellations."""
+        self.requests: list[RemoteCallRequest] = []
+        self.cancel_calls: list[tuple[str, str]] = []
 
-    async def send(self, request):
+    @override
+    async def send(self, request: RemoteCallRequest) -> RemoteCallResult:
         self.requests.append(request)
         return RemoteCallResult(
-            result={"handled_by": request.agent_url, "payload": request.message.payload},
+            result={
+                "handled_by": request.agent_url,
+                "payload": request.message.payload,
+            },
             context_id="ctx-remote",
             task_id="task-remote",
             agent_url=request.agent_url,
         )
 
-    async def cancel(self, *, agent_url: str, task_id: str) -> None:  # pragma: no cover
-        del agent_url, task_id
+    @override
+    async def cancel(
+        self, *, agent_url: str, task_id: str
+    ) -> None:  # pragma: no cover
+        self.cancel_calls.append((agent_url, task_id))
 
-    async def stream(self, request):  # pragma: no cover
-        del request
-        raise AssertionError("stream not expected")
+    @override
+    def stream(
+        self, request: RemoteCallRequest
+    ) -> AsyncIterator[RemoteStreamEvent]:  # pragma: no cover
+        msg = "stream not expected"
+        raise AssertionError(msg)
 
 
 @pytest.mark.asyncio
 async def test_a2a_router_toolset_delegates_to_best_candidate() -> None:
+    """A2A router toolset delegates to best candidate."""
     registry = AgentRegistry()
     registry.register_card(
         agent_url="http://weather",
@@ -219,16 +264,25 @@ async def test_a2a_router_toolset_delegates_to_best_candidate() -> None:
         tenant_id="tenant-a",
     )
     transport = _FakeTransport()
-    spec = A2ARouterToolset(registry=registry, transport=transport, default_execution_mode="blocking").tool()
+    spec = A2ARouterToolset(
+        registry=registry,
+        transport=transport,
+        default_execution_mode="blocking",
+    ).tool()
 
     result = await spec.node.func(
-        RouterDelegationArgs(query="weather tomorrow", payload={"city": "Buenos Aires"}),
+        RouterDelegationArgs(
+            query="weather tomorrow", payload={"city": "Buenos Aires"}
+        ),
         _FakeCtx(),
     )
 
     assert result.agent_url == "http://weather"
     assert result.skill == "forecast"
-    assert result.result == {"handled_by": "http://weather", "payload": {"city": "Buenos Aires"}}
+    assert result.result == {
+        "handled_by": "http://weather",
+        "payload": {"city": "Buenos Aires"},
+    }
     assert result.route_metadata["candidate_count"] == 1
     assert result.route_metadata["execution_mode"] == "blocking"
     assert transport.requests[0].skill == "forecast"
@@ -236,6 +290,7 @@ async def test_a2a_router_toolset_delegates_to_best_candidate() -> None:
 
 @pytest.mark.asyncio
 async def test_a2a_router_toolset_honors_policy() -> None:
+    """A2A router toolset honors policy."""
     registry = AgentRegistry()
     registry.register_card(
         agent_url="http://standard",
@@ -258,7 +313,9 @@ async def test_a2a_router_toolset_honors_policy() -> None:
     ).tool()
 
     result = await spec.node.func(
-        RouterDelegationArgs(query="weather tomorrow", payload={"city": "Buenos Aires"}),
+        RouterDelegationArgs(
+            query="weather tomorrow", payload={"city": "Buenos Aires"}
+        ),
         _FakeCtx(),
     )
 

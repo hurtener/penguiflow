@@ -9,16 +9,18 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from pydantic import BaseModel, Field
 
 from penguiflow.catalog import NodeSpec, SideEffect
 from penguiflow.node import Node, NodePolicy
-from penguiflow.planner.context import ToolContext
-from penguiflow.remote import RemoteTransport
 
 from .planner_tools import A2AAgentToolset, ExecutionMode
+
+if TYPE_CHECKING:
+    from penguiflow.planner.context import ToolContext
+    from penguiflow.remote import RemoteTransport
 
 TrustTier = Literal["low", "standard", "trusted", "critical"]
 LatencyTier = Literal["interactive", "standard", "batch"]
@@ -27,13 +29,33 @@ _TRUST_SCORE = {"low": 0, "standard": 1, "trusted": 2, "critical": 3}
 _LATENCY_SCORE = {"interactive": 2, "standard": 1, "batch": 0}
 
 
+class RegistryConfigError(ValueError):
+    """Raised when an agent registry config is malformed."""
+
+
+class AgentCardError(RuntimeError):
+    """Raised when a remote agent serves an invalid agent card."""
+
+
+def _is_trust_tier(text: str) -> TypeGuard[TrustTier]:
+    """Whether ``text`` names a trust tier."""
+    return text in _TRUST_SCORE
+
+
+def _is_latency_tier(text: str) -> TypeGuard[LatencyTier]:
+    """Whether ``text`` names a latency tier."""
+    return text in _LATENCY_SCORE
+
+
 def _tokens(value: str | None) -> set[str]:
     if not value:
         return set()
-    return {token for token in re.split(r"[^a-zA-Z0-9]+", value.lower()) if token}
+    return {
+        token for token in re.split(r"[^a-zA-Z0-9]+", value.lower()) if token
+    }
 
 
-def _router_payload_builder(args: BaseModel, _ctx: ToolContext) -> Any:
+def _router_payload_builder(args: BaseModel, _ctx: ToolContext) -> object:
     typed = RouterDelegationArgs.model_validate(args)
     return typed.payload or {"query": typed.query}
 
@@ -48,7 +70,9 @@ def _capability_bool(card: Mapping[str, Any], name: str) -> bool:
     capabilities = card.get("capabilities") or {}
     if isinstance(capabilities, Mapping):
         return bool(capabilities.get(name))
-    if isinstance(capabilities, Sequence) and not isinstance(capabilities, str):
+    if isinstance(capabilities, Sequence) and not isinstance(
+        capabilities, str
+    ):
         return name in capabilities
     return False
 
@@ -142,9 +166,11 @@ class AgentRegistry:
     """In-memory A2A agent registry with explainable route scoring."""
 
     def __init__(self) -> None:
+        """Create an empty registry."""
         self._agents: dict[str, RemoteAgentRecord] = {}
 
     def register(self, record: RemoteAgentRecord) -> None:
+        """Add or replace a remote agent."""
         self._agents[_normalize_agent_url(record.agent_url)] = record
 
     @classmethod
@@ -154,27 +180,50 @@ class AgentRegistry:
         Supported shape:
         {"agents": [{"agent_url": "...", "card": {...}, "tenant_id": "..."}]}
         """
-
         registry = cls()
         agents = config.get("agents") or ()
         if not isinstance(agents, Sequence) or isinstance(agents, str):
-            raise ValueError("A2A registry config must contain an 'agents' list")
+            msg = "A2A registry config must contain an 'agents' list"
+            raise RegistryConfigError(msg)
         for index, raw_agent in enumerate(agents):
             if not isinstance(raw_agent, Mapping):
-                raise ValueError(f"A2A registry config agents[{index}] must be an object")
+                msg = f"A2A registry config agents[{index}] must be an object"
+                raise RegistryConfigError(msg)
             card = raw_agent.get("card")
             if not isinstance(card, Mapping):
-                raise ValueError(f"A2A registry config agents[{index}].card must be an object")
-            agent_url = raw_agent.get("agent_url") or raw_agent.get("agentUrl") or card.get("url")
+                msg = (
+                    f"A2A registry config agents[{index}].card must be an "
+                    "object"
+                )
+                raise RegistryConfigError(msg)
+            agent_url = (
+                raw_agent.get("agent_url")
+                or raw_agent.get("agentUrl")
+                or card.get("url")
+            )
             if not isinstance(agent_url, str) or not agent_url.strip():
-                raise ValueError(f"A2A registry config agents[{index}] must define agent_url")
+                msg = (
+                    f"A2A registry config agents[{index}] must define "
+                    "agent_url"
+                )
+                raise RegistryConfigError(msg)
             registry.register_card(
                 agent_url=agent_url.strip(),
                 card=card,
-                tenant_id=_optional_str(raw_agent.get("tenant_id") or raw_agent.get("tenantId")),
-                trust_tier=_trust_tier(raw_agent.get("trust_tier") or raw_agent.get("trustTier")),
-                latency_tier=_latency_tier(raw_agent.get("latency_tier") or raw_agent.get("latencyTier")),
-                auth_schemes=_string_tuple(raw_agent.get("auth_schemes") or raw_agent.get("authSchemes")),
+                tenant_id=_optional_str(
+                    raw_agent.get("tenant_id") or raw_agent.get("tenantId")
+                ),
+                trust_tier=_trust_tier(
+                    raw_agent.get("trust_tier") or raw_agent.get("trustTier")
+                ),
+                latency_tier=_latency_tier(
+                    raw_agent.get("latency_tier")
+                    or raw_agent.get("latencyTier")
+                ),
+                auth_schemes=_string_tuple(
+                    raw_agent.get("auth_schemes")
+                    or raw_agent.get("authSchemes")
+                ),
                 metadata=_mapping_or_empty(raw_agent.get("metadata")),
             )
         return registry
@@ -190,6 +239,7 @@ class AgentRegistry:
         auth_schemes: Sequence[str] = (),
         metadata: Mapping[str, Any] | None = None,
     ) -> RemoteAgentRecord:
+        """Register a remote agent from its agent card."""
         agent_url = _normalize_agent_url(agent_url)
         payload = _card_dict(card)
         skills: list[RemoteSkillRecord] = []
@@ -197,15 +247,25 @@ class AgentRegistry:
             if not isinstance(raw_skill, Mapping):
                 continue
             skill_id = _skill_id(raw_skill)
-            input_modes = raw_skill.get("inputModes") or raw_skill.get("input_modes") or ()
-            output_modes = raw_skill.get("outputModes") or raw_skill.get("output_modes") or ()
+            input_modes = (
+                raw_skill.get("inputModes")
+                or raw_skill.get("input_modes")
+                or ()
+            )
+            output_modes = (
+                raw_skill.get("outputModes")
+                or raw_skill.get("output_modes")
+                or ()
+            )
             skills.append(
                 RemoteSkillRecord(
                     agent_url=agent_url,
                     skill_id=skill_id,
                     name=str(raw_skill.get("name") or skill_id),
                     description=str(raw_skill.get("description") or ""),
-                    tags=tuple(str(tag) for tag in (raw_skill.get("tags") or ())),
+                    tags=tuple(
+                        str(tag) for tag in (raw_skill.get("tags") or ())
+                    ),
                     input_modes=tuple(str(mode) for mode in input_modes),
                     output_modes=tuple(str(mode) for mode in output_modes),
                     security=tuple(raw_skill.get("security") or ()),
@@ -241,6 +301,7 @@ class AgentRegistry:
         return record
 
     def agents(self) -> tuple[RemoteAgentRecord, ...]:
+        """Return the registered agents."""
         return tuple(self._agents.values())
 
     def route(
@@ -250,7 +311,12 @@ class AgentRegistry:
         limit: int | None = None,
         policy: RouterPolicy | None = None,
     ) -> list[AgentRouteCandidate]:
-        effective_limit = limit if limit is not None else (policy.max_candidates if policy is not None else 5)
+        """Return the agents and skills matching ``request``, best first."""
+        effective_limit = (
+            limit
+            if limit is not None
+            else (policy.max_candidates if policy is not None else 5)
+        )
         if effective_limit <= 0:
             return []
         candidates: list[AgentRouteCandidate] = []
@@ -264,11 +330,16 @@ class AgentRegistry:
         candidates.sort(key=lambda candidate: candidate.score, reverse=True)
         if not candidates and policy is not None:
             fallback = self._fallback_candidate(policy)
-            if fallback is not None and self._meets_route_constraints(fallback.agent, request, policy):
+            if fallback is not None and self._meets_route_constraints(
+                fallback.agent, request, policy
+            ):
                 candidates.append(fallback)
         return candidates[:effective_limit]
 
-    def best(self, request: AgentRouteRequest, *, policy: RouterPolicy | None = None) -> AgentRouteCandidate | None:
+    def best(
+        self, request: AgentRouteRequest, *, policy: RouterPolicy | None = None
+    ) -> AgentRouteCandidate | None:
+        """Return the best matching agent and skill, if any."""
         candidates = self.route(request, limit=1, policy=policy)
         return candidates[0] if candidates else None
 
@@ -278,20 +349,30 @@ class AgentRegistry:
         request: AgentRouteRequest,
         policy: RouterPolicy | None,
     ) -> bool:
-        if request.tenant_id is not None and agent.tenant_id is not None and agent.tenant_id != request.tenant_id:
+        if (
+            request.tenant_id is not None
+            and agent.tenant_id is not None
+            and agent.tenant_id != request.tenant_id
+        ):
             return False
         if policy is None:
             return True
         agent_url = _normalize_agent_url(agent.agent_url)
-        allowed = {_normalize_agent_url(value) for value in policy.allowed_agents}
-        denied = {_normalize_agent_url(value) for value in policy.denied_agents}
+        allowed = {
+            _normalize_agent_url(value) for value in policy.allowed_agents
+        }
+        denied = {
+            _normalize_agent_url(value) for value in policy.denied_agents
+        }
         if allowed and agent_url not in allowed:
             return False
         if denied and agent_url in denied:
             return False
-        if policy.require_same_tenant and request.tenant_id is not None and agent.tenant_id != request.tenant_id:
-            return False
-        return True
+        return not (
+            policy.require_same_tenant
+            and request.tenant_id is not None
+            and agent.tenant_id != request.tenant_id
+        )
 
     def _meets_route_constraints(
         self,
@@ -301,32 +382,53 @@ class AgentRegistry:
     ) -> bool:
         if not self._allowed_by_policy(agent, request, policy):
             return False
-        min_trust_tier = request.min_trust_tier or (policy.min_trust_tier if policy is not None else None)
-        if min_trust_tier is not None and _TRUST_SCORE[agent.trust_tier] < _TRUST_SCORE[min_trust_tier]:
+        min_trust_tier = request.min_trust_tier or (
+            policy.min_trust_tier if policy is not None else None
+        )
+        if (
+            min_trust_tier is not None
+            and _TRUST_SCORE[agent.trust_tier] < _TRUST_SCORE[min_trust_tier]
+        ):
             return False
         required_execution_mode = request.required_execution_mode or (
             policy.required_execution_mode if policy is not None else None
         )
         if required_execution_mode == "stream" and not agent.streaming:
             return False
-        auth_schemes = request.auth_schemes or (policy.required_auth_schemes if policy is not None else ())
-        if auth_schemes and (not agent.auth_schemes or not set(auth_schemes).intersection(agent.auth_schemes)):
-            return False
-        return True
+        auth_schemes = request.auth_schemes or (
+            policy.required_auth_schemes if policy is not None else ()
+        )
+        return not (
+            auth_schemes
+            and (
+                not agent.auth_schemes
+                or not set(auth_schemes).intersection(agent.auth_schemes)
+            )
+        )
 
-    def _fallback_candidate(self, policy: RouterPolicy) -> AgentRouteCandidate | None:
+    def _fallback_candidate(
+        self, policy: RouterPolicy
+    ) -> AgentRouteCandidate | None:
         if policy.fallback_agent_url is None:
             return None
-        agent = self._agents.get(_normalize_agent_url(policy.fallback_agent_url))
+        agent = self._agents.get(
+            _normalize_agent_url(policy.fallback_agent_url)
+        )
         if agent is None:
             return None
         skill = next(
-            (item for item in agent.skills if item.skill_id == policy.fallback_skill),
+            (
+                item
+                for item in agent.skills
+                if item.skill_id == policy.fallback_skill
+            ),
             agent.skills[0] if agent.skills else None,
         )
         if skill is None:
             return None
-        return AgentRouteCandidate(agent=agent, skill=skill, score=0.0, reasons=("policy_fallback",))
+        return AgentRouteCandidate(
+            agent=agent, skill=skill, score=0.0, reasons=("policy_fallback",)
+        )
 
     def _score(
         self,
@@ -338,7 +440,12 @@ class AgentRegistry:
         score = 0.0
         query_tokens = _tokens(request.query)
         requested_skill_tokens = _tokens(request.skill)
-        skill_tokens = _tokens(skill.skill_id) | _tokens(skill.name) | _tokens(skill.description) | set(skill.tags)
+        skill_tokens = (
+            _tokens(skill.skill_id)
+            | _tokens(skill.name)
+            | _tokens(skill.description)
+            | set(skill.tags)
+        )
         agent_tokens = _tokens(agent.name) | _tokens(agent.description)
 
         if requested_skill_tokens:
@@ -353,17 +460,14 @@ class AgentRegistry:
             score += min(30, 5 * len(overlap))
             reasons.append(f"query_overlap:{','.join(sorted(overlap))}")
 
-        if request.input_mode and skill.input_modes and request.input_mode not in skill.input_modes:
-            return None
-        if request.input_mode and request.input_mode in skill.input_modes:
-            score += 5
-            reasons.append(f"input_mode:{request.input_mode}")
-
-        if request.output_mode and skill.output_modes and request.output_mode not in skill.output_modes:
-            return None
-        if request.output_mode and request.output_mode in skill.output_modes:
-            score += 5
-            reasons.append(f"output_mode:{request.output_mode}")
+        for label, requested, supported in (
+            ("input_mode", request.input_mode, skill.input_modes),
+            ("output_mode", request.output_mode, skill.output_modes),
+        ):
+            mode_score = _mode_score(label, requested, supported, reasons)
+            if mode_score is None:
+                return None
+            score += mode_score
 
         if request.required_execution_mode == "stream" and agent.streaming:
             score += 8
@@ -379,10 +483,31 @@ class AgentRegistry:
 
         if not reasons:
             reasons.append("fallback")
-        return AgentRouteCandidate(agent=agent, skill=skill, score=score, reasons=tuple(reasons))
+        return AgentRouteCandidate(
+            agent=agent, skill=skill, score=score, reasons=tuple(reasons)
+        )
+
+
+def _mode_score(
+    label: str,
+    requested: str | None,
+    supported: Sequence[str],
+    reasons: list[str],
+) -> float | None:
+    """Score a requested input/output mode; ``None`` if unsupported."""
+    if not requested:
+        return 0.0
+    if requested in supported:
+        reasons.append(f"{label}:{requested}")
+        return 5.0
+    if supported:
+        return None
+    return 0.0
 
 
 class RouterDelegationArgs(BaseModel):
+    """Arguments of the delegation tool."""
+
     query: str
     skill: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -392,6 +517,8 @@ class RouterDelegationArgs(BaseModel):
 
 
 class RouterDelegationResult(BaseModel):
+    """The delegated agent's answer and how it was chosen."""
+
     agent_url: str
     skill: str
     score: float
@@ -418,36 +545,53 @@ class A2ARouterToolset:
         side_effects: SideEffect = "external",
         tags: Sequence[str] = ("a2a", "router", "remote"),
     ) -> NodeSpec:
-        async def _impl(args: RouterDelegationArgs, ctx: ToolContext) -> RouterDelegationResult:
-            tenant = ctx.tool_context.get("tenant_id") or ctx.tool_context.get("tenant")
-            execution_mode = args.execution_mode or self.policy.required_execution_mode or self.default_execution_mode
+        """Build the delegation tool that routes requests to the agents."""
+
+        async def _impl(
+            args: RouterDelegationArgs, ctx: ToolContext
+        ) -> RouterDelegationResult:
+            tenant = ctx.tool_context.get("tenant_id") or ctx.tool_context.get(
+                "tenant"
+            )
+            execution_mode = (
+                args.execution_mode
+                or self.policy.required_execution_mode
+                or self.default_execution_mode
+            )
             request = AgentRouteRequest(
                 query=args.query,
                 skill=args.skill,
                 input_mode=args.input_mode,
                 output_mode=args.output_mode,
-                tenant_id=str(tenant).strip() if tenant is not None and str(tenant).strip() else None,
+                tenant_id=str(tenant).strip()
+                if tenant is not None and str(tenant).strip()
+                else None,
                 required_execution_mode=execution_mode,
                 auth_schemes=self.policy.required_auth_schemes,
                 min_trust_tier=self.policy.min_trust_tier,
             )
             candidates = self.registry.route(request, policy=self.policy)
             if not candidates:
-                raise RuntimeError("No compatible A2A specialist found")
+                msg = "No compatible A2A specialist found"
+                raise RuntimeError(msg)
             candidate = candidates[0]
 
             toolset = A2AAgentToolset(
                 agent_url=candidate.agent.agent_url,
                 transport=self.transport,
                 agent_card=candidate.agent.raw_card,
-                default_timeout_s=self.policy.timeout_s or self.default_timeout_s,
+                default_timeout_s=self.policy.timeout_s
+                or self.default_timeout_s,
             )
             spec = toolset.tool(
                 name=f"{name}_{candidate.skill.skill_id}",
                 skill=candidate.skill.skill_id,
                 args_model=RouterDelegationArgs,
                 out_model=RouterDelegationResult,
-                desc=f"Delegate to {candidate.agent.name}/{candidate.skill.name}",
+                desc=(
+                    "Delegate to "
+                    f"{candidate.agent.name}/{candidate.skill.name}"
+                ),
                 execution_mode=execution_mode,
                 poll_interval_s=self.policy.poll_interval_s,
                 max_poll_attempts=self.policy.max_poll_attempts,
@@ -482,55 +626,60 @@ class A2ARouterToolset:
                 "a2a_router": {
                     "agents": len(self.registry.agents()),
                     "max_candidates": self.policy.max_candidates,
-                    "required_execution_mode": self.policy.required_execution_mode,
+                    "required_execution_mode": (
+                        self.policy.required_execution_mode
+                    ),
                     "min_trust_tier": self.policy.min_trust_tier,
                 }
             },
         )
 
 
-def _optional_str(value: Any) -> str | None:
+def _optional_str(value: object) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
 
 
-def _string_tuple(value: Any) -> tuple[str, ...]:
+def _string_tuple(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
     if isinstance(value, str):
         return (value,)
     if isinstance(value, Sequence):
         return tuple(str(item) for item in value)
-    raise ValueError("Expected string or sequence of strings")
+    msg = "Expected string or sequence of strings"
+    raise RegistryConfigError(msg)
 
 
-def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+def _mapping_or_empty(value: object) -> Mapping[str, Any]:
     if value is None:
         return {}
     if isinstance(value, Mapping):
         return value
-    raise ValueError("Expected object metadata")
+    msg = "Expected object metadata"
+    raise RegistryConfigError(msg)
 
 
-def _trust_tier(value: Any) -> TrustTier:
+def _trust_tier(value: object) -> TrustTier:
     text = str(value or "standard")
-    if text not in _TRUST_SCORE:
-        raise ValueError(f"Invalid A2A trust tier: {text}")
-    return text  # type: ignore[return-value]
+    if not _is_trust_tier(text):
+        msg = f"Invalid A2A trust tier: {text}"
+        raise RegistryConfigError(msg)
+    return text
 
 
-def _latency_tier(value: Any) -> LatencyTier:
+def _latency_tier(value: object) -> LatencyTier:
     text = str(value or "standard")
-    if text not in _LATENCY_SCORE:
-        raise ValueError(f"Invalid A2A latency tier: {text}")
-    return text  # type: ignore[return-value]
+    if not _is_latency_tier(text):
+        msg = f"Invalid A2A latency tier: {text}"
+        raise RegistryConfigError(msg)
+    return text
 
 
 def load_agent_registry_config(path: str | Path) -> AgentRegistry:
     """Load an :class:`AgentRegistry` from JSON, YAML, or TOML config."""
-
     config_path = Path(path)
     text = config_path.read_text(encoding="utf-8")
     suffix = config_path.suffix.lower()
@@ -542,9 +691,11 @@ def load_agent_registry_config(path: str | Path) -> AgentRegistry:
     elif suffix == ".toml":
         payload = tomllib.loads(text)
     else:
-        raise ValueError("A2A registry config must be .json, .yaml, .yml, or .toml")
+        msg = "A2A registry config must be .json, .yaml, .yml, or .toml"
+        raise RegistryConfigError(msg)
     if not isinstance(payload, Mapping):
-        raise ValueError("A2A registry config root must be an object")
+        msg = "A2A registry config root must be an object"
+        raise RegistryConfigError(msg)
     return AgentRegistry.from_config(payload)
 
 
@@ -554,29 +705,40 @@ async def fetch_agent_card(
     headers: Mapping[str, str] | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
+    """Fetch the agent card published at ``agent_url``."""
     try:
         import httpx
     except ImportError as exc:  # pragma: no cover - optional extra
-        raise RuntimeError("httpx is required to fetch A2A agent cards. Install penguiflow-lite[a2a-client].") from exc
+        msg = (
+            "httpx is required to fetch A2A agent cards. Install "
+            "penguiflow-lite[a2a-client]."
+        )
+        raise RuntimeError(msg) from exc
     async with httpx.AsyncClient(timeout=timeout_s) as client:
-        response = await client.get(f"{agent_url.rstrip('/')}/.well-known/agent-card.json", headers=dict(headers or {}))
+        response = await client.get(
+            f"{agent_url.rstrip('/')}/.well-known/agent-card.json",
+            headers=dict(headers or {}),
+        )
         response.raise_for_status()
         payload = response.json()
     if not isinstance(payload, dict):
-        raise RuntimeError("Agent card response must be a JSON object")
+        msg = "Agent card response must be a JSON object"
+        raise AgentCardError(msg)
     return payload
 
 
 __all__ = [
     "A2ARouterToolset",
+    "AgentCardError",
     "AgentRegistry",
     "AgentRouteCandidate",
     "AgentRouteRequest",
+    "RegistryConfigError",
     "RemoteAgentRecord",
     "RemoteSkillRecord",
-    "RouterPolicy",
     "RouterDelegationArgs",
     "RouterDelegationResult",
+    "RouterPolicy",
     "fetch_agent_card",
     "load_agent_registry_config",
 ]

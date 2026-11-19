@@ -54,6 +54,7 @@ class HuggingFaceJailbreakRule:
         event: GuardrailEvent,
         context_snapshot: ContextSnapshotV1,
     ) -> GuardrailDecision | None:
+        """Flag the event's text when the classifier finds a jailbreak."""
         if not self._load_pipeline():
             return None
 

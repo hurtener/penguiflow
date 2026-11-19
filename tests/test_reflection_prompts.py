@@ -1,5 +1,7 @@
 """Tests for penguiflow/planner/reflection_prompts.py."""
 
+from __future__ import annotations
+
 from pydantic import BaseModel
 
 from penguiflow.planner.reflection_prompts import _format_answer
@@ -7,7 +9,7 @@ from penguiflow.planner.reflection_prompts import _format_answer
 # ─── _format_answer tests ────────────────────────────────────────────────────
 
 
-def test_format_answer_basemodel():
+def test_format_answer_basemodel() -> None:
     """_format_answer should JSON serialize BaseModel."""
 
     class MyModel(BaseModel):
@@ -19,58 +21,58 @@ def test_format_answer_basemodel():
     assert '"value": 42' in result
 
 
-def test_format_answer_dict_with_answer():
+def test_format_answer_dict_with_answer() -> None:
     """_format_answer should extract 'answer' key from dict."""
     result = _format_answer({"answer": "the answer", "other": "data"})
     assert result == "the answer"
 
 
-def test_format_answer_dict_with_result():
+def test_format_answer_dict_with_result() -> None:
     """_format_answer should extract 'result' key from dict."""
     result = _format_answer({"result": "the result", "other": "data"})
     assert result == "the result"
 
 
-def test_format_answer_dict_with_response():
+def test_format_answer_dict_with_response() -> None:
     """_format_answer should extract 'response' key from dict."""
     result = _format_answer({"response": "the response", "other": "data"})
     assert result == "the response"
 
 
-def test_format_answer_dict_with_output():
+def test_format_answer_dict_with_output() -> None:
     """_format_answer should extract 'output' key from dict."""
     result = _format_answer({"output": "the output", "other": "data"})
     assert result == "the output"
 
 
-def test_format_answer_dict_without_special_key():
+def test_format_answer_dict_without_special_key() -> None:
     """_format_answer should JSON serialize dict without special keys."""
     result = _format_answer({"key1": "value1", "key2": "value2"})
     assert "key1" in result
     assert "value1" in result
 
 
-def test_format_answer_list():
+def test_format_answer_list() -> None:
     """_format_answer should JSON serialize list."""
     result = _format_answer(["item1", "item2", "item3"])
     assert "item1" in result
     assert "item2" in result
 
 
-def test_format_answer_tuple():
+def test_format_answer_tuple() -> None:
     """_format_answer should JSON serialize tuple."""
     result = _format_answer(("a", "b", "c"))
     assert '"a"' in result
     assert '"b"' in result
 
 
-def test_format_answer_string():
+def test_format_answer_string() -> None:
     """_format_answer should return string as-is."""
     result = _format_answer("simple string answer")
     assert result == "simple string answer"
 
 
-def test_format_answer_number():
+def test_format_answer_number() -> None:
     """_format_answer should stringify number."""
     result = _format_answer(42)
     assert result == "42"

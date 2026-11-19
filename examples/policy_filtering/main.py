@@ -1,77 +1,94 @@
+"""Tool policy example: hide tools the policy does not allow."""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+from typing_extensions import override
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import ReactPlanner, ToolPolicy
+from penguiflow.planner.models import JSONLLMClient
 from penguiflow.registry import ModelRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
 class SearchQuery(BaseModel):
+    """Search query payload."""
+
     text: str
 
 
 class SearchDocs(BaseModel):
+    """Search docs payload."""
+
     documents: list[str]
 
 
 class Summary(BaseModel):
+    """Summary payload."""
+
     text: str
 
 
 @tool(desc="Search public knowledge base", tags=["safe"])
-async def search_public(args: SearchQuery, ctx: object) -> SearchDocs:
-    del ctx
+async def search_public(args: SearchQuery, _ctx: object) -> SearchDocs:
+    """Search public documents."""
     return SearchDocs(documents=[f"Public insight about {args.text}"])
 
 
 @tool(desc="Search internal knowledge base", tags=["safe", "internal"])
-async def search_internal(args: SearchQuery, ctx: object) -> SearchDocs:
-    del ctx
+async def search_internal(args: SearchQuery, _ctx: object) -> SearchDocs:
+    """Search internal documents."""
     return SearchDocs(documents=[f"Internal note about {args.text}"])
 
 
 @tool(desc="Summarise supporting documents", tags=["safe"])
-async def summarise(args: SearchDocs, ctx: object) -> Summary:
-    del ctx
+async def summarise(args: SearchDocs, _ctx: object) -> Summary:
+    """Summarise the retrieved documents."""
     joined = "; ".join(args.documents)
     return Summary(text=f"Summary: {joined}")
 
 
 @tool(desc="Send summary via email", tags=["safe", "write"])
-async def send_email(args: Summary, ctx: object) -> Summary:
-    del ctx
+async def send_email(args: Summary, _ctx: object) -> Summary:
+    """Pretend to send an email."""
     return Summary(text=f"Email sent: {args.text}")
 
 
 @tool(desc="Dangerous user deletion", tags=["unsafe", "admin"])
-async def delete_user(args: SearchQuery, ctx: object) -> Summary:
-    del ctx
+async def delete_user(args: SearchQuery, _ctx: object) -> Summary:
+    """Pretend to delete a user."""
     return Summary(text=f"Deleted user tied to {args.text}")
 
 
-class SequenceLLM:
+class SequenceLLM(JSONLLMClient):
     """Deterministic planner stub returning scripted actions."""
 
     def __init__(self, responses: Sequence[Mapping[str, object]]) -> None:
+        """Replay ``responses`` in order."""
         self._responses = [json.dumps(item) for item in responses]
 
+    @override
     async def complete(
         self,
         *,
-        messages: Sequence[Mapping[str, str]],
-        response_format: Mapping[str, object] | None = None,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
-        on_stream_chunk: object = None,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> str:
-        del messages, response_format
         if not self._responses:
-            raise RuntimeError("SequenceLLM has no responses left")
+            msg = "SequenceLLM has no responses left"
+            raise RuntimeError(msg)
         return self._responses.pop(0)
 
 
@@ -83,18 +100,20 @@ async def run_policy(
     registry: ModelRegistry,
     responses: Sequence[Mapping[str, object]],
 ) -> None:
+    """Run a query with the planner restricted by ``policy``."""
     planner = ReactPlanner(
         llm_client=SequenceLLM(responses),
         catalog=build_catalog(catalog, registry),
         tool_policy=policy,
     )
-    print(f"{name} visible tools: {sorted(planner._spec_by_name)}")
+    sys.stdout.write(f"{name} visible tools: {sorted(planner.spec_by_name)}\n")
     result = await planner.run("Share onboarding learnings")
-    print(f"{name} final payload: {result.payload}")
-    print()
+    sys.stdout.write(f"{name} final payload: {result.payload}\n")
+    sys.stdout.write("\n")
 
 
 async def main() -> None:
+    """Run the example."""
     registry = ModelRegistry()
     registry.register("search_public", SearchQuery, SearchDocs)
     registry.register("search_internal", SearchQuery, SearchDocs)
@@ -111,7 +130,9 @@ async def main() -> None:
     ]
 
     free_policy = ToolPolicy(allowed_tools={"search_public", "summarise"})
-    premium_policy = ToolPolicy(denied_tools={"delete_user"}, require_tags={"safe"})
+    premium_policy = ToolPolicy(
+        denied_tools={"delete_user"}, require_tags={"safe"}
+    )
     enterprise_policy = ToolPolicy()
 
     await run_policy(

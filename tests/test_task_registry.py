@@ -1,8 +1,14 @@
+"""Tests for task registry."""
+
 from __future__ import annotations
 
 import pytest
 
-from penguiflow.sessions.models import TaskContextSnapshot, TaskStatus, TaskType
+from penguiflow.sessions.models import (
+    TaskContextSnapshot,
+    TaskStatus,
+    TaskType,
+)
 from penguiflow.sessions.registry import TaskRegistry
 
 
@@ -12,6 +18,7 @@ def _snapshot(session_id: str, task_id: str) -> TaskContextSnapshot:
 
 @pytest.mark.asyncio
 async def test_task_registry_create_update_and_remove() -> None:
+    """Task registry create update and remove."""
     registry = TaskRegistry()
     snapshot = _snapshot("session-1", "task-1")
     task = await registry.create_task(
@@ -48,6 +55,7 @@ async def test_task_registry_create_update_and_remove() -> None:
 
 @pytest.mark.asyncio
 async def test_task_registry_list_active_filters_status() -> None:
+    """Task registry list active filters status."""
     registry = TaskRegistry()
     task_a = await registry.create_task(
         session_id="session-2",

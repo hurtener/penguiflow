@@ -7,13 +7,16 @@ to refresh the bundled references.
 
 Example (from the PenguiFlow repo root):
 
-    python3 ~/.codex/skills/penguiflow-statestore/scripts/sync_references_from_repo.py --repo .
+    python3
+    ~/.codex/skills/penguiflow-statestore/scripts/sync_references_from_repo.py
+    --repo .
 """
 
 from __future__ import annotations
 
 import argparse
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -29,20 +32,33 @@ def _detect_repo_root(candidate: Path) -> Path | None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sync PenguiFlow StateStore skill references from a repo checkout.")
+    """Copy the reference files from the repository into the skill."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Sync PenguiFlow StateStore skill references from a repo checkout."
+        )
+    )
     parser.add_argument(
         "--repo",
         type=Path,
         default=Path.cwd(),
         help="Path to PenguiFlow repo root (defaults to CWD).",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Print planned copies without writing files.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned copies without writing files.",
+    )
     args = parser.parse_args()
 
     repo_root = _detect_repo_root(args.repo.resolve())
     if repo_root is None:
-        print("ERROR: --repo does not look like a PenguiFlow repo root.", flush=True)
-        print(f"Checked: {args.repo.resolve()}", flush=True)
+        sys.stdout.write(
+            "ERROR: --repo does not look like a PenguiFlow repo root.\n"
+        )
+        sys.stdout.flush()
+        sys.stdout.write(f"Checked: {args.repo.resolve()}\n")
+        sys.stdout.flush()
         return 2
 
     skill_dir = Path(__file__).resolve().parents[1]
@@ -62,22 +78,25 @@ def main() -> int:
             repo_root / "docs/tools/artifacts-and-resources.md",
             refs_dir / "artifacts-and-resources.md",
         ),
-        # references/distributed-execution.md is maintained in this skill (no repo source).
+        # references/distributed-execution.md is maintained in this skill (no
+        # repo source).
     ]
 
     for src, dest in copies:
         if not src.exists():
-            print(f"ERROR: missing source file: {src}", flush=True)
+            sys.stdout.write(f"ERROR: missing source file: {src}\n")
+            sys.stdout.flush()
             return 2
         if args.dry_run:
-            print(f"[DRY] {src} -> {dest}", flush=True)
+            sys.stdout.write(f"[DRY] {src} -> {dest}\n")
+            sys.stdout.flush()
             continue
         shutil.copy2(src, dest)
-        print(f"[OK] {src} -> {dest}", flush=True)
+        sys.stdout.write(f"[OK] {src} -> {dest}\n")
+        sys.stdout.flush()
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

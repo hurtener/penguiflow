@@ -6,29 +6,34 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
 from ..llm.types import AudioPart, ContentPart, ImagePart
 from .migration import dump_action_legacy, normalize_action
-from .models import PlannerAction
+
+if TYPE_CHECKING:
+    from .models import PlannerAction
 
 
 class TrajectorySummary(BaseModel):
     """Compact, LLM-facing summary of a trajectory's progress.
 
-    Produced by :meth:`Trajectory.compress` (or restored via ``model_validate``) to
-    give callers/LLMs a bounded, JSON-serialisable snapshot of what a run has
-    accomplished so far.
+    Produced by :meth:`Trajectory.compress` (or restored via
+    ``model_validate``) to give callers/LLMs a bounded, JSON-serialisable
+    snapshot of what a run has accomplished so far.
 
     Attributes:
         goals: List of goal statements the trajectory is working toward.
-        facts: Arbitrary key/value facts gathered while executing the trajectory.
-        pending: List of pending follow-up actions (e.g., retries) still outstanding.
-        last_output_digest: Truncated string digest of the most recent observation,
-            if any.
-        note: Optional free-form annotation describing how the summary was produced.
+        facts: Arbitrary key/value facts gathered while executing the
+            trajectory.
+        pending: List of pending follow-up actions (e.g., retries) still
+            outstanding.
+        last_output_digest: Truncated string digest of the most recent
+            observation, if any.
+        note: Optional free-form annotation describing how the summary was
+            produced.
     """
 
     goals: list[str] = []
@@ -63,9 +68,12 @@ class BackgroundTaskResult:
     """Result from a completed background task, stored in trajectory.
 
     Attributes:
-        task_id: Unique identifier of the background task this result belongs to.
-        group_id: Optional identifier grouping related background tasks together.
-        status: Terminal status of the task, either ``"completed"`` or ``"failed"``.
+        task_id: Unique identifier of the background task this result belongs
+            to.
+        group_id: Optional identifier grouping related background tasks
+            together.
+        status: Terminal status of the task, either ``"completed"`` or
+            ``"failed"``.
         summary: Optional human-readable summary of the task's outcome.
         payload: Arbitrary result payload produced by the task.
         facts: Structured facts extracted from the task's execution.
@@ -85,13 +93,16 @@ class BackgroundTaskResult:
     completed_at: float = field(default_factory=time.time)
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> BackgroundTaskResult | None:
+    def from_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> BackgroundTaskResult | None:
         """Build a :class:`BackgroundTaskResult` from a raw mapping payload.
 
         Args:
-            payload: Mapping containing at least a ``task_id`` key, plus optional
-                ``status``, ``summary``, ``digest``, ``facts``, ``artifacts``,
-                ``group_id``, ``payload``, ``consumed``, and ``completed_at`` keys.
+            payload: Mapping containing at least a ``task_id`` key, plus
+                optional ``status``, ``summary``, ``digest``, ``facts``,
+                ``artifacts``, ``group_id``, ``payload``, ``consumed``, and
+                ``completed_at`` keys.
 
         Returns:
             BackgroundTaskResult | None: The constructed result, or ``None`` if
@@ -101,7 +112,9 @@ class BackgroundTaskResult:
         if not isinstance(task_id, str) or not task_id:
             return None
         status_value = payload.get("status")
-        status: Literal["completed", "failed"] = "failed" if status_value == "failed" else "completed"
+        status: Literal["completed", "failed"] = (
+            "failed" if status_value == "failed" else "completed"
+        )
         summary = payload.get("summary")
         digest = payload.get("digest")
         if summary is None and isinstance(digest, list):
@@ -113,16 +126,26 @@ class BackgroundTaskResult:
             completed_at = None
         return cls(
             task_id=task_id,
-            group_id=payload.get("group_id") if isinstance(payload.get("group_id"), str) else None,
+            group_id=payload.get("group_id")
+            if isinstance(payload.get("group_id"), str)
+            else None,
             status=status,
             summary=summary,
             payload=payload.get("payload"),
-            facts=dict(facts_value) if isinstance(facts_value, Mapping) else {},
-            artifacts=[dict(item) for item in artifacts_value if isinstance(item, Mapping)]
+            facts=dict(facts_value)
+            if isinstance(facts_value, Mapping)
+            else {},
+            artifacts=[
+                dict(item)
+                for item in artifacts_value
+                if isinstance(item, Mapping)
+            ]
             if isinstance(artifacts_value, list)
             else [],
             consumed=bool(payload.get("consumed", False)),
-            completed_at=float(completed_at) if completed_at is not None else time.time(),
+            completed_at=float(completed_at)
+            if completed_at is not None
+            else time.time(),
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -130,8 +153,8 @@ class BackgroundTaskResult:
 
         Returns:
             dict[str, Any]: A dict with ``task_id``, ``group_id``, ``status``,
-            ``summary``, ``payload`` (passed through JSON-safe coercion), ``facts``,
-            ``artifacts``, ``consumed``, and ``completed_at`` keys.
+            ``summary``, ``payload`` (passed through JSON-safe coercion),
+            ``facts``, ``artifacts``, ``consumed``, and ``completed_at`` keys.
         """
         payload: dict[str, Any] = {
             "task_id": self.task_id,
@@ -147,7 +170,7 @@ class BackgroundTaskResult:
         return payload
 
 
-def _safe_json_payload(value: Any) -> Any:
+def _safe_json_payload(value: object) -> object:
     try:
         return json.loads(json.dumps(value, ensure_ascii=False))
     except (TypeError, ValueError):
@@ -172,20 +195,20 @@ def _input_part_stub(part: ContentPart) -> dict[str, Any] | None:
 
 
 def _input_part_stubs(parts: Sequence[ContentPart]) -> list[dict[str, Any]]:
-    return [stub for part in parts if (stub := _input_part_stub(part)) is not None]
+    return [
+        stub for part in parts if (stub := _input_part_stub(part)) is not None
+    ]
 
 
-def coerce_background_results(raw: Any) -> dict[str, BackgroundTaskResult]:
+def coerce_background_results(raw: object) -> dict[str, BackgroundTaskResult]:
+    """Coerce stored background results into BackgroundTaskResult models."""
     if raw is None:
         return {}
     items: list[Any] = []
     if isinstance(raw, BackgroundTaskResult):
         items = [raw]
     elif isinstance(raw, Mapping):
-        if "task_id" in raw:
-            items = [raw]
-        else:
-            items = list(raw.values())
+        items = [raw] if "task_id" in raw else list(raw.values())
     elif isinstance(raw, list):
         items = raw
     results: dict[str, BackgroundTaskResult] = {}
@@ -206,6 +229,7 @@ def coerce_background_results(raw: Any) -> dict[str, BackgroundTaskResult]:
 def extract_background_results(
     llm_context: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, dict[str, BackgroundTaskResult]]:
+    """Split background results out of an llm_context."""
     if not isinstance(llm_context, Mapping):
         return None, {}
     extracted: list[Any] = []
@@ -219,24 +243,27 @@ def extract_background_results(
     for item in extracted:
         results.update(coerce_background_results(item))
     cleaned = {
-        key: value for key, value in llm_context.items() if key not in {"background_result", "background_results"}
+        key: value
+        for key, value in llm_context.items()
+        if key not in {"background_result", "background_results"}
     }
     return cleaned, results
 
 
 @dataclass(slots=True)
 class TrajectoryStep:
-    """A single recorded step (action + observation) within a :class:`Trajectory`.
+    """One recorded step (action + observation) of a :class:`Trajectory`.
 
     Attributes:
         action: The planner action that was executed for this step.
-        observation: Raw observation/result returned by executing ``action``, if any.
+        observation: Raw observation/result returned by executing ``action``,
+            if any.
         llm_observation: Optional pre-serialised observation tailored for LLM
             consumption, used in place of ``observation`` when present.
         error: Optional error message if the step failed.
         failure: Optional mapping with structured failure details.
-        streams: Optional mapping of stream id to the sequence of chunks emitted on
-            that stream during this step.
+        streams: Optional mapping of stream id to the sequence of chunks
+            emitted on that stream during this step.
     """
 
     action: PlannerAction
@@ -251,8 +278,8 @@ class TrajectoryStep:
 
         Returns:
             dict[str, Any]: A dict with ``action`` (legacy-format action dump),
-            ``observation``, ``error``, and ``failure`` keys, plus ``llm_observation``
-            and ``streams`` when set.
+            ``observation``, ``error``, and ``failure`` keys, plus
+            ``llm_observation`` and ``streams`` when set.
         """
         payload: dict[str, Any] = {
             "action": dump_action_legacy(self.action),
@@ -264,20 +291,21 @@ class TrajectoryStep:
             payload["llm_observation"] = self.llm_observation
         if self.streams:
             payload["streams"] = {
-                stream_id: [dict(chunk) for chunk in chunks] for stream_id, chunks in self.streams.items()
+                stream_id: [dict(chunk) for chunk in chunks]
+                for stream_id, chunks in self.streams.items()
             }
         return payload
 
-    def _serialise_observation(self) -> Any:
+    def _serialise_observation(self) -> object:
         if isinstance(self.observation, BaseModel):
             return self.observation.model_dump(mode="json")
         return self.observation
 
-    def serialise_for_llm(self) -> Any:
+    def serialise_for_llm(self) -> object:
         """Return the observation representation to send to the LLM.
 
-        Prefers ``llm_observation`` when set, otherwise falls back to the serialised
-        ``observation``.
+        Prefers ``llm_observation`` when set, otherwise falls back to the
+        serialised ``observation``.
 
         Returns:
             Any: The LLM-facing observation value for this step.
@@ -287,30 +315,64 @@ class TrajectoryStep:
         return self._serialise_observation()
 
 
+def _streams_from_serialised(
+    streams_payload: object,
+) -> dict[str, tuple[Mapping[str, Any], ...]] | None:
+    """Restore a step's stream chunks, dropping malformed entries."""
+    if not isinstance(streams_payload, Mapping):
+        return None
+    normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    for stream_id, chunk_list in streams_payload.items():
+        if not isinstance(chunk_list, Sequence):
+            continue
+        chunks = tuple(
+            dict(chunk) for chunk in chunk_list if isinstance(chunk, Mapping)
+        )
+        if chunks:
+            normalised_streams[str(stream_id)] = chunks
+    return normalised_streams
+
+
+def _step_from_serialised(step_data: Mapping[str, Any]) -> TrajectoryStep:
+    """Restore one serialised trajectory step."""
+    return TrajectoryStep(
+        action=normalize_action(step_data["action"]),
+        observation=step_data.get("observation"),
+        llm_observation=step_data.get("llm_observation"),
+        error=step_data.get("error"),
+        failure=step_data.get("failure"),
+        streams=_streams_from_serialised(step_data.get("streams")),
+    )
+
+
 @dataclass(slots=True)
 class Trajectory:
-    """Mutable record of a planner run: inputs, executed steps, and derived state.
+    """Mutable record of a planner run: inputs, steps and derived state.
 
-    Tracks the original query and context alongside every :class:`TrajectoryStep`
-    executed so far, plus auxiliary state (artifacts, sources, background task
-    results, hints) needed to resume or summarise the run.
+    Tracks the original query and context alongside every
+    :class:`TrajectoryStep` executed so far, plus auxiliary state (artifacts,
+    sources, background task results, hints) needed to resume or summarise the
+    run.
 
     Attributes:
         query: The original user query that started this trajectory.
         llm_context: Optional read-only context mapping shared with the LLM.
         tool_context: Optional mutable context mapping available to tools.
-        input_parts: Tuple of non-text content parts (images/audio) supplied with the
-            query.
+        input_parts: Tuple of non-text content parts (images/audio) supplied
+            with the query.
         artifacts: Named artifacts accumulated over the run.
         sources: List of source records (as mappings) collected during the run.
         metadata: Arbitrary metadata associated with the run.
         steps: Ordered list of executed :class:`TrajectoryStep` instances.
-        summary: Optional compact :class:`TrajectorySummary` of progress so far.
+        summary: Optional compact :class:`TrajectorySummary` of progress so
+            far.
         hint_state: Mutable state used to track planner hints across steps.
-        resume_user_input: Optional user input supplied when resuming a paused run.
-        steering_inputs: List of user steering messages injected during the run.
-        background_results: Mapping of task id to :class:`BackgroundTaskResult` for
-            completed background tasks.
+        resume_user_input: Optional user input supplied when resuming a paused
+            run.
+        steering_inputs: List of user steering messages injected during the
+            run.
+        background_results: Mapping of task id to :class:`BackgroundTaskResult`
+            for completed background tasks.
     """
 
     query: str
@@ -325,14 +387,16 @@ class Trajectory:
     hint_state: dict[str, Any] = field(default_factory=dict)
     resume_user_input: str | None = None
     steering_inputs: list[str] = field(default_factory=list)
-    background_results: dict[str, BackgroundTaskResult] = field(default_factory=dict)
+    background_results: dict[str, BackgroundTaskResult] = field(
+        default_factory=dict
+    )
 
     def to_history(self) -> list[dict[str, Any]]:
         """Return the dumped history of all steps.
 
         Returns:
-            list[dict[str, Any]]: One serialised dict (via :meth:`TrajectoryStep.dump`)
-            per step, in execution order.
+            list[dict[str, Any]]: One serialised dict (via
+            :meth:`TrajectoryStep.dump`) per step, in execution order.
         """
         return [step.dump() for step in self.steps]
 
@@ -340,7 +404,8 @@ class Trajectory:
         """Record a completed background task result on this trajectory.
 
         Args:
-            result: The background task result to store, keyed by its ``task_id``.
+            result: The background task result to store, keyed by its
+                ``task_id``.
         """
         self.background_results[result.task_id] = result
 
@@ -351,7 +416,8 @@ class Trajectory:
             task_id: Identifier of the background task result to mark.
 
         Returns:
-            bool: True if a result with ``task_id`` was found and marked consumed,
+            bool: True if a result with ``task_id`` was found and marked
+                consumed,
             False if no such result exists.
         """
         if task_id in self.background_results:
@@ -365,7 +431,11 @@ class Trajectory:
         Returns:
             int: The number of background task results that were removed.
         """
-        to_remove = [task_id for task_id, result in self.background_results.items() if result.consumed]
+        to_remove = [
+            task_id
+            for task_id, result in self.background_results.items()
+            if result.consumed
+        ]
         for task_id in to_remove:
             del self.background_results[task_id]
         return len(to_remove)
@@ -377,7 +447,11 @@ class Trajectory:
             dict[str, BackgroundTaskResult]: Mapping of task id to result, for
             entries whose ``consumed`` flag is False.
         """
-        return {task_id: result for task_id, result in self.background_results.items() if not result.consumed}
+        return {
+            task_id: result
+            for task_id, result in self.background_results.items()
+            if not result.consumed
+        }
 
     def serialise(self) -> dict[str, Any]:
         """Serialise the full trajectory to a plain, JSON-safe dict.
@@ -386,13 +460,16 @@ class Trajectory:
             dict[str, Any]: A dict capturing ``query``, ``llm_context``,
             ``tool_context``, ``input_parts`` (stubbed for binary content),
             ``artifacts``, ``sources``, ``metadata``, ``steps`` (via
-            :meth:`to_history`), ``summary``, ``hint_state``, ``resume_user_input``,
-            ``steering_inputs``, and ``background_results``.
+            :meth:`to_history`), ``summary``, ``hint_state``,
+            ``resume_user_input``, ``steering_inputs``, and
+            ``background_results``.
         """
         tool_context: dict[str, Any] | None = None
         if self.tool_context is not None:
             try:
-                tool_context = json.loads(json.dumps(self.tool_context, ensure_ascii=False))
+                tool_context = json.loads(
+                    json.dumps(self.tool_context, ensure_ascii=False)
+                )
             except (TypeError, ValueError):
                 tool_context = None
         return {
@@ -404,20 +481,25 @@ class Trajectory:
             "sources": [dict(src) for src in self.sources],
             "metadata": dict(self.metadata),
             "steps": self.to_history(),
-            "summary": self.summary.model_dump(mode="json") if self.summary else None,
+            "summary": self.summary.model_dump(mode="json")
+            if self.summary
+            else None,
             "hint_state": dict(self.hint_state),
             "resume_user_input": self.resume_user_input,
             "steering_inputs": list(self.steering_inputs),
-            "background_results": {task_id: result.to_payload() for task_id, result in self.background_results.items()},
+            "background_results": {
+                task_id: result.to_payload()
+                for task_id, result in self.background_results.items()
+            },
         }
 
     @classmethod
     def from_serialised(cls, payload: Mapping[str, Any]) -> Trajectory:
-        """Reconstruct a :class:`Trajectory` from a previously serialised payload.
+        """Rebuild a :class:`Trajectory` from a serialised payload.
 
         Args:
-            payload: Mapping produced by :meth:`serialise` (or a compatible legacy
-                shape), containing at minimum a ``query`` key.
+            payload: Mapping produced by :meth:`serialise` (or a compatible
+                legacy shape), containing at minimum a ``query`` key.
 
         Returns:
             Trajectory: A new trajectory populated from ``payload``, including
@@ -434,30 +516,10 @@ class Trajectory:
         )
         if isinstance(payload.get("metadata"), Mapping):
             trajectory.metadata.update(dict(payload["metadata"]))
-        for step_data in payload.get("steps", []):
-            action = normalize_action(step_data["action"])
-            streams_payload = step_data.get("streams")
-            normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] | None = None
-            if isinstance(streams_payload, Mapping):
-                normalised_streams = {}
-                for stream_id, chunk_list in streams_payload.items():
-                    if not isinstance(chunk_list, Sequence):
-                        continue
-                    chunks: list[Mapping[str, Any]] = []
-                    for chunk in chunk_list:
-                        if isinstance(chunk, Mapping):
-                            chunks.append(dict(chunk))
-                    if chunks:
-                        normalised_streams[str(stream_id)] = tuple(chunks)
-            step = TrajectoryStep(
-                action=action,
-                observation=step_data.get("observation"),
-                llm_observation=step_data.get("llm_observation"),
-                error=step_data.get("error"),
-                failure=step_data.get("failure"),
-                streams=normalised_streams,
-            )
-            trajectory.steps.append(step)
+        trajectory.steps.extend(
+            _step_from_serialised(step_data)
+            for step_data in payload.get("steps", [])
+        )
         summary_data = payload.get("summary")
         if summary_data:
             trajectory.summary = TrajectorySummary.model_validate(summary_data)
@@ -470,15 +532,17 @@ class Trajectory:
                 trajectory.sources.append(dict(src))
         background_payloads = payload.get("background_results")
         if background_payloads:
-            trajectory.background_results.update(coerce_background_results(background_payloads))
+            trajectory.background_results.update(
+                coerce_background_results(background_payloads)
+            )
         return trajectory
 
     def compress(self) -> TrajectorySummary:
-        """Compute and store a compact :class:`TrajectorySummary` for this trajectory.
+        """Compute and store a compact :class:`TrajectorySummary`.
 
-        Derives goals, gathered facts, pending retry actions, and a truncated digest
-        of the last observation from the recorded steps, using simple rule-based
-        heuristics (no LLM call).
+        Derives goals, gathered facts, pending retry actions, and a truncated
+        digest of the last observation from the recorded steps, using simple
+        rule-based heuristics (no LLM call).
 
         Returns:
             TrajectorySummary: The computed summary, which is also assigned to
@@ -499,12 +563,20 @@ class Trajectory:
                 facts["last_error"] = last_step.error
         for step in self.steps:
             if step.error:
-                pending_target = "finish" if step.action.next_node == "final_response" else step.action.next_node
+                pending_target = (
+                    "finish"
+                    if step.action.next_node == "final_response"
+                    else step.action.next_node
+                )
                 pending.append(f"retry {pending_target}")
         digest = None
         if last_observation is not None:
             digest_raw = json.dumps(last_observation, ensure_ascii=False)
-            digest = digest_raw if len(digest_raw) <= 120 else f"{digest_raw[:117]}..."
+            digest = (
+                digest_raw
+                if len(digest_raw) <= 120
+                else f"{digest_raw[:117]}..."
+            )
         summary = TrajectorySummary(
             goals=[self.query],
             facts=facts,

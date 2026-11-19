@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,12 +12,24 @@ from penguiflow.llm.errors import (
     LLMCancelledError,
     LLMTimeoutError,
 )
+from penguiflow.llm.providers.anthropic import _to_anthropic_messages
 from penguiflow.llm.types import (
     LLMMessage,
     LLMRequest,
     StreamEvent,
     TextPart,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from penguiflow.llm.providers.anthropic import AnthropicProvider
+    from penguiflow.llm.providers.openai import OpenAIProvider
+    from penguiflow.llm.types import (
+        CancelToken,
+        CompletionResponse,
+        StreamCallback,
+    )
 
 
 class TestOpenAIProviderComplete:
@@ -80,17 +92,25 @@ class TestOpenAIProviderComplete:
             # Setup mock
             mock_response = self._create_mock_response("Hello from OpenAI!")
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=mock_response
+            )
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-            provider._timeout = 60.0
-            provider._client = mock_client
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+                timeout=60.0,
+                client=mock_client,
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -108,21 +128,33 @@ class TestOpenAIProviderComplete:
             mock_response = self._create_mock_response(
                 content="",
                 tool_calls=[
-                    {"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}
+                    {
+                        "id": "call_123",
+                        "name": "get_weather",
+                        "arguments": '{"city": "NYC"}',
+                    }
                 ],
             )
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=mock_response
+            )
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-            provider._timeout = 60.0
-            provider._client = mock_client
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+                timeout=60.0,
+                client=mock_client,
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Weather?")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Weather?")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -141,17 +173,25 @@ class TestOpenAIProviderComplete:
             from penguiflow.llm.providers.openai import OpenAIProvider
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(side_effect=TimeoutError("timeout"))
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=TimeoutError("timeout")
+            )
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-            provider._timeout = 60.0
-            provider._client = mock_client
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+                timeout=60.0,
+                client=mock_client,
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMTimeoutError) as exc_info:
@@ -170,15 +210,21 @@ class TestOpenAIProviderComplete:
                 side_effect=asyncio.CancelledError()
             )
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-            provider._timeout = 60.0
-            provider._client = mock_client
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+                timeout=60.0,
+                client=mock_client,
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
@@ -190,18 +236,24 @@ class TestOpenAIProviderComplete:
         with patch.dict("sys.modules", {"openai": MagicMock()}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-            provider._timeout = 60.0
-            provider._client = MagicMock()
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+                timeout=60.0,
+                client=MagicMock(),
+            )
 
             cancel_token = MagicMock()
             cancel_token.is_cancelled.return_value = True
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             with pytest.raises(LLMCancelledError):
@@ -211,15 +263,14 @@ class TestOpenAIProviderComplete:
 class TestOpenAIProviderErrorMapping:
     """Test OpenAI provider error mapping."""
 
-    def _create_provider(self) -> Any:
+    def _create_provider(self) -> OpenAIProvider:
         """Create a provider for testing error mapping."""
         with patch.dict("sys.modules", {"openai": MagicMock()}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock()
-            return provider
+            return OpenAIProvider(
+                "gpt-4o", api_key="test-key", profile=MagicMock()
+            )
 
     def test_map_unknown_error(self) -> None:
         """Test mapping unknown error."""
@@ -229,7 +280,7 @@ class TestOpenAIProviderErrorMapping:
 
         from penguiflow.llm.errors import LLMError
 
-        result = provider._map_error(exc)
+        result = provider.map_error(exc)
         assert isinstance(result, LLMError)
         assert "Unknown error" in result.message
 
@@ -242,7 +293,7 @@ class TestOpenAIProviderErrorMapping:
         # With no openai module, should return generic LLMError
         from penguiflow.llm.errors import LLMError
 
-        result = provider._map_error(exc)
+        result = provider.map_error(exc)
         assert isinstance(result, LLMError)
         assert "Some runtime error" in result.message
 
@@ -294,16 +345,20 @@ class TestAnthropicProviderComplete:
             mock_client = MagicMock()
             mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-            provider = AnthropicProvider.__new__(AnthropicProvider)
-            provider._model = "claude-3-5-sonnet"
-            provider._profile = MagicMock()
-            provider._timeout = 60.0
-            provider._default_max_tokens = 8192
-            provider._client = mock_client
+            provider = AnthropicProvider(
+                "claude-3-5-sonnet",
+                api_key="test-key",
+                profile=MagicMock(),
+                timeout=60.0,
+                client=mock_client,
+                max_tokens=8192,
+            )
 
             request = LLMRequest(
                 model="claude-3-5-sonnet",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -329,16 +384,20 @@ class TestAnthropicProviderComplete:
             mock_client = MagicMock()
             mock_client.messages.create = AsyncMock(return_value=mock_response)
 
-            provider = AnthropicProvider.__new__(AnthropicProvider)
-            provider._model = "claude-3-5-sonnet"
-            provider._profile = MagicMock()
-            provider._timeout = 60.0
-            provider._default_max_tokens = 8192
-            provider._client = mock_client
+            provider = AnthropicProvider(
+                "claude-3-5-sonnet",
+                api_key="test-key",
+                profile=MagicMock(),
+                timeout=60.0,
+                client=mock_client,
+                max_tokens=8192,
+            )
 
             request = LLMRequest(
                 model="claude-3-5-sonnet",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Weather?")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Weather?")]),
+                ),
             )
 
             response = await provider.complete(request)
@@ -354,25 +413,23 @@ class TestAnthropicProviderComplete:
 class TestAnthropicProviderMessageConversion:
     """Test Anthropic message conversion."""
 
-    def _create_provider(self) -> Any:
+    def _create_provider(self) -> AnthropicProvider:
         """Create a provider for testing."""
         with patch.dict("sys.modules", {"anthropic": MagicMock()}):
             from penguiflow.llm.providers.anthropic import AnthropicProvider
 
-            provider = AnthropicProvider.__new__(AnthropicProvider)
-            provider._model = "claude-3-5-sonnet"
-            return provider
+            return AnthropicProvider("claude-3-5-sonnet", api_key="test-key")
 
     def test_convert_system_message(self) -> None:
         """Test system message extraction."""
-        provider = self._create_provider()
-
         messages = [
-            LLMMessage(role="system", parts=[TextPart(text="You are helpful")]),
+            LLMMessage(
+                role="system", parts=[TextPart(text="You are helpful")]
+            ),
             LLMMessage(role="user", parts=[TextPart(text="Hello")]),
         ]
 
-        system_text, converted = provider._to_anthropic_messages(messages)
+        system_text, converted = _to_anthropic_messages(messages)
 
         assert system_text == "You are helpful"
         assert len(converted) == 1
@@ -381,8 +438,6 @@ class TestAnthropicProviderMessageConversion:
     def test_convert_image_message(self) -> None:
         """Test image message conversion."""
         from penguiflow.llm.types import ImagePart
-
-        provider = self._create_provider()
 
         messages = [
             LLMMessage(
@@ -394,7 +449,7 @@ class TestAnthropicProviderMessageConversion:
             ),
         ]
 
-        system_text, converted = provider._to_anthropic_messages(messages)
+        system_text, converted = _to_anthropic_messages(messages)
 
         assert system_text is None
         assert len(converted) == 1
@@ -405,8 +460,6 @@ class TestAnthropicProviderMessageConversion:
     def test_convert_tool_result(self) -> None:
         """Test tool result message conversion."""
         from penguiflow.llm.types import ToolResultPart
-
-        provider = self._create_provider()
 
         messages = [
             LLMMessage(
@@ -421,7 +474,7 @@ class TestAnthropicProviderMessageConversion:
             ),
         ]
 
-        system_text, converted = provider._to_anthropic_messages(messages)
+        _system_text, converted = _to_anthropic_messages(messages)
 
         assert len(converted) == 1
         assert converted[0]["role"] == "user"
@@ -469,18 +522,24 @@ class TestOpenAIStreamingComplete:
             usage_chunk.usage.total_tokens = 14
             chunks.append(usage_chunk)
 
-            async def async_gen():
+            async def async_gen() -> AsyncIterator[object]:
                 for chunk in chunks:
                     yield chunk
 
             mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=async_gen())
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=async_gen()
+            )
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
-            provider._timeout = 60.0
-            provider._client = mock_client
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+                timeout=60.0,
+                client=mock_client,
+            )
 
             streamed_text = []
 
@@ -490,7 +549,9 @@ class TestOpenAIStreamingComplete:
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             response = await provider.complete(
@@ -514,13 +575,19 @@ class TestProviderBuildParams:
             from penguiflow.llm.providers.openai import OpenAIProvider
             from penguiflow.llm.types import ToolSpec
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 tools=(
                     ToolSpec(
                         name="get_weather",
@@ -533,7 +600,7 @@ class TestProviderBuildParams:
                 max_tokens=100,
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert params["model"] == "gpt-4o"
             assert params["temperature"] == 0.7
@@ -547,21 +614,30 @@ class TestProviderBuildParams:
             from penguiflow.llm.providers.openai import OpenAIProvider
             from penguiflow.llm.types import StructuredOutputSpec
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock(supports_reasoning=False, reasoning_effort_param=None)
+            provider = OpenAIProvider(
+                "gpt-4o",
+                api_key="test-key",
+                profile=MagicMock(
+                    supports_reasoning=False, reasoning_effort_param=None
+                ),
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
                 structured_output=StructuredOutputSpec(
                     name="MySchema",
-                    json_schema={"type": "object", "properties": {"x": {"type": "string"}}},
+                    json_schema={
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                    },
                     strict=True,
                 ),
             )
 
-            params = provider._build_params(request)
+            params = provider.build_params(request)
 
             assert "response_format" in params
             assert params["response_format"]["type"] == "json_schema"
@@ -575,13 +651,15 @@ class TestProviderValidation:
         with patch.dict("sys.modules", {"openai": MagicMock()}):
             from penguiflow.llm.providers.openai import OpenAIProvider
 
-            provider = OpenAIProvider.__new__(OpenAIProvider)
-            provider._model = "gpt-4o"
-            provider._profile = MagicMock()
+            provider = OpenAIProvider(
+                "gpt-4o", api_key="test-key", profile=MagicMock()
+            )
 
             request = LLMRequest(
                 model="gpt-4o",
-                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                messages=(
+                    LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+                ),
             )
 
             # Should not raise
@@ -598,15 +676,24 @@ class TestProviderValidation:
                 return "test"
 
             @property
-            def profile(self) -> Any:
+            def profile(self) -> MagicMock:
                 return MagicMock()
 
             @property
             def model(self) -> str:
                 return "test-model"
 
-            async def complete(self, request: Any, **kwargs: Any) -> Any:
-                pass
+            async def complete(
+                self,
+                request: LLMRequest,
+                *,
+                timeout_s: float | None = None,
+                cancel: CancelToken | None = None,
+                stream: bool = False,
+                on_stream_event: StreamCallback | None = None,
+            ) -> CompletionResponse:
+                msg = "complete() is not used by this test"
+                raise NotImplementedError(msg)
 
         provider = TestProvider()
 

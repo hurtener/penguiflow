@@ -5,7 +5,7 @@ Handles Anthropic's schema requirements for tool use.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from .transformer import JsonSchemaTransformer
 
@@ -18,27 +18,31 @@ class AnthropicJsonSchemaTransformer(JsonSchemaTransformer):
     - Add additionalProperties: false when strict
     - Strip title and $schema fields
 
-    Anthropic uses tool definitions with JSON schemas, but with
-    some constraints needing to be expressed in descriptions.
+    Anthropic uses tool definitions with JSON schemas, but with some
+    constraints needing to be expressed in descriptions.
 
     Reference: https://docs.anthropic.com/en/docs/tool-use
     """
 
-    RELOCATE_TO_DESCRIPTION = {
-        "minLength",
-        "maxLength",
-        "pattern",
-        "format",
-        "minimum",
-        "maximum",
-        "exclusiveMinimum",
-        "exclusiveMaximum",
-        "minItems",
-        "maxItems",
-    }
+    RELOCATE_TO_DESCRIPTION: ClassVar[frozenset[str]] = frozenset(
+        {
+            "minLength",
+            "maxLength",
+            "pattern",
+            "format",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "minItems",
+            "maxItems",
+        }
+    )
 
-    def __init__(self, schema: dict[str, Any], *, strict: bool = False):
-        """Initialize with strict=False as Anthropic requires lossy transformation."""
+    def __init__(
+        self, schema: dict[str, Any], *, strict: bool = False
+    ) -> None:
+        """Initialize with strict=False; Anthropic needs lossy transforms."""
         super().__init__(schema, strict=strict)
 
     def _transform_node(self, node: dict[str, Any]) -> dict[str, Any]:

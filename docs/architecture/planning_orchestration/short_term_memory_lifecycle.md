@@ -49,7 +49,7 @@ Inside `react_runtime.py` the entry helpers call `_resolve_memory_key` (`planner
 | ephemeral fallback | When no key is available **and** `isolation.require_explicit_key=False`, generate `MemoryKey(tenant="default", user="anonymous", session=uuid4().hex)` once and cache it on the planner | `memory_integration.py:_resolve_memory_key` |
 | no-key skip | If `require_explicit_key=True` and nothing was extracted, return `None` — STM is silently disabled for this request | same |
 
-`_get_memory_for_key` (`memory_integration.py:58`) then resolves the actual store: a planner-wide singleton if one was supplied, otherwise a per-key `DefaultShortTermMemory` cached in `planner._memory_by_key[composite]`. Per-key instances are created lazily and survive across runs of the same planner instance.
+`_get_memory_for_key` (`memory_integration.py:58`) then resolves the actual store: a planner-wide singleton if one was supplied, otherwise a per-key `DefaultShortTermMemory` cached in `planner.memory_by_key[composite]`. Per-key instances are created lazily and survive across runs of the same planner instance.
 
 ---
 
@@ -79,7 +79,7 @@ flowchart LR
 
 | Node | Key operation | Sync/async | Source ref |
 |------|---------------|------------|------------|
-| hydrate | If `planner._state_store` is set and the memory exposes `hydrate`, call `store.load_memory_state(composite)` and replay via `from_dict`; warn-and-continue on failure | Async (state store) | `memory_integration.py:_maybe_memory_hydrate` |
+| hydrate | If `planner.state_store` is set and the memory exposes `hydrate`, call `store.load_memory_state(composite)` and replay via `from_dict`; warn-and-continue on failure | Async (state store) | `memory_integration.py:_maybe_memory_hydrate` |
 | get_llm_context | Acquire memory lock; for `truncation` return `{recent_turns}`; for `rolling_summary` return `{recent_turns, pending_turns?, summary?}`; for `none` return `{}`; if health is `DEGRADED`, drop summary/pending and return only `recent_turns` | Async (lock) | `memory.py:get_llm_context` |
 | merge | Shallow-merge the patch into a copy of `llm_context`; verify JSON-serialisability via `json.dumps`; on failure log `memory_context_not_json_serialisable` and return the original context unchanged | Sync | `memory_integration.py:_apply_memory_context` |
 
@@ -128,7 +128,7 @@ When the planner finishes, the completed exchange is added to STM so it can be r
 |------|---------------|------------|------------|
 | build turn | `_build_memory_turn`: extract `assistant_response` from `result.payload['raw_answer']` (or JSON-serialise the payload), fold trajectory steps into a `TrajectoryDigest` (only successful tool steps; observations truncated to 400 chars); skip digest if `include_trajectory_digest=False` | Sync | `memory_integration.py:_build_memory_turn` |
 | add_turn | Acquire lock; append to `_turns`; fire `on_turn_added`; for `truncation` drop oldest beyond `full_zone_turns` and enforce budget; for `rolling_summary` evict overflow into `_pending` and schedule summarization | Async (lock + task) | `memory.py:add_turn` |
-| persist | If `planner._state_store` is set and the memory exposes `persist`, call `store.save_memory_state(composite, to_dict())`; warn-and-continue on failure | Async (state store) | `memory_integration.py:_maybe_memory_persist` |
+| persist | If `planner.state_store` is set and the memory exposes `persist`, call `store.save_memory_state(composite, to_dict())`; warn-and-continue on failure | Async (state store) | `memory_integration.py:_maybe_memory_persist` |
 
 `add_turn` enforces budgets **before** persistence runs, so the persisted snapshot never exceeds `total_max_tokens` under `truncate_summary` / `truncate_oldest` policies. Under `overflow_policy="error"`, `MemoryBudgetExceeded` is raised inside `add_turn`; the surrounding `_maybe_record_memory_turn` catches the exception, logs `memory_add_turn_failed`, and skips persistence — the in-memory state is left as the strategy's truncation rules dictate.
 
@@ -221,7 +221,7 @@ There is no overnight consolidation, no decay, no re-embedding. STM is reactive:
 When `ReactPlanner(short_term_memory=<ShortTermMemory>)` receives an instance instead of a config, the planner uses that instance for **every** call regardless of `MemoryKey`. `_get_memory_for_key` short-circuits to the singleton. Use this for single-tenant CLIs or tests; never use it in multi-tenant deployments because cross-session isolation is bypassed.
 
 ### Ephemeral keys
-With `MemoryIsolation(require_explicit_key=False)` and no extractable session in `tool_context`, the planner generates a single `MemoryKey(tenant="default", user="anonymous", session=uuid4().hex)` per planner instance and caches it on `planner._memory_ephemeral_key`. All requests without an explicit key share that one slot — useful for local dev, never appropriate for production multi-tenant traffic.
+With `MemoryIsolation(require_explicit_key=False)` and no extractable session in `tool_context`, the planner generates a single `MemoryKey(tenant="default", user="anonymous", session=uuid4().hex)` per planner instance and caches it on `planner.memory_ephemeral_key`. All requests without an explicit key share that one slot — useful for local dev, never appropriate for production multi-tenant traffic.
 
 ### Strategy = "none"
 The fast path: `add_turn` and `get_llm_context` short-circuit to no-ops at the top of each method. `_resolve_memory_key` returns `None` immediately when neither a singleton nor a non-`none` strategy is configured, so no key is generated. Use this when you want the planner's lifecycle hooks to remain wired (for instrumentation) but want zero memory state.
@@ -233,7 +233,7 @@ The fast path: `add_turn` and `get_llm_context` short-circuit to no-ops at the t
 `ShortTermMemoryConfig.summarizer_model` selects a dedicated client built in `react_init.py:614+` (DSPy auto-wires when the planner client is DSPy; otherwise `summarizer_model` must point to a model the planner's LLM client can dispatch). The wire-format is `Mapping[str, Any]` in / `Mapping[str, Any]` out, with keys `previous_summary`, `turns` (list of `_turn_to_llm_dict` outputs) on input and `summary` (string) on output. Replace via dependency injection if you need a non-LLM summarizer.
 
 ### Per-key vs per-planner state stores
-The state store is wired on the planner (`planner._state_store`), not per-key. All keys persisted by the same planner share the same store; the `composite()` string is the namespace. If you need per-tenant stores, run separate planner instances or implement a router-style store that fans out by composite prefix.
+The state store is wired on the planner (`planner.state_store`), not per-key. All keys persisted by the same planner share the same store; the `composite()` string is the namespace. If you need per-tenant stores, run separate planner instances or implement a router-style store that fans out by composite prefix.
 
 ### Pause / resume
 `react_runtime.py:_resume_internal` re-runs `_resolve_memory_key` and `_apply_memory_context` against `trajectory.tool_context`, so resumed trajectories see the same `conversation_memory` patch they would have seen on a fresh run. Only `PlannerFinish` triggers `_maybe_record_memory_turn`; intermediate `PlannerPause` results never write to STM, so a long HITL pause does not pollute future recall with partial answers.
