@@ -93,10 +93,26 @@ Rich output (charts, tables, forms, interactive HITL components) is owned by [[p
 - Hard rule: streaming is a final-response affordance; intermediate planner steps remain non-streamed JSON.
 
 ### 8) Expose the agent over A2A without a standalone server
-Prefer the router-first A2A binding for spec-compliant `A2AService` integrations:
+Wrap the planner itself in an `A2AService` (no flow wrapper) and mount it with the router-first binding:
+
+```python
+from penguiflow.planner import ToolVisibilityPolicy
+from penguiflow_a2a import A2AConfig, A2AService, install_a2a_http
+
+service = A2AService(
+    planner,
+    agent_card=agent_card,
+    config=A2AConfig(agent_url="https://agent.example.com"),
+    tool_visibility=a2a_visibility,   # ToolVisibilityPolicy applied to every A2A run
+)
+install_a2a_http(app, service)
+```
+
 - Use `install_a2a_http(app, service)` when the host app owns the FastAPI instance.
 - Use `create_a2a_http_router(service)` when the host app wants explicit `include_router(...)` composition.
 - Keep `create_a2a_http_app(service)` only as the convenience path for standalone agents.
+
+Each A2A task is one `planner.run()`: the A2A `contextId` becomes `tool_context["session_id"]` (per-conversation serialization and memory), a `PlannerPause` becomes `input-required` and the next message to that task resumes it, and `tasks/cancel` cancels through steering. Details in [[penguiflow-a2a-integration]].
 
 Practical rules:
 - Keep `/.well-known/agent-card.json` installed at the app level, not inside a reusable router.
@@ -104,14 +120,14 @@ Practical rules:
 - Do not add app-global validation handlers just for A2A routes; parse and map A2A request errors inside the binding so unrelated host routes keep normal FastAPI behavior.
 
 ### 9) Adapt planner behavior for A2A callers
-If the same planner serves both human UI traffic and downstream A2A callers, make delivery channel explicit in `tool_context`:
-- Set `tool_context["delivery_channel"] = "a2a"` and, when useful, `tool_context["response_mode"] = "text_only"`.
-- Apply a `ToolVisibilityPolicy` for A2A requests that hides UI-only and rich-output tools such as `render_component`, `describe_component`, `ui_form`, `ui_confirm`, and `ui_select_option`.
-- Add matching prompt or `llm_context` guidance so the planner returns fully materialized text or JSON instead of relying on rendered components the downstream agent cannot see.
+If the same planner serves both human UI traffic and downstream A2A callers:
+- `A2AService` sets `tool_context["delivery_channel"] = "a2a"` on every A2A run (override it via the service's static `tool_context=` if needed). Add `tool_context={"response_mode": "text_only"}` when useful.
+- Pass `tool_visibility=ToolVisibilityPolicy(...)` to `A2AService` to hide UI-only and rich-output tools such as `render_component`, `describe_component`, `ui_form`, `ui_confirm`, and `ui_select_option`.
+- Add matching prompt or `llm_context` guidance (keyed on `delivery_channel`) so the planner returns fully materialized text or JSON instead of relying on rendered components the downstream agent cannot see.
 
 Use this pattern when:
 - an agent serves a UI client and is also exposed through A2A
-- a background-task agent delegates to another PenguiFlow agent over A2A
+- a background-task agent delegates to another planner agent over A2A
 - rich output is valuable for humans but lossy for machine-to-machine callers
 
 ## Troubleshooting (fast checks)
@@ -122,7 +138,7 @@ Use this pattern when:
 - Runtime skills not appearing: confirm the custom provider is injected, the request's `ToolVisibilityPolicy` still allows the relevant tools, and the skill's applicability metadata matches those allowed tools/tags/namespaces.
 - Rich output tools missing: you didn’t attach nodes via `attach_rich_output_nodes(...)` or they were filtered out by policy.
 - A2A routes return `422` instead of A2A problem details: confirm route handlers still use FastAPI `Request` injection and that A2A validation is handled inside the binding, not via host-app exception overrides.
-- Downstream A2A callers get incomplete answers: confirm the request sets `delivery_channel="a2a"` and that rich-output/UI tools are hidden for that path.
+- Downstream A2A callers get incomplete answers: confirm UI/rich-output tools are hidden via `A2AService(tool_visibility=...)` and your prompt guidance keys on `delivery_channel="a2a"`.
 
 ## References
 - Templates and knob-by-knob guidance: `references/reactplanner-config-templates.md`

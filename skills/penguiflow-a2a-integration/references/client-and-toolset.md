@@ -39,7 +39,7 @@ node_spec = toolset.tool(
     name="ask_specialist",          # planner tool name
     skill="answer",                  # remote A2A skill name
     args_model=AskArgs,              # Pydantic input model
-    out_model=AnswerOut,             # Pydantic output model
+    out_model=AnswerOut,             # Pydantic output model (plain-text answers fill a single-field model)
     desc="Delegate to the specialist agent",
     tags=("a2a", "remote", "specialist"),
     auth_scopes=(),
@@ -140,7 +140,7 @@ The transport implements `send_message`, `stream_message`, `send_task`, `subscri
 
 ## Cancellation propagation
 
-When `cancel_on_cancel=True` (default), `await flow.cancel(trace_id)` on the manager-side flow propagates a `tasks/cancel` to the remote agent. This is best-effort — the remote may or may not honor it. If the remote ignores cancels, set `cancel_on_cancel=False` and handle cancellation locally only.
+When `cancel_on_cancel=True` (default), cancelling the manager-side tool call (a steering `CANCEL`, or the planner run being cancelled) while a streamed remote task is in flight sends `tasks/cancel` to the remote agent. This is best-effort — the remote may or may not honor it. If the remote ignores cancels, set `cancel_on_cancel=False` and handle cancellation locally only.
 
 ## Operational defaults
 
@@ -159,4 +159,5 @@ When `cancel_on_cancel=True` (default), `await flow.cancel(trace_id)` on the man
 | Streaming output empty | `streaming=True` but transport doesn't subscribe | Verify transport implements `stream_message` |
 | `task` mode silently downgrades to `blocking` | Transport has no `send_task` | Implement `send_task` or use `execution_mode="blocking"` |
 | Metadata leaks user PII | `include_tool_context_keys` too broad | Use a `metadata_builder` to redact before send |
+| Tool output fails validation with a string `input` | Remote answered with text and `out_model` has several fields | Use a single-field `out_model` (e.g. `answer: str`) — the toolset wraps text into it — or have the remote return structured data |
 | Cancel doesn't propagate | `cancel_on_cancel=False` or remote ignores cancels | Flip flag or treat remote as terminal-on-cancel locally |

@@ -2,151 +2,101 @@
 
 ## What it is / when to use it
 
-This page collects **production patterns** for observing PenguiFlow runs, with a bias toward:
+This page collects **production patterns** for observing PenguiFlow agents, with a bias toward:
 
-- incident debugging (“why is this stuck/slow/failing?”),
+- incident debugging ("why is this stuck/slow/failing?"),
 - multi-tenant safety (what not to log/store),
-- building dashboards and alerts from runtime events.
+- building dashboards and alerts from planner events.
 
-If you only set up one thing: capture `FlowEvent` + correlate by `trace_id`.
+If you only set up one thing: capture `PlannerEvent` through `event_callback` and correlate by `trace_id` / `session_id`.
 
-Start with **[Observability overview](overview.md)** if you need the full telemetry model across runtime, planner, LLM, and task/session layers.
+Start with **[Observability overview](overview.md)** if you need the full telemetry model across planner, LLM, and task/session layers.
 
 ## Non-goals / boundaries
 
 - This page does not mandate a telemetry vendor or SDK.
-- This is not a complete spec for every event a system might emit; it documents practical patterns.
-- Planner-specific observability is covered in planner docs; this page focuses on runtime + worker/service integration.
+- This is not a complete spec for every event; it documents practical patterns.
 
 ## Contract surface
 
-### The canonical event primitive: `FlowEvent`
+### The canonical event primitive: `PlannerEvent`
 
-The runtime emits `FlowEvent` for:
+The planner emits `PlannerEvent` for steps (`step_start`, `step_complete`), tool calls (`tool_call_start`, `tool_call_end`, `tool_call_result`), repairs and guardrails (`planner_args_invalid`, `planner_repair_attempt`, `guardrail_retry`), steering (`steering_received`, `resume`), streaming (`llm_stream_chunk`, `artifact_chunk`) and completion (`finish`).
 
-- node lifecycle (`node_start`, `node_success`, `node_error`, `node_timeout`, `node_retry`, `node_failed`),
-- control-plane behavior (`trace_cancel_*`, `deadline_skip`, trace cancel drops),
-- queue depth and trace inflight/pending counts (when `trace_id` exists).
+`PlannerEvent.to_payload()` returns a flat dict for structured logs.
 
-`FlowEvent` provides:
+### Correlation keys
 
-- `to_payload()` for structured logs,
-- `metric_samples()` to derive numeric metrics.
+- `trace_id` and `session_id` correlate requests, streamed chunks and final answers.
+- **logs**: include them,
+- **metrics**: do not tag by them (cardinality explosion).
 
-### Correlation key: `trace_id`
+### Tenant boundary
 
-Use `trace_id` to correlate:
-
-- request/job boundaries,
-- streaming chunks and final answers,
-- logs across nodes and tools.
-
-Operational rule:
-
-- **logs**: it is correct to include `trace_id`,
-- **metrics**: do not tag by `trace_id` (cardinality explosion).
-
-### Tenant boundary: `Headers.tenant`
-
-In envelope flows, `Headers.tenant` is your default tenant boundary. It should be present in logs and (low-cardinality) metric tags.
+Pass `tenant` in `tool_context`. It should be present in logs and (low-cardinality) metric tags.
 
 ## Operational defaults (recommended)
 
-- Emit/record:
-  - `trace_id`, `tenant`, `node_name`, `event_type`, `latency_ms`, queue depth.
-- Prefer:
-  - structured logs (JSON) for production,
-  - middleware-driven capture of runtime events (avoid ad-hoc prints).
-- Persist events via `StateStore` when you need audit/replay or debugging without log access.
+- Emit/record `trace_id`, `session_id`, `tenant`, `event_type`, `node_name`, `latency_ms`, and the finish reason.
+- Prefer structured logs (JSON) and callback-driven capture (avoid ad-hoc prints).
+- Persist planner events via a `StateStore` that supports planner events when you need audit/replay without log access.
 
 ## Patterns (concrete)
 
-### Pattern: capture runtime events centrally
+### Pattern: capture planner events centrally
 
-- Attach `log_flow_events(...)` middleware to every flow.
-- Optionally add a second middleware that forwards the full `FlowEvent` object to your metric pipeline.
+- Pass one `event_callback` to every `ReactPlanner` that forwards events to logs and your metric pipeline.
+- When serving over A2A, `A2AService` chains your callback; it does not replace it.
 
 See **[Logging](logging.md)**.
 
-### Pattern: record queue depth + saturation
+### Pattern: spot slow or stuck runs
 
-Queue depth is the first “is it stuck?” signal:
-
-- sustained high `queue_depth_total` → saturation/backpressure,
-- growing `trace_pending` for a trace → blocked downstream or dead egress,
-- rising `trace_inflight` without completions → slow dependency or timeout misconfiguration.
-
-Dashboards should include:
-
-- queue depth over time,
-- node latency distributions,
-- node timeout/error counters.
+- long gaps between `step_start` and `step_complete` → slow tool or LLM call,
+- many steps without `finish` → the planner is looping (tighten tool descriptions / budgets),
+- `steering_received` without progress → check cancellation and pause handling.
 
 ### Pattern: classify failures by category
 
-Instead of “everything is an exception”, classify:
+- tool failures: `tool_call_result` with an error / tool exceptions,
+- validation and repair: `planner_args_invalid`, `planner_repair_attempt`, `finish_repair_failure`,
+- outcome: `finish` with `no_path` or `budget_exhausted`.
 
-- timeouts (`node_timeout`),
-- application exceptions (`node_error` / `node_failed`),
-- cancellation (`trace_cancel_*`, `node_trace_cancelled`),
-- deadline skips (`deadline_skip`).
+This maps to remediation playbooks:
 
-This directly maps to remediation playbooks:
-
-- timeouts → tighten timeouts / reduce concurrency / fix dependency,
-- errors → fix code / validation / schema drift,
-- cancellation/deadlines → investigate upstream budgets or user cancel behavior.
+- tool failures → fix the dependency, timeouts, or retries in `ToolNode` config,
+- validation/repair → improve schemas and tool descriptions,
+- no path / budget → revisit budgets and the tool catalog.
 
 ### Pattern: protect sensitive payloads
 
-Default stance:
-
-- do not log raw tool payloads,
-- do not store raw model prompts/responses unless you have explicit retention and redaction.
-
-Safe alternatives:
-
-- log hashes, ids, and summarized fields,
-- store large content as artifacts/resources and log references.
+- do not log raw tool payloads or `tool_context`,
+- do not store raw model prompts/responses unless you have explicit retention and redaction,
+- log hashes, ids and summaries; store large content as artifacts and log references.
 
 ## Failure modes & recovery
 
-- **You can’t debug without reading code**: you’re missing FlowEvents, trace ids, or stable node names. Fix: structured logging + middleware + enforced naming.
-- **Telemetry is too expensive**: high-volume `node_start` logs. Fix: adjust log level for `node_start` or sample.
-- **Metrics are unusable**: you tagged metrics with `trace_id` or other high-cardinality values. Fix: keep trace correlation in logs only.
-- **You leaked secrets**: you logged payloads/meta. Fix: redact at tool boundaries and do not store secrets in `Message.meta`.
+- **You can't debug without reading code**: you're missing planner events or correlation ids. Fix: structured logging + `event_callback` + `tenant`/`session_id` in `tool_context`.
+- **Telemetry is too expensive**: `llm_stream_chunk` logged at INFO. Fix: keep it at DEBUG or sample.
+- **Metrics are unusable**: you tagged metrics with `trace_id` or `session_id`. Fix: keep correlation in logs only.
 
 ## Observability (incident debugging flow)
 
-When “something is wrong”, use this sequence:
-
-1. Find the request/job `trace_id` (ingress log).
-2. Filter logs by `trace_id`:
-   - look for `node_timeout`, `node_error`, `node_failed`,
-   - check the last successful node and the next node’s queue depth.
-3. Check saturation:
-   - queue depth trend,
-   - node latency histograms for the “hot” node,
-   - retry counts.
-4. Check control-plane events:
-   - cancellation start/finish,
-   - deadline skips.
-5. Decide remediation:
-   - reduce concurrency / tighten timeouts,
-   - disable retries temporarily,
-   - gate or disable a problematic tool integration.
+1. Find the request's `trace_id` / `session_id` (ingress log).
+2. Filter logs by it: look at the last `step_complete`, failing `tool_call_result`, and the `finish` reason.
+3. Check tool latency histograms for the slow tool and LLM telemetry for provider issues.
+4. Decide remediation: tighten timeouts, adjust budgets, or gate a problematic tool.
 
 ## Security / multi-tenancy notes
 
 - Treat logs and event stores as sensitive; assume broad internal access.
-- Keep tenant boundaries explicit (`Headers.tenant`) and avoid cross-tenant traces.
-- Prefer storing redacted, summarized telemetry; keep raw content behind explicit approvals and retention.
+- Keep tenant boundaries explicit and avoid cross-tenant sessions.
 
 ## Runnable examples
 
 ```bash
-uv run python examples/quickstart/flow.py
-uv run python examples/roadmap_status_updates/flow.py
+uv run python examples/streaming_llm/stream_answer.py
+uv run python examples/planner_enterprise_agent_v2/main.py
 ```
 
 ## Troubleshooting checklist

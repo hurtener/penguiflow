@@ -1,11 +1,8 @@
 """Planner tool helpers for calling remote A2A agents.
 
-The flow runtime supports agent-to-agent calls via :func:`penguiflow.remote.RemoteNode`.
-ReactPlanner tool execution uses :class:`penguiflow.planner.context.ToolContext`, so it
-cannot call :func:`penguiflow.remote.RemoteNode` directly.
-
-This module provides a small wrapper that turns an A2A remote invocation into a regular
-planner tool (a :class:`penguiflow.catalog.NodeSpec`).
+This module provides a small wrapper that turns an A2A remote invocation, made through a
+:class:`penguiflow.remote.RemoteTransport`, into a regular planner tool (a
+:class:`penguiflow.catalog.NodeSpec`).
 """
 
 from __future__ import annotations
@@ -46,6 +43,21 @@ _FAILED_REMOTE_STATES = {
     RemoteTaskState.CANCELLED,
     RemoteTaskState.REJECTED,
 }
+
+
+def _coerce_text_result(result: Any, out_model: type[BaseModel]) -> Any:
+    """Wrap a plain-text remote answer into a single-field ``out_model``.
+
+    A2A agents usually answer with a text part. When the declared output model has
+    exactly one field, the text becomes that field's value so it validates; any other
+    result is returned unchanged.
+    """
+    if not isinstance(result, str):
+        return result
+    fields = list(out_model.model_fields)
+    if len(fields) != 1:
+        return result
+    return {fields[0]: result}
 
 
 def _resolve_tenant(ctx: ToolContext) -> str:
@@ -568,7 +580,7 @@ class A2AAgentToolset:
                         agent_url=snapshot.agent_url or self.agent_url,
                         reason="approval_required",
                     )
-                return snapshot.result
+                return _coerce_text_result(snapshot.result, out_model)
 
             if resolved_execution == "blocking":
                 try:
@@ -589,7 +601,7 @@ class A2AAgentToolset:
                     is_terminal=False,
                     metadata=dict(result.meta or {}),
                 )
-                return result.result
+                return _coerce_text_result(result.result, out_model)
 
             stream_id = f"a2a:{name}:{uuid.uuid4().hex}"
             seq = 0
@@ -633,7 +645,7 @@ class A2AAgentToolset:
                             task_id=remote_task_id,
                             is_terminal=False,
                         )
-                        return event.result
+                        return _coerce_text_result(event.result, out_model)
                 await _save_conversation_binding(
                     ctx,
                     agent_url=remote_agent_url,

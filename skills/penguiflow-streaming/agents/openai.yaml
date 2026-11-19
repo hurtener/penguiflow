@@ -1,4 +1,4 @@
 interface:
   display_name: "PenguiFlow Streaming"
-  short_description: "Protocol-agnostic streaming with StreamChunk + SSE/WebSocket"
-  default_prompt: "Help me stream partial output from a PenguiFlow flow. Cover StreamChunk emission via ctx.emit_chunk(parent=msg, ...), routing chunks to a dedicated sink node, shipping them to clients via format_sse_event/chunk_to_ws_json/stream_flow/emit_stream_events, and a final FinalAnswer pattern."
+  short_description: "Stream ReactPlanner events to clients over SSE/WebSocket"
+  default_prompt: "Help me stream partial output from a ReactPlanner. Cover stream_final_response, llm_stream_chunk and stream_chunk PlannerEvents (channels, action_seq), tool-level ctx.emit_chunk, a per-request queue bridge to SSE/WebSocket, StreamingSession subscriptions, and ending with the canonical PlannerFinish result."

@@ -2,7 +2,7 @@
 
 ## ✅ Mission Accomplished
 
-We've successfully **duplicated and enhanced** the `examples/planner_enterprise_agent` to create a **comprehensive showcase** of ALL ReactPlanner v2.5+ capabilities.
+This example extends the original enterprise agent (now removed) into a **comprehensive showcase** of ALL ReactPlanner v2.5+ capabilities.
 
 ---
 

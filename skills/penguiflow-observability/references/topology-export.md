@@ -1,131 +1,74 @@
-# Topology Export: Mermaid and DOT
+# Catalog Export: What the Agent Can Do
 
-## `flow_to_mermaid(flow, direction="TD") -> str`
+A ReactPlanner agent has no graph to draw — its "topology" is the **tool catalog** it can call (local tools, ToolNode/MCP tools, A2A specialists, skills tools). Export it for reviews, docs and CI diffs.
 
-Returns a Mermaid `flowchart` representation of the flow's adjacency.
+## `NodeSpec.to_tool_record()`
 
-```python
-from penguiflow import flow_to_mermaid
-print(flow_to_mermaid(flow, direction="LR"))
-```
-
-`direction`:
-- `"TD"` — top-down (default).
-- `"LR"` — left-to-right (easier to read for wide graphs).
-- `"BT"`, `"RL"` — less common.
-
-Output:
-```
-flowchart LR
-  Opensea --> parse
-  parse --> route
-  route --> handle_a
-  route --> handle_b
-  handle_a --> Rookery
-  handle_b --> Rookery
-```
-
-Drop into a `.md` file inside triple backticks with the `mermaid` language hint — most renderers (GitHub, MkDocs Material, GitLab) render natively.
-
-## `flow_to_dot(flow, rankdir="TB") -> str`
-
-Returns a Graphviz DOT representation.
+Every catalog entry (`NodeSpec`, from `build_catalog(...)`, `ToolNode`, `A2AAgentToolset.tool(...)`, ...) renders a JSON-serializable record:
 
 ```python
-from penguiflow import flow_to_dot
-print(flow_to_dot(flow, rankdir="LR"))
+record = spec.to_tool_record()
+# {
+#   "name", "desc", "side_effects", "loading_mode", "tags", "auth_scopes",
+#   "cost_hint", "latency_hint_ms", "safety_notes",
+#   "args_schema", "out_schema",      # JSON Schema of the Pydantic models
+#   "extra", "examples",
+# }
 ```
 
-`rankdir`:
-- `"TB"` (top-to-bottom, default), `"LR"` (left-to-right), `"BT"`, `"RL"`.
+This is the same information the planner renders into its prompt, so the export reflects what the LLM actually sees (before visibility policies).
 
-Output:
-```
-digraph G {
-  rankdir=LR
-  "Opensea" -> "parse"
-  "parse" -> "route"
-  ...
-}
-```
+## CI integration: as-built catalog
 
-Pipe through `dot -Tpng -o flow.png` or render with any Graphviz-compatible viewer.
-
-## What's in the diagram
-
-- Every `Node` with its `name=...`.
-- Every edge declared in `create(...)` adjacency tuples.
-- Synthetic `Opensea` (ingress) and `Rookery` (egress) endpoints.
-- Routers shown as ordinary nodes with multiple outgoing edges (the actual predicate isn't visualized).
-- Joins shown as ordinary nodes — `join_k` looks like any other node.
-
-What's **not** in the diagram:
-- Runtime state (queue depths, in-flight messages, latencies).
-- `NodePolicy` (timeouts, retries, validate mode).
-- `allow_cycles` / `allow_cycle` flags.
-- Pause/resume boundaries.
-
-For runtime state, use the observability dashboards. For policy info, generate annotations alongside the diagram in your docs build.
-
-## Anonymous nodes
-
-If you skipped `name=` on a node, the diagram shows a generated label that's not human-friendly. Always set `name=` on nodes you expect to appear in diagrams:
-
-```python
-# bad
-node = Node(my_fn)
-
-# good
-node = Node(my_fn, name="my_fn")
-```
-
-## CI integration: as-built diagrams
-
-Generate a diagram on every commit and check it in (or render in CI artifacts) to catch unintended topology changes.
+Generate the catalog on every commit and fail on unintended changes:
 
 ```bash
-uv run python -c "from app.flow import flow; from penguiflow import flow_to_mermaid; \
-  print(flow_to_mermaid(flow, direction='LR'))" > docs/topology.mmd
-git diff --exit-code docs/topology.mmd   # fail if changed without intent
+uv run python -c "import json; from app.agent import build_catalog_for_prod as c; \
+  print(json.dumps([s.to_tool_record() for s in c()], indent=2, sort_keys=True))" > docs/tool-catalog.json
+git diff --exit-code docs/tool-catalog.json   # fail if changed without intent
 ```
 
-Or generate PNG:
-```bash
-uv run python -c "from app.flow import flow; from penguiflow import flow_to_dot; \
-  print(flow_to_dot(flow))" | dot -Tpng -o docs/topology.png
+Review signals in the diff:
+- New tools with `side_effects` other than `"pure"` / `"read"`.
+- Changed `args_schema` (breaking for prompts, examples and recorded trajectories).
+- Changed `loading_mode` (always vs deferred) — affects prompt size and tool discovery.
+
+## A readable summary table
+
+```python
+for spec in catalog:
+    print(f"| {spec.name} | {spec.side_effects} | {', '.join(spec.tags)} | {spec.loading_mode.value} |")
 ```
 
-## "Why doesn't the diagram match what I built?"
+Paste it into the agent's README next to its dashboard links.
+
+## "Why doesn't the export match what the planner shows?"
 
 Common causes:
-- The flow you visualized isn't the flow you run (different factory, different module).
-- A node was created inside a function and not connected via adjacency tuples.
-- A router declares successors via the predicate but you forgot to wire them in `create(...)`. The diagram only shows declared adjacency — predicate-returned names must also be wired.
+- The exported catalog isn't the one your runtime builds (different factory or feature flags).
+- A `ToolVisibilityPolicy` / `ToolPolicy` filters tools per request — the export is pre-policy.
+- Deferred tools (`ToolLoadingMode.DEFERRED`) only appear in the prompt after `tool_search` / `tool_get` activates them.
+- ToolNode/MCP tools are discovered at connect time; export after connecting.
 
-Fix: always generate the diagram from the **same `flow` instance** your runtime uses.
+Fix: export from the **same factory** your runtime uses, with the same configuration.
 
 ## Operational defaults
 
-- Mermaid for README and PR review (renders inline on GitHub).
-- DOT for high-fidelity rendering (publications, deep-dive docs).
-- `direction="LR"` for wide graphs; `"TD"` for tall ones.
-- Stable `Node(name=...)` so diff is meaningful across diagram regenerations.
-- Pin Graphviz version in CI if you commit rendered PNGs (layout can shift between versions).
+- Keep tool `name`s stable — they appear in metrics labels, trajectories and memory.
+- Sort keys in the export so diffs stay meaningful.
+- Record `latency_hint_ms` / `cost_hint` for expensive tools; they help reviews and planner prompts.
 
 ## Security
 
-Diagrams can leak architecture details:
-- Internal service names.
-- Tool sources (MCP namespaces).
-- Manager↔specialist routing topology.
+Catalog exports can leak architecture details:
+- Internal service names and MCP namespaces.
+- Specialist agent URLs (A2A tools).
+- Auth scopes.
 
-If your repo is public but the topology is sensitive, generate diagrams only in private CI artifacts. Don't commit them.
+If the repo is public but the catalog is sensitive, keep exports in private CI artifacts.
 
-## What goes well next to a diagram
+## What goes well next to the catalog
 
-Bundle a few things alongside the topology export:
-- A table of `NodePolicy` per node (`timeout_s`, `max_retries`, `validate`).
-- A list of registered models per node (`ModelRegistry`).
-- A reference to the relevant SLI dashboard URL.
-
-Together these give a reader the "as-built" picture: shape, policy, contracts, signals.
+- The planner configuration summary (model, `max_iters`, budgets, guardrails, visibility policies) — see [[penguiflow-reactplanner-config]].
+- The registered models per tool (`ModelRegistry`).
+- Links to the relevant dashboards and the LLM tracing project.

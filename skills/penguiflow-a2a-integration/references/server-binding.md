@@ -2,13 +2,13 @@
 
 ## Building an `A2AService`
 
-The constructor takes `flow` positionally and **all other arguments keyword-only**:
+The constructor takes the planner positionally and **all other arguments keyword-only**:
 
 ```python
-from penguiflow_a2a import A2AConfig, A2AService, PayloadMode
+from penguiflow_a2a import A2AConfig, A2AService
 
 service = A2AService(
-    flow,                                  # PenguiFlow runtime (positional)
+    planner,                               # ReactPlanner (positional)
     agent_card=card,                       # penguiflow_a2a.models.AgentCard
     config=A2AConfig(
         supported_versions=("0.3",),
@@ -16,14 +16,13 @@ service = A2AService(
         allow_v1_aliases=True,
         allow_tenant_prefix=True,
         default_tenant="default",
-        payload_mode=PayloadMode.AUTO,      # AUTO | ENVELOPE
-        agent_url=None,                     # optional canonical URL for the card
+        agent_url=None,                    # canonical URL; enables RemoteBinding persistence
     ),
     # Optional:
     # store=InMemoryTaskStore(),            # custom TaskStore
-    # target=...,                            # specific ingress node(s)
-    # registry=...,                          # ModelRegistry for validated nodes
-    # default_headers={...},
+    # state_store=...,                      # where RemoteBindings go (default: the planner's state store)
+    # tool_context={...},                   # static tool_context merged into every run
+    # tool_visibility=ToolVisibilityPolicy(...),  # applied to every A2A run
     # push_sender=HttpPushNotificationSender(),
     # extended_agent_card=fuller_card,
     # extended_agent_card_auth=lambda headers: <bool>,
@@ -31,10 +30,10 @@ service = A2AService(
 ```
 
 The service:
-- holds a reference to your `PenguiFlow` instance,
+- holds a reference to your `ReactPlanner` and drives one `planner.run()` (or `planner.resume()`) per A2A task,
 - serializes the agent card,
 - owns a `TaskStore` (in-memory by default) for task lifecycle,
-- exposes `start()` / `stop()` for lifespan integration.
+- exposes `start()` / `stop()` for lifespan integration. `start()` bridges the planner's event callback (chaining any callback you set) so answer chunks can be streamed; `stop()` cancels running tasks and restores the callback.
 
 `A2AConfig` knobs:
 - `supported_versions` — A2A protocol versions this service speaks. Must be non-empty.
@@ -42,8 +41,39 @@ The service:
 - `allow_v1_aliases` — when True, also serves `/v1/...` aliases of all routes.
 - `allow_tenant_prefix` — when True, serves `/{tenant}/...` for every route.
 - `default_tenant` — used when no tenant prefix is present.
-- `payload_mode` — `AUTO` infers from request shape; `ENVELOPE` forces `Message` envelopes.
-- `agent_url` — explicit canonical URL for the card (otherwise derived).
+- `agent_url` — canonical URL of this agent; when set, each task saves a `RemoteBinding(trace_id=task_id, context_id, task_id, agent_url)` to the state store.
+
+## How a task maps to the planner
+
+**Input.** The planner `query` is the message's text parts joined with newlines; with no text, it is the JSON of the data parts (a message with neither is rejected). The per-run `tool_context` is:
+
+| Key | Value |
+|---|---|
+| `delivery_channel` | `"a2a"` (the static `tool_context` may override it) |
+| `tenant` | tenant prefix from the URL, else `A2AConfig.default_tenant` |
+| `session_id` | the A2A `contextId` |
+| `a2a_task_id`, `a2a_context_id`, `a2a_message_id`, `a2a_role` | identifiers of the request |
+| `a2a` | `{"message", "metadata", "configuration"}` envelope of the request |
+| `a2a_requested_extensions` | extension URIs the caller requested |
+| `a2a_accepted_output_modes` | when the caller sent them |
+
+Static `tool_context` entries are merged in first, so request-derived keys always win. Because `session_id` is the `contextId`, the planner's session dispatch serializes runs within one conversation (and keeps its short-term memory) while different conversations run in parallel.
+
+**Outcomes.**
+
+| Planner result | Task state | Output |
+|---|---|---|
+| `PlannerFinish(reason="answer_complete")` | `completed` | artifact `output-0`: text part with the answer (`raw_answer`/`answer`/...), full payload under `artifact.metadata["planner_payload"]`; payloads without answer text become a data part |
+| `PlannerFinish(reason="no_path" \| "budget_exhausted")` | `failed` | status message from `metadata["error"]`; payload (if any) still stored as `output-0` |
+| `PlannerPause` | `input-required` | status message from the pause payload's `prompt`/`message`/`question`; metadata `pause_reason`, `pause_payload` |
+| `SteeringCancelled` / cancelled run | `cancelled` | — |
+| any other exception | `failed` | status message with the error text |
+
+**Resume.** A `message/send` (or `message/stream`) carrying the `taskId` of an `input-required` task resumes the planner with `planner.resume(token, user_input=<message text>)`. Sending to a task that is still running is rejected.
+
+**Cancel.** `tasks/cancel` pushes a `SteeringEventType.CANCEL` into the run's `SteeringInbox` and cancels the run; the task ends `cancelled`. A paused (`input-required`) task can also be cancelled.
+
+**Streaming.** On `message/stream`, final-answer chunks (`llm_stream_chunk` planner events with `extra["channel"] == "answer"`) are forwarded as `output-0` artifact updates: `append=True`, or `append=False` when the planner restarts its answer (new `action_seq`). When the run finishes, the final artifact replaces the streamed one (`append=False`, `last_chunk=True`). The planner only emits these chunks with `stream_final_response=True`. `message/send` never forwards chunks.
 
 ## Agent card schema
 
@@ -80,8 +110,6 @@ card = AgentCard(
 ```
 
 Required fields (`Field(min_length=1)` in the model): `protocol_versions`, `supported_interfaces`, `default_input_modes`, `default_output_modes`, `skills`. `AgentSkill.tags` must also be non-empty. `to_camel` alias generation means JSON fields appear as `protocolVersions`, `defaultInputModes`, etc.
-
-(The lightweight `A2AAgentCard` / `A2ASkill` types in `penguiflow_a2a.server` are a legacy surface used by the older `A2AServerAdapter`. For modern HTTP/gRPC bindings via `A2AService`, use the `AgentCard` shown above.)
 
 The card is published at `GET /.well-known/agent-card.json` with media type `application/a2a+json`. An optional `GET /extendedAgentCard` returns a fuller card behind an authorization check the host app supplies via `extended_agent_card_auth=Callable[[Mapping[str,str]], bool]`.
 
@@ -172,17 +200,7 @@ Errors come back as A2A problem-detail JSON for REST and JSON-RPC error objects 
 
 ## Request and response shapes
 
-`A2AMessagePayload`:
-- `payload: Any`
-- `headers: Mapping[str, Any]`
-- `meta: dict[str, Any]`
-- `trace_id: str | None` (alias `traceId`)
-- `context_id: str | None` (alias `contextId`)
-- `task_id: str | None` (alias `taskId`)
-- `deadline_s: float | None` (alias `deadlineSeconds`)
-
-`A2ATaskCancelRequest`:
-- `task_id: str` (alias `taskId`)
+Requests and responses use the A2A models in `penguiflow_a2a.models` (`SendMessageRequest`, `Message`, `Part`, `Task`, `TaskStatus`, `Artifact`, `StreamResponse`), serialized with camelCase aliases (`messageId`, `contextId`, `taskId`, ...). Incoming messages must have `role: "user"`.
 
 ## Validation error handling
 
@@ -194,7 +212,7 @@ The binding's `_wrap_http` converts:
 
 ## Lifespan and start/stop
 
-`A2AService.start()` initializes the task broker and any internal resources. `A2AService.stop()` drains and releases them.
+`A2AService.start()` installs the planner event bridge. `A2AService.stop()` cancels running tasks and restores the planner's original event callback.
 
 - Mode A (`install_a2a_http`) wires lifespan inside the internal router.
 - Mode B (`create_a2a_http_router(_attach_lifespan=True)`) wires lifespan inside the returned router.
@@ -206,4 +224,5 @@ The binding's `_wrap_http` converts:
 - Don't add app-global validation handlers for A2A routes.
 - Treat agent-card endpoints as public; gate `/extendedAgentCard` with `is_extended_agent_card_authorized`.
 - Use `application/a2a+json` for card responses; the binding sets it.
-- Set `Headers.tenant` on incoming envelopes — `default_tenant` is a fallback, not authz.
+- Resolve tenants from the URL prefix or your own auth — `default_tenant` is a fallback, not authz.
+- Hide UI-only tools from A2A callers with `tool_visibility=`; downstream agents can't see rendered components.

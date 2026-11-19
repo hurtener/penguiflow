@@ -4,8 +4,8 @@
 
 This example demonstrates enterprise-grade patterns for building autonomous agents:
 - ✅ ReactPlanner for LLM-driven node orchestration
-- ✅ **Two workflow patterns:** Wrapped subflows (Pattern A) + Individual nodes (Pattern B)
-- ✅ Comprehensive telemetry middleware for error visibility
+- ✅ **Two workflow patterns:** Pipeline tools (Pattern A) + Individual nodes (Pattern B)
+- ✅ Comprehensive planner event telemetry for error visibility
 - ✅ Environment-based configuration
 - ✅ Status update sinks for frontend integration
 - ✅ Streaming support for progressive UI rendering
@@ -57,7 +57,7 @@ cp .env.example .env
 ```bash
 # Load environment and run
 source .env  # or: export $(cat .env | xargs)
-python -m examples.planner_enterprise_agent.main
+python -m examples.planner_enterprise_agent_v2.main
 ```
 
 ### Auto-seq (v1, opt-in)
@@ -90,8 +90,6 @@ Telemetry Metrics
   planner_steps: 6
   planner_llm_calls: 7
   planner_cost_usd: 0.0023
-  flow_node_errors: 0
-  flow_node_successes: 6
 ```
 
 ---
@@ -130,7 +128,6 @@ Telemetry Metrics
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                  AgentTelemetry                           │   │
 │  │  - Planner event callback                                │   │
-│  │  - Flow event middleware                                 │   │
 │  │  - Cost tracking                                         │   │
 │  │  - Error payload extraction                              │   │
 │  │  - Metrics collection                                    │   │
@@ -217,7 +214,7 @@ All configuration is driven by environment variables (see `.env.example`):
 The `AgentConfig` dataclass provides type-safe configuration:
 
 ```python
-from examples.planner_enterprise_agent.config import AgentConfig
+from examples.planner_enterprise_agent_v2.config import AgentConfig
 
 # Load from environment
 config = AgentConfig.from_env()
@@ -239,8 +236,8 @@ config = AgentConfig(
 
 ```python
 import asyncio
-from examples.planner_enterprise_agent.main import EnterpriseAgentOrchestrator
-from examples.planner_enterprise_agent.config import AgentConfig
+from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrator
+from examples.planner_enterprise_agent_v2.config import AgentConfig
 
 async def main():
     config = AgentConfig.from_env()
@@ -261,7 +258,7 @@ asyncio.run(main())
 ### With Custom Telemetry
 
 ```python
-from examples.planner_enterprise_agent.telemetry import AgentTelemetry
+from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
 
 # Create custom telemetry (e.g., for testing)
 telemetry = AgentTelemetry(config)
@@ -281,13 +278,13 @@ print(f"Cost: ${metrics['planner_cost_usd']:.4f}")
 
 ```bash
 # Run the example
-python -m examples.planner_enterprise_agent.main
+python -m examples.planner_enterprise_agent_v2.main
 
 # With debug logging
-LOG_LEVEL=DEBUG python -m examples.planner_enterprise_agent.main
+LOG_LEVEL=DEBUG python -m examples.planner_enterprise_agent_v2.main
 
 # With different model
-LLM_MODEL=gpt-4o python -m examples.planner_enterprise_agent.main
+LLM_MODEL=gpt-4o python -m examples.planner_enterprise_agent_v2.main
 ```
 
 ---
@@ -336,10 +333,10 @@ COPY pyproject.toml .
 RUN pip install -e ".[planner]"
 
 # Copy application
-COPY examples/planner_enterprise_agent ./examples/planner_enterprise_agent
+COPY examples/planner_enterprise_agent_v2 ./examples/planner_enterprise_agent_v2
 
 # Run agent
-CMD ["python", "-m", "examples.planner_enterprise_agent.main"]
+CMD ["python", "-m", "examples.planner_enterprise_agent_v2.main"]
 ```
 
 ### Kubernetes Deployment
@@ -399,36 +396,9 @@ spec:
 
 This implementation follows the proven pattern from successful production deployments:
 
-**Problem**: Without telemetry, PenguiFlow errors are cryptic:
-```
-ERROR penguiflow.core: node_error
-ERROR penguiflow.core: node_failed
-```
+**Problem**: Without telemetry, tool failures inside a planner run are hard to trace back to a step.
 
-**Solution**: Telemetry middleware extracts full error context:
-```json
-{
-  "event_type": "node_error",
-  "node": "extract_metadata",
-  "trace_id": "abc123",
-  "error_class": "ValidationError",
-  "error_message": "Invalid document format",
-  "error_traceback": "Traceback (most recent call last)...",
-  "flow_error_code": "node_execution_failed"
-}
-```
-
-### Middleware Integration
-
-```python
-from penguiflow import log_flow_events
-
-# Add middleware BEFORE flow.run()
-flow.add_middleware(log_flow_events(telemetry.logger))
-flow.add_middleware(telemetry.record_flow_event)
-
-flow.run(registry=registry)
-```
+**Solution**: `AgentTelemetry.record_planner_event` receives every `PlannerEvent` (steps, LLM calls, pause/resume, errors) and logs it with its full payload, so each failure carries its step, tool name and error details.
 
 ### Planner Event Callback
 
@@ -449,8 +419,7 @@ metrics = agent.get_metrics()
     "planner_steps": 6,
     "planner_llm_calls": 7,
     "planner_cost_usd": 0.0023,
-    "flow_node_errors": 0,
-    "flow_node_successes": 6,
+    "auto_seq_executed": 1,
 }
 ```
 
@@ -524,9 +493,9 @@ def _build_registry(self):
 
 This example demonstrates **TWO different approaches** for exposing workflows to the ReactPlanner. Choose the pattern that best fits your use case:
 
-#### Pattern A: Wrapped Subflow (Document Analysis)
+#### Pattern A: Pipeline Tool (Document Analysis)
 
-**What it is:** Wrap an entire multi-step workflow as a single planner-discoverable tool. The planner sees ONE operation, but internally it executes a full subflow with multiple nodes.
+**What it is:** Wrap an entire multi-step workflow as a single planner-discoverable tool. The planner sees ONE operation, but internally the tool runs several steps in order.
 
 **When to use:**
 - ✅ Workflow is deterministic and linear
@@ -537,40 +506,25 @@ This example demonstrates **TWO different approaches** for exposing workflows to
 
 **Example:** Document Analysis Pipeline
 ```python
-# 1. Build the subflow
-def build_document_analysis_subflow() -> PenguiFlow:
-    """Create 5-node pipeline: init → parse → extract → summarize → render"""
-    from penguiflow import Node, create
+# 1. Chain the steps in a plain async function
+async def run_document_analysis_pipeline(decision: RouteDecision, ctx: Any) -> FinalAnswer:
+    """Run 5 steps in order: init → parse → extract → summarize → render"""
+    state = await initialize_document_workflow(decision, ctx)
+    state = await parse_documents(state, ctx)
+    state = await extract_metadata(state, ctx)
+    state = await generate_document_summary(state, ctx)
+    return await render_document_report(state, ctx)
 
-    init_node = Node(initialize_document_workflow, name="init_documents")
-    parse_node = Node(parse_documents, name="parse_documents")
-    extract_node = Node(extract_metadata, name="extract_metadata")
-    summarize_node = Node(generate_document_summary, name="generate_summary")
-    render_node = Node(render_document_report, name="render_report")
-
-    # Build linear pipeline using PenguiFlow's create() API
-    flow = create(
-        init_node.to(parse_node),
-        parse_node.to(extract_node),
-        extract_node.to(summarize_node),
-        summarize_node.to(render_node),
-        render_node.to(),
-    )
-
-    return flow
-
-# 2. Create wrapper tool that executes the subflow
+# 2. Expose the pipeline as one planner tool
 @tool(
     desc="Complete document analysis pipeline (parse, extract, summarize, report)",
-    tags=["planner", "documents", "subflow"],
+    tags=["planner", "documents", "pipeline"],
     side_effects="read",
     latency_hint_ms=2000,
 )
 async def analyze_documents_pipeline(args: RouteDecision, ctx: Any) -> FinalAnswer:
     """Execute entire document workflow as single operation."""
-    subflow = build_document_analysis_subflow()
-    result = await subflow.run(entry_payload=args, context=ctx)
-    return result
+    return await run_document_analysis_pipeline(args, ctx)
 
 # 3. Register ONCE (planner sees 1 tool, not 5 nodes)
 registry.register("analyze_documents", RouteDecision, FinalAnswer)
@@ -641,8 +595,8 @@ The planner can dynamically decide:
 
 #### Side-by-Side Comparison
 
-| Aspect | Pattern A: Wrapped Subflow | Pattern B: Individual Nodes |
-|--------|---------------------------|----------------------------|
+| Aspect | Pattern A: Pipeline Tool | Pattern B: Individual Nodes |
+|--------|--------------------------|----------------------------|
 | **Planner visibility** | 1 tool | N separate tools |
 | **LLM calls** | 1 (decides once to use pipeline) | N (decides at each step) |
 | **Cost** | Lower (fewer LLM calls) | Higher (more decisions) |
@@ -714,10 +668,10 @@ Hit resource constraints. Solutions:
 
 ```bash
 # Enable debug logs
-LOG_LEVEL=DEBUG python -m examples.planner_enterprise_agent.main
+LOG_LEVEL=DEBUG python -m examples.planner_enterprise_agent_v2.main
 
 # See full LLM prompts/responses
-LOG_LEVEL=DEBUG PENGUIFLOW_LOG_LEVEL=DEBUG python -m examples.planner_enterprise_agent.main
+LOG_LEVEL=DEBUG PENGUIFLOW_LOG_LEVEL=DEBUG python -m examples.planner_enterprise_agent_v2.main
 ```
 
 ### Inspecting Telemetry
@@ -726,7 +680,7 @@ LOG_LEVEL=DEBUG PENGUIFLOW_LOG_LEVEL=DEBUG python -m examples.planner_enterprise
 # After execution
 metrics = agent.get_metrics()
 print(f"Steps: {metrics['planner_steps']}")
-print(f"Errors: {metrics['flow_node_errors']}")
+print(f"LLM calls: {metrics['planner_llm_calls']}")
 print(f"Cost: ${metrics['planner_cost_usd']:.4f}")
 
 # Emit to observability backend
@@ -790,9 +744,9 @@ async def parse_doc(args: Args, ctx: Any) -> Result:
 
 ```python
 import pytest
-from examples.planner_enterprise_agent.main import EnterpriseAgentOrchestrator
-from examples.planner_enterprise_agent.config import AgentConfig
-from examples.planner_enterprise_agent.telemetry import AgentTelemetry
+from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrator
+from examples.planner_enterprise_agent_v2.config import AgentConfig
+from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
 
 @pytest.mark.asyncio
 async def test_document_workflow():
@@ -807,7 +761,7 @@ async def test_document_workflow():
 
     # Check telemetry
     metrics = agent.get_metrics()
-    assert metrics["flow_node_errors"] == 0
+    assert metrics["planner_steps"] > 0
 ```
 
 ---

@@ -78,6 +78,8 @@ class ScriptedLLM:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
         del messages, response_format
         return self._payloads.pop(0)

@@ -1,79 +1,75 @@
 # Worker Patterns
 
-## Pattern: stateless-per-job (recommended default)
+## Pattern: planner per job (best isolation)
 
-One flow per job. Worker loop:
+One planner instance per job, built from a factory. Worker loop:
 
 ```python
-async def worker_loop(queue, registry):
-    while not shutting_down:
-        job = await queue.fetch()
+running: dict[str, SteeringInbox] = {}
+
+async def worker(queue: Queue, shutting_down: asyncio.Event) -> None:
+    while not shutting_down.is_set():
+        job = await queue.fetch(timeout_s=1.0)
         if job is None:
             continue
-
-        flow = create(my_topology, queue_maxsize=64, middlewares=[log_flow_events(...)])
-        flow.run(registry=registry)
+        planner = make_planner()
+        inbox = SteeringInbox()
+        running[job.id] = inbox
         try:
-            msg = Message(
-                payload=job.payload,
-                headers=Headers(tenant=job.tenant),
-                deadline_s=job.deadline,
+            result = await asyncio.wait_for(
+                planner.run(
+                    job.query,
+                    tool_context={"session_id": job.session_id, "tenant": job.tenant, "trace_id": f"job-{job.id}"},
+                    steering=inbox,
+                ),
+                timeout=job.deadline_s,
             )
-            await flow.emit(msg, trace_id=f"job-{job.id}")
-            try:
-                result = await asyncio.wait_for(
-                    flow.fetch(trace_id=f"job-{job.id}"),
-                    timeout=job.deadline,
-                )
-                await queue.mark_complete(job.id, result=result)
-            except asyncio.TimeoutError:
-                await flow.cancel(f"job-{job.id}")
-                await queue.retry_job(job.id, delay_s=60, reason="deadline_exceeded")
+            if isinstance(result, PlannerPause):
+                await queue.park(job.id, resume_token=result.resume_token, prompt=result.payload)
+            elif result.reason == "answer_complete":
+                await queue.mark_complete(job.id, result=result.payload)
+            else:
+                await queue.mark_failed(job.id, reason=result.reason, details=result.metadata.get("error"))
+        except TimeoutError:
+            await queue.retry_job(job.id, delay_s=30, reason="deadline")
         finally:
-            await flow.stop()
+            running.pop(job.id, None)
 ```
 
-Pros:
-- Best isolation between jobs.
-- Easy to reason about.
-- No shared state between jobs.
-- Per-job tenant scope is clean.
+Prefer this when:
+- Jobs are independent.
+- You want a crash to affect one job only.
+- Per-run callbacks (metrics, streaming) must not mix.
 
-Cons:
-- Flow construction cost per job (typically small).
-- More state-store reconnects (mitigate with connection pooling).
+Planner construction is cheap compared to an LLM call; reuse the LLM client, catalog and `StateStore` across planners.
 
-## Pattern: shared-flow (lower overhead)
+## Pattern: sessions-backed service (shared runtime)
 
-One flow, many traces. Worker loop:
+`SessionManager` owns one `StreamingSession` per conversation; each request becomes a session task run by `PlannerTaskPipeline(planner_factory=make_planner)`:
 
 ```python
-flow = create(my_topology, ...)
-flow.run(registry=registry)
+manager = SessionManager(state_store=store, limits=SessionLimits(max_concurrent_tasks=4))
 
-try:
-    while not shutting_down:
-        job = await queue.fetch()
-        msg = Message(payload=job.payload, headers=Headers(tenant=job.tenant))
-        await flow.emit(msg, trace_id=f"job-{job.id}")
-        result = await flow.fetch(trace_id=f"job-{job.id}")
-        await queue.mark_complete(job.id, result=result)
-finally:
-    await flow.stop()
+async def handle(session_id: str, query: str) -> TaskResult:
+    session = await manager.get_or_create(session_id)
+    return await session.run_task(PlannerTaskPipeline(planner_factory=make_planner), query=query)
 ```
 
-Pros:
-- Lower per-job cost.
-- Better connection pooling.
+Prefer this when:
+- Clients need live updates, reconnect/replay, or steering (`session.steer(...)`, `session.cancel_task(...)`).
+- Planners spawn background tasks.
+- You want per-session concurrency limits and task telemetry out of the box.
 
-Cons:
-- Shared state risks (closures, module-level vars).
-- Failure isolation weaker — one bad node can stall workers serving other traces.
-- Tenant data lives concurrently inside one process; rely strictly on `Headers.tenant` + `trace_id` scoping.
+## Resuming paused jobs
 
-Use when:
-- High job rate (>100/s) where per-job flow construction dominates.
-- Stateless nodes that don't share resources.
+A `PlannerPause` is a checkpoint, not a failure. Store `resume_token` with the job; when the human (or external system) answers, any worker can continue:
+
+```python
+planner = make_planner()                 # same state_store as the run that paused
+result = await planner.resume(token, user_input=answer, tool_context={"session_id": job.session_id, "tenant": job.tenant})
+```
+
+This requires a `StateStore` with `save_planner_state` / `load_planner_state`. See [[penguiflow-hitl-pause-resume]].
 
 ## Queue contracts
 
@@ -84,117 +80,105 @@ class Queue(Protocol):
     async def fetch(self, *, timeout_s: float | None) -> Job | None: ...
     async def mark_complete(self, job_id: str, *, result: Any) -> None: ...
     async def retry_job(self, job_id: str, *, delay_s: float, reason: str) -> None: ...
-    async def mark_failed(self, job_id: str, *, reason: str, details: dict | None) -> None: ...
+    async def mark_failed(self, job_id: str, *, reason: str, details: Any | None) -> None: ...
+    async def park(self, job_id: str, *, resume_token: str, prompt: Any) -> None: ...   # HITL pauses
 ```
 
 Required invariants:
-- **At-least-once delivery**. Build for idempotent flows.
-- **Visibility timeout** (or equivalent) larger than your worst-case flow latency, so the queue doesn't redeliver mid-execution.
-- **Dead-letter** for terminally failed jobs.
+- **At-least-once delivery**. Build for idempotent tools.
+- **Visibility timeout** larger than your worst-case run duration (`deadline_s` + headroom), so the queue doesn't redeliver mid-run.
+- **Dead-letter** for terminally failed jobs (`no_path`, repeated errors).
 
 ## Per-job correlation
 
-Use `trace_id = f"job-{job.id}"` (or a UUID). Benefits:
-- Logs are searchable by `trace_id`.
-- `flow.fetch(trace_id=...)` is deterministic.
-- `flow.cancel(trace_id)` works for timeouts.
-- StateStore audit per job.
+Put a job-derived id in `tool_context` (e.g. `trace_id=f"job-{job.id}"`). Benefits:
+- Logs and LLM spans are searchable by it.
+- Tools can use it as an idempotency key.
+- `StateStore` records group by it.
 
-Don't reuse `trace_id`s. Don't reuse `trace_id` for retries — generate a fresh one (with a parent reference in `meta` if you need linkage).
+Don't reuse ids across retries — generate a fresh one and keep a parent reference if you need linkage.
 
 ## Idempotency
 
 At-least-once delivery + retries = side effects can repeat. Strategies:
 
 ### Idempotency keys
-Use `trace_id` as the key when calling external services. Most APIs (Stripe, SQS, AWS Lambda) support this natively.
+Derive a key from the job id and the tool call (`f"{trace_id}:{tool}:{hash(args)}"`) and pass it to external services. Most APIs (Stripe, SQS, AWS) support this natively.
 
 ### Plan/commit split
-- **Plan node** — pure; produces an action description.
-- **Commit node** — gated by an idempotency check (or HITL).
-
-The commit node looks up the plan id; if already committed, returns the cached result.
+- **Plan tool** — pure; produces an action description.
+- **Commit tool** — gated by an idempotency check, a guardrail, or HITL approval.
 
 ### Atomic write-and-mark
-For DB writes:
 ```python
-async def commit(msg, _ctx):
+@tool(desc="Commit the order", side_effects="write")
+async def commit_order(args: CommitArgs, ctx) -> CommitResult:
+    key = f"{ctx.tool_context['trace_id']}:{args.order_id}"
     async with db.transaction():
-        if await already_committed(msg.trace_id):
-            return await fetch_existing(msg.trace_id)
-        result = do_write(msg.payload)
-        await mark_committed(msg.trace_id, result)
+        if existing := await find_commit(key):
+            return existing
+        result = await do_write(args)
+        await mark_committed(key, result)
         return result
 ```
 
-Single transaction prevents double-commit.
-
 ## Time budgets
 
-Two layers:
-1. **Per-node**: `NodePolicy(timeout_s=...)`. Tight (seconds).
-2. **End-to-end**: `Message(deadline_s=...)` + `asyncio.wait_for(flow.fetch(...), timeout=job.deadline)`. Loose (tens of seconds to minutes).
+Three layers:
+1. **Per-tool**: `asyncio.timeout(...)` inside local tools; `ExternalToolConfig.timeout_s` for ToolNode tools. Tight (seconds).
+2. **Per-LLM-call**: `llm_timeout_s` / `llm_max_retries` on the planner.
+3. **End-to-end**: planner `deadline_s` (the planner finishes with `budget_exhausted` and a best-effort answer) plus an outer `asyncio.wait_for` as a hard stop. Loose (tens of seconds to minutes).
 
-When the end-to-end deadline expires:
-1. `await flow.cancel(trace_id)`.
-2. Mark the job for retry (transient) or dead-letter (terminal).
+On end-to-end timeout:
+1. Push a steering `CANCEL` (cooperative) or cancel the run task (hard).
+2. `retry_job` (if transient) or `mark_failed`.
 
 ## Graceful shutdown
 
-Subscribe to `SIGTERM` (or your platform's shutdown signal):
+On `SIGTERM`:
+1. Set `shutting_down`; stop fetching new jobs; health check returns 503.
+2. Wait for in-flight runs up to the drain deadline.
+3. Push `SteeringEventType.CANCEL` into the inboxes of runs still going; requeue their jobs.
+4. `await a2a_service.stop()` / close sessions and LLM clients.
 
 ```python
-shutting_down = asyncio.Event()
-
-def _on_sigterm(sig, frame):
-    shutting_down.set()
-
-signal.signal(signal.SIGTERM, _on_sigterm)
+async def graceful_shutdown(tasks: set[asyncio.Task], deadline_s: float = 30) -> None:
+    done, pending = await asyncio.wait(tasks, timeout=deadline_s)
+    for job_id, inbox in list(running.items()):
+        await inbox.push(SteeringEvent(session_id=job_id, task_id=job_id, event_type=SteeringEventType.CANCEL, payload={"reason": "shutdown"}))
+    if pending:
+        await asyncio.wait(pending, timeout=5)
+    for task in pending:
+        task.cancel()
 ```
 
-Then in the worker loop:
-1. `if shutting_down.is_set(): break` between job fetches.
-2. After loop: drain in-flight tasks with a deadline.
-3. Cancel any over-deadline traces: `await flow.cancel(trace_id)`.
-4. `await flow.stop()`.
-
-Most platforms send SIGTERM, wait 30-60s, then SIGKILL. Tune your drain deadline to fit within that window with safety margin.
-
-```python
-async def graceful_shutdown(flow, inflight_traces, deadline_s=30):
-    end = time.monotonic() + deadline_s
-    while inflight_traces and time.monotonic() < end:
-        await asyncio.sleep(0.1)
-    for trace_id in list(inflight_traces):
-        await flow.cancel(trace_id)
-    await flow.stop()
-```
+Paused runs need nothing — their state is already in the `StateStore`.
 
 ## Tenant isolation
 
 For multi-tenant workers:
-- `Headers.tenant` set on every emit.
+- `tenant` (and `user_id`) in `tool_context` on every run; tools must enforce it.
 - Per-tenant rate-limiting at the queue level (one tenant doesn't starve others).
 - Tenant-scoped credentials (don't share API tokens across tenants).
-- Tenant-scoped state-store keys (`tenant:<id>:...`).
+- Tenant-scoped `session_id`s and state-store keys (`tenant:<id>:...`).
 - Tenant-scoped artifact retrieval (authz on the retrieval endpoint).
 
-A single worker can serve many tenants safely if isolation is enforced at every layer. Resist "one worker per tenant" unless tenants have very different resource profiles or compliance requirements.
+A single worker can serve many tenants safely if isolation is enforced at every layer.
 
 ## Health checks
 
-Expose `/health` (or your platform's equivalent) returning:
+Expose `/health` returning:
 - 200 while the worker is processing.
 - 503 once `shutting_down` is set (lets the load balancer drain).
-- 503 if a critical dependency (queue, state store) is unreachable.
+- 503 if a critical dependency (queue, state store, LLM gateway) is unreachable.
 
-Don't include "expensive" probes (`SELECT 1` against the DB on every health check) unless your platform's health-check rate is bounded.
+Keep probes cheap; don't call the LLM from a health check.
 
 ## Anti-patterns
 
-- **Module-level shared mutable state in nodes** — race conditions under concurrency.
-- **No `flow.stop()` on shutdown** — orphaned tasks, leaked queues, dropped jobs.
-- **Synchronous I/O inside a node body** — blocks the event loop.
-- **Per-job DB connection** — connection churn; use a pool.
-- **Returning huge results from worker** — push to artifact store; return a ref.
+- **One planner instance shared across concurrent jobs with per-job callbacks** — events and metrics mix.
+- **No steering inbox** — you can't cancel a run cooperatively.
+- **Synchronous I/O inside a tool** — blocks the event loop for every run on the worker.
+- **Per-job DB/HTTP client** — connection churn; use pools.
+- **Returning huge results from tools** — push to the artifact store; return a ref.
 - **`asyncio.create_task` without tracking** — fire-and-forget that you can't wait for or cancel.

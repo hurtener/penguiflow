@@ -1,10 +1,9 @@
-"""Enterprise telemetry middleware for comprehensive observability.
+"""Enterprise telemetry for comprehensive planner observability.
 
-This module implements the telemetry patterns from the successful PenguiFlow
-implementation case study, providing full visibility into:
-- Planner lifecycle events
-- Node execution with detailed error payloads
-- Flow events with structured logging
+This module provides full visibility into:
+- Planner lifecycle events (steps, LLM calls, pause/resume, finish)
+- Tool errors surfaced through planner events
+- Auto-sequencing decisions
 - MLflow/observability backend integration
 """
 
@@ -15,28 +14,21 @@ from collections.abc import Mapping
 from typing import Any
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
-from penguiflow.metrics import FlowEvent
 from penguiflow.planner import PlannerEvent
 
 
 class AgentTelemetry:
     """Comprehensive telemetry for enterprise agent deployments.
 
-    Implements the telemetry middleware pattern that captures:
-    1. Full exception tracebacks from FlowEvents
-    2. Detailed error payloads with context
-    3. LLM call costs and latency
-    4. Planning step metrics
+    Captures:
+    1. Planner errors with their event payloads
+    2. LLM call costs and latency
+    3. Planning step metrics
+    4. Auto-sequencing decisions
     5. Structured events for external systems
 
     Usage:
         telemetry = AgentTelemetry(config)
-
-        # Add to PenguiFlow
-        flow.add_middleware(log_flow_events(telemetry.logger))
-        flow.add_middleware(telemetry.record_flow_event)
-
-        # Add to ReactPlanner
         planner = ReactPlanner(..., event_callback=telemetry.record_planner_event)
     """
 
@@ -53,83 +45,12 @@ class AgentTelemetry:
             "planner_steps": 0,
             "planner_llm_calls": 0,
             "planner_cost_usd": 0.0,
-            "flow_node_errors": 0,
-            "flow_node_successes": 0,
             "auto_seq_detected_unique": 0,
             "auto_seq_detected_ambiguous": 0,
             "auto_seq_detected_none": 0,
             "auto_seq_skipped": 0,
             "auto_seq_executed": 0,
         }
-
-    async def record_flow_event(self, event: FlowEvent) -> FlowEvent:
-        """Middleware function that intercepts all PenguiFlow events.
-
-        This is the CRITICAL pattern from the case study - it extracts
-        detailed error payloads that would otherwise be trapped in flow state.
-        """
-        event_type = event.event_type
-
-        if event_type == "node_start":
-            self.logger.debug(
-                "node_start",
-                extra={
-                    "node": event.node_name,
-                    "trace_id": event.trace_id,
-                    "node_id": event.node_id,
-                },
-            )
-
-        elif event_type == "node_success":
-            self._metrics["flow_node_successes"] += 1
-            self.logger.info(
-                "node_success",
-                extra={
-                    "node": event.node_name,
-                    "trace_id": event.trace_id,
-                    "latency_ms": event.latency_ms,
-                },
-            )
-
-        elif event_type == "node_error":
-            # THIS IS THE CRITICAL PART - Extract error details!
-            # Without this, you only see "node_error" with no context
-            error_payload = event.error_payload or {}
-
-            self._metrics["flow_node_errors"] += 1
-
-            # Log everything for debugging (the breakthrough from the case study)
-            self.logger.error(
-                "node_error",
-                extra={
-                    "node": event.node_name,
-                    "trace_id": event.trace_id,
-                    "node_id": event.node_id,
-                    "error_class": error_payload.get("error_class"),
-                    "error_message": error_payload.get("error_message"),
-                    "error_traceback": error_payload.get("error_traceback"),
-                    "flow_error_code": error_payload.get("code"),
-                    "flow_error_message": error_payload.get("message"),
-                    # Include full payload for complete visibility
-                    **error_payload,
-                },
-            )
-
-            # Collect for batch emission to observability backend
-            if self.config.enable_telemetry:
-                self._events.append(
-                    {
-                        "event": "flow.node_error",
-                        "payload": {
-                            "node": event.node_name,
-                            "trace_id": event.trace_id,
-                            **error_payload,
-                        },
-                    }
-                )
-
-        # Always return event unmodified - middleware is read-only
-        return event
 
     def record_planner_event(self, event: PlannerEvent) -> None:
         """Callback for ReactPlanner events.
@@ -248,8 +169,6 @@ class AgentTelemetry:
             "planner_steps": 0,
             "planner_llm_calls": 0,
             "planner_cost_usd": 0.0,
-            "flow_node_errors": 0,
-            "flow_node_successes": 0,
             "auto_seq_detected_unique": 0,
             "auto_seq_detected_ambiguous": 0,
             "auto_seq_detected_none": 0,

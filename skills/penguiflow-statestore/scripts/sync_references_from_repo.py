@@ -22,7 +22,6 @@ def _detect_repo_root(candidate: Path) -> Path | None:
         candidate / "docs/spec/STATESTORE_IMPLEMENTATION_SPEC.md",
         candidate / "docs/tools/statestore-guide.md",
         candidate / "docs/tools/artifacts-and-resources.md",
-        candidate / "docs/deployment/distributed-execution.md",
     ]
     if all(path.exists() for path in required):
         return candidate
@@ -63,10 +62,7 @@ def main() -> int:
             repo_root / "docs/tools/artifacts-and-resources.md",
             refs_dir / "artifacts-and-resources.md",
         ),
-        (
-            repo_root / "docs/deployment/distributed-execution.md",
-            refs_dir / "distributed-execution.md",
-        ),
+        # references/distributed-execution.md is maintained in this skill (no repo source).
     ]
 
     for src, dest in copies:

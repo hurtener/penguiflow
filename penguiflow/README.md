@@ -1,6 +1,6 @@
 # PenguiFlow package overview
 
-PenguiFlow is a lightweight asyncio runtime for orchestrating typed agent pipelines.
+PenguiFlow is an async-first library for LLM tool-using agents built on `ReactPlanner`.
 This document focuses on the internals that live inside the `penguiflow/` package so
 contributors understand how the pieces fit together.
 
@@ -8,138 +8,63 @@ contributors understand how the pieces fit together.
 
 | Module | Purpose |
 | --- | --- |
-| `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
-| `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
-| `state/` | Unified StateStore protocol, models, and reference in-memory implementation. |
-| `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
-| `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
-| `catalog.py` | `NodeSpec` dataclass, tool decorator, and catalog builder feeding the planner. |
-| `remote.py` | RemoteTransport protocol plus the `RemoteNode` helper for opt-in agent-to-agent calls. |
-| `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
-| `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
-| `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
-| `policies.py` | Policy protocol + helpers (e.g., `DictRoutingPolicy`) for config-driven routing decisions. |
-| `middlewares.py` | Async middleware hook contract consuming structured `FlowEvent` objects. |
-| `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
-| `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
-| `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
-| `planner/` | React planner loop (`ReactPlanner`, prompt helpers) building on catalog metadata. |
+| `planner/` | `ReactPlanner` loop: prompts, action schema and repair, parallel calls and joins, pause/resume, steering hooks, memory, guardrails, reflection, streaming events. |
+| `llm/` | Native LLM layer: client, provider adapters, structured output, routing, retries, pricing, telemetry. |
+| `node.py` | `Node` wrapper (an `async def fn(args, ctx)` tool plus its name) and `NodePolicy` metadata. |
+| `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for each tool's input/output models. |
+| `catalog.py` | `NodeSpec` dataclass, `@tool` decorator, and `build_catalog` feeding the planner. |
+| `tools/` | `ToolNode` for MCP/UTCP/HTTP tool sources, OAuth, presets, MCP resources and apps. |
+| `common_tools/` | Ready-made planner tools (web fetch/search). |
+| `skills/` | Skill packs, local skill store, and the planner's skill tools. |
+| `rich_output/` | Rich UI component registry, validation, and planner tools for rendering components. |
+| `steering/` | `SteeringInbox` and guard inbox for cancel/pause/inject events during runs. |
+| `sessions/` | `StreamingSession`, `SessionManager`, `PlannerTaskPipeline`, background tasks, session KV, job scheduler. |
+| `state/` | StateStore protocol, models, adapters, and the in-memory reference implementation. |
+| `artifacts.py` | Artifact stores for large or binary tool outputs. |
+| `remote.py` | `RemoteTransport` protocol and remote task models used by the A2A client toolsets. |
+| `types.py` | `Headers` and `Message` envelope used when forwarding work to remote agents. |
+| `logging.py` | `configure_logging` and structured/extra-aware formatters. |
+| `cli/` | `penguiflow tools list|connect` CLI. |
+| `admin.py` | Developer CLI helpers (`penguiflow-admin`) for inspecting StateStore history. |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
-| `admin.py` | Developer CLI helpers (`penguiflow-admin`) for inspecting trace history. |
 
 ### Optional extras
 
-The `penguiflow_a2a` package ships separately and contains the A2A HTTP+JSON/JSON-RPC and
-gRPC bindings. Installing the `a2a-server` extra adds `A2AService` and
-`create_a2a_http_router` / `install_a2a_http` / `create_a2a_http_app` without
-introducing FastAPI as a core dependency; `a2a-grpc` adds the gRPC helpers, and
-`a2a-client` adds `A2AHttpTransport` for `RemoteNode`.
+The `penguiflow_a2a` package ships alongside and contains the A2A HTTP+JSON/JSON-RPC and
+gRPC bindings:
 
-For ReactPlanner integrations, `penguiflow_a2a.A2AAgentToolset` can wrap an A2A agent as a
-planner tool (`NodeSpec`) so remote agents can be invoked through `ToolContext`.
+* **Serving a planner**: `A2AService(planner, agent_card=...)` runs one planner task per A2A
+  task and is mounted with `create_a2a_http_router` / `install_a2a_http` /
+  `create_a2a_http_app` (`a2a-server` extra) or the gRPC helpers (`a2a-grpc` extra).
+* **Calling remote agents**: `A2AHttpTransport` (`a2a-client` extra) plus
+  `A2AAgentToolset` / `A2ARouterToolset` wrap remote A2A agents as planner tools
+  (`NodeSpec`s) invoked through `ToolContext`.
 
-Install the `planner` extra to pull in LiteLLM when you want the planner to call hosted
-models; otherwise you can inject a deterministic stub via the `llm_client` parameter.
+Install the `planner` extra for the LiteLLM-backed client and tool integrations; the
+native LLM layer needs the `llm` extra for provider SDKs. You can always inject a
+deterministic stub through the `llm_client` parameter.
 
 ## Key runtime behaviors
 
-* **Graph construction**: `PenguiFlow` builds contexts for every node plus the synthetic
-  `OPEN_SEA`/`ROOKERY` endpoints. `Floe` edges expose bounded `asyncio.Queue`s to enforce
-  backpressure.
-* **Cycle detection**: flows are validated via topological sort; controller nodes can opt
-  into self-cycles with `allow_cycle=True`, or the entire flow can set
-  `allow_cycles=True` to bypass checks.
-* **Worker lifecycle**: `run()` spins up one task per node. `stop()` cancels and awaits
-  every worker to guarantee a clean shutdown.
-* **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
-  which applies validation, timeout, retry with exponential backoff, structured logging,
-  and middleware hooks.
-* **Distribution hooks**: when a flow is constructed with a `StateStore` or `MessageBus`
-  adapter, runtime events are persisted as `StoredEvent` records (`PenguiFlow.load_history`
-  exposes the trace timeline) and every floe publish also emits a `BusEnvelope` describing
-  the edge, trace id, headers, and metadata. Failures are logged but never surface to
-  user code so adapters can fail independently of the core engine.
-* **Remote delegation**: `remote.RemoteNode` wraps remote execution through a
-  `RemoteTransport`. Bindings (`trace_id` ↔ remote context/task) persist via the
-  configured `StateStore`, streaming updates reuse `Context.emit_chunk`, and per-trace
-  cancellation mirrors to remote transports via `PenguiFlow.ensure_trace_event` and
-  `RemoteTransport.cancel`.
-* **Remote observability**: remote invocations emit dedicated `FlowEvent`s capturing
-  latency, payload sizes, remote context/task identifiers, and cancellation reasons. The
-  data lands in the configured `StateStore`, enabling correlation in the new
-  `penguiflow-admin` CLI and custom middleware sinks.
-* **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
-  builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
-  `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
-  directly to Rookery so callers can inspect it.
-* **Trace-scoped roundtrips**: when reusing one running flow across concurrent callers,
-  use `flow.emit(..., trace_id=...)` and `flow.fetch(trace_id=...)` to avoid cross-consuming
-  Rookery results between traces.
-* **Metadata propagation**: every `Message` includes a mutable `meta` dictionary. The
-  runtime clones it when emitting streaming chunks, preserving debugging or billing
-  breadcrumbs across retries, controller loops, and playbook subflows.
-* **Deadline enforcement**: nodes never start executing stale work; `Message.deadline_s`
-  is checked prior to invocation and expired traces are converted to
-  `FinalAnswer("Deadline exceeded")` without running the user coroutine.
-* **Registry guardrails**: when `flow.run(registry=...)` is used, the runtime asserts that
-  every validating node has a corresponding entry in the registry so configuration issues
-  surface immediately.
-* **Controller loops**: when a node emits a `Message` whose payload is a `WM`, the runtime
-  increments hop counters, enforces hop/token budgets (`budget_hops` / `budget_tokens`) when
-  they are set, checks deadlines, and re-enqueues the message back to the controller.
-  Returning a `FinalAnswer` short-circuits to Rookery or, if guardrails fire, the runtime
-  creates a `FinalAnswer` with the appropriate exhaustion message.
-* **Playbooks**: `Context.call_playbook` accepts a factory that returns a `(PenguiFlow,
-  registry)` pair, runs it, emits the parent message (preserving headers + trace ID),
-  mirrors cancellation signals to the subflow, and returns the first payload produced by
-  the subflow.
-
-## Validation & typing
-
-1. Register your Pydantic models with `ModelRegistry.register(node_name, in_model, out_model)`.
-2. Provide the registry when starting the flow (`flow.run(registry=registry)`).
-3. `Node.invoke()` uses cached `TypeAdapter`s to validate inputs/outputs according to the
-   node's `policy.validate` setting (`both`, `in`, `out`, or `none`).
-
-## Patterns cheat sheet
-
-* `map_concurrent` — run an async worker over a list of inputs with bounded concurrency.
-* `predicate_router` — route to successor nodes based on simple boolean predicates; set
-  `policy=` to consult runtime routing policies.
-* `union_router` — enforce discriminated unions and send each variant to its matching node
-  (also accepts `policy=` overrides).
-* `join_k` — buffer `k` messages per trace id, then emit a combined batch downstream.
-* `DictRoutingPolicy` — load config-driven overrides (JSON/env) and attach them to router
-  helpers via `policy=`.
-
-Each helper is a regular node and can be combined with hand-authored nodes seamlessly.
-
-## Visualization helpers
-
-`viz.flow_to_mermaid(flow, direction="TD")` and `viz.flow_to_dot(flow, rankdir="TB")`
-inspect the runtime graph and emit Mermaid or Graphviz definitions. Nodes tagged with
-`allow_cycle=True` (controller loops) are highlighted automatically, and edges touching
-`OPEN_SEA`/`ROOKERY` are annotated as ingress/egress so subflow boundaries stand out in
-diagrams. The `examples/visualizer/` folder contains a runnable script that exports both
-formats for docs.
-
-## Middleware & logging
-
-`_emit_event` now materialises a `FlowEvent` dataclass containing fields such as
-`{ts, event_type, node_name, node_id, trace_id, latency_ms, q_depth_in, q_depth_out,
-outgoing, trace_pending, trace_inflight, ...}`. Middleware added via
-`flow.add_middleware` receives these objects, can inspect `.to_payload()` for logging,
-and `.metric_samples()` / `.tag_values()` for metrics sinks like MLflow.
+* **Typed tools**: the planner validates tool arguments against the registered input model
+  before calling `node.func(args, ctx)`, and validates the result against the output model.
+  Validation failures become observations the LLM can repair.
+* **Session dispatch**: runs that carry a `session_id` in `tool_context` execute on a
+  per-session planner runtime, so different sessions run concurrently and one session is
+  serialized.
+* **Pause/resume**: tools call `await ctx.pause(reason, payload)`; `run()` returns a
+  `PlannerPause` whose `resume_token` resumes the run via `resume(token, user_input=...)`.
+  Pause records persist through the configured `StateStore` when present.
+* **Steering**: a `SteeringInbox` passed as `steering=` lets callers cancel, pause, or inject
+  guidance; the planner checks it between steps and while tools run.
+* **Events**: every step, tool call, repair, stream chunk and finish is emitted as a
+  `PlannerEvent` to the `penguiflow.planner` logger and to `event_callback`.
 
 ## Testing & examples
 
-* Unit tests live under `tests/` and exercise every primitive (core runtime, registry,
-  types, patterns, controller behavior, playbooks, FlowTestKit).
-* Every major feature has a runnable example under `examples/`. Use `uv run python <path>`
-  or `.venv/bin/python <path>` to execute them locally.
-* `examples/testkit_demo/` demonstrates the FlowTestKit harness in isolation so you can
-  replicate the pattern inside your own repositories.
-* `examples/react_parallel/` showcases Phase D fan-out, join metadata, and the new
-  parallel planner semantics with auto-populated join arguments.
+* Unit tests live under `tests/` and exercise the planner, LLM layer, tools, sessions,
+  state stores and A2A bindings.
+* Runnable examples live under `examples/`. Use `uv run python <path>` to execute them
+  locally, starting with `examples/react_minimal/main.py`.
 
-For a conceptual overview and getting-started guide, see the repository root `README.md`.
+For a conceptual overview and getting-started guide, see `docs/getting-started/`.

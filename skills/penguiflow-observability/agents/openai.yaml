@@ -1,4 +1,4 @@
 interface:
   display_name: "PenguiFlow Observability"
-  short_description: "Structured logging, metrics, and topology export"
-  default_prompt: "Help me add observability to a PenguiFlow runtime: structured logging via configure_logging, log_flow_events middleware, FlowEvent-derived metrics (counters/histograms/gauges) with safe cardinality, FlowError tracing, dashboards and alerts, and topology export with flow_to_mermaid/flow_to_dot."
+  short_description: "Structured logging, planner metrics, LLM tracing"
+  default_prompt: "Help me add observability to a ReactPlanner deployment: structured logging via configure_logging, PlannerEvent-derived metrics through event_callback with safe cardinality, LLM tracing (PENGUIFLOW_LLM_TRACING, TelemetryHooks), task telemetry sinks, run cost from PlannerFinish metadata, dashboards and alerts, penguiflow-admin history, and tool catalog export."

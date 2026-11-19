@@ -61,6 +61,8 @@ class StubLLM:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
         del response_format
         # In a real scenario, the LLM would see the context in messages

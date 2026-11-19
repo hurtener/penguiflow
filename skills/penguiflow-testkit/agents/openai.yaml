@@ -1,4 +1,0 @@
-interface:
-  display_name: "PenguiFlow Testkit"
-  short_description: "Concise pytest-asyncio tests for flows and nodes"
-  default_prompt: "Help me write PenguiFlow unit tests with penguiflow.testkit: run_one, assert_node_sequence, simulate_error, get_recorded_events, assert_preserves_message_envelope. Cover happy path, retries, terminal failures, timeouts, and envelope preservation."

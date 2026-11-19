@@ -9,8 +9,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from penguiflow import Message as FlowMessage
-from penguiflow import Node, NodePolicy, create
 from penguiflow_a2a import (
     A2AConfig,
     A2AService,
@@ -30,6 +28,8 @@ from penguiflow_a2a.models import (
     SendMessageRequest,
     TaskState,
 )
+
+from .planner_doubles import ScriptedPlanner, ScriptedRun, echo_planner, slow_planner, streaming_planner
 
 
 def _agent_card(*, push_notifications: bool = False) -> AgentCard:
@@ -59,50 +59,25 @@ def _agent_card(*, push_notifications: bool = False) -> AgentCard:
 
 
 def _build_client() -> TestClient:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        assert isinstance(message.payload, str)
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_stream_client() -> TestClient:
-    async def streamer(message: FlowMessage, ctx) -> str:
-        words = str(message.payload).split()
-        for idx, word in enumerate(words):
-            await ctx.emit_chunk(parent=message, text=word, done=idx == len(words) - 1)
-        return " ".join(words)
-
-    node = Node(streamer, name="streamer", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(streaming_planner(), agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_slow_client(delay: float = 0.5) -> TestClient:
-    async def slow(message: FlowMessage, _ctx) -> str:
-        await asyncio.sleep(delay)
-        return f"slow:{message.payload}"
-
-    node = Node(slow, name="slow", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(slow_planner(delay), agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_router_client() -> tuple[TestClient, A2AService]:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
     app = FastAPI()
     app.include_router(create_a2a_http_router(service))
     return TestClient(app, raise_server_exceptions=False), service
@@ -360,10 +335,10 @@ def test_version_not_supported() -> None:
 
 def test_router_direct_include_starts_service_via_lifespan() -> None:
     client, service = _build_router_client()
-    assert service._flow_started is False
+    assert service._started is False
 
     with client:
-        assert service._flow_started is True
+        assert service._started is True
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
         assert response.json()["name"] == "Test Agent"
@@ -376,19 +351,14 @@ def test_router_direct_include_starts_service_via_lifespan() -> None:
         assert response.status_code == 200
         assert response.json()["task"]["status"]["state"] == TaskState.COMPLETED.value
 
-    assert service._flow_started is False
+    assert service._started is False
 
 
 def test_router_include_does_not_change_unrelated_validation_errors() -> None:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
     class EchoPayload(BaseModel):
         count: int
 
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
     app = FastAPI()
 
     @app.post("/echo")
@@ -412,12 +382,7 @@ def test_router_include_does_not_change_unrelated_validation_errors() -> None:
 
 
 def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(echo_planner(), agent_card=_agent_card(), config=A2AConfig())
     app = FastAPI()
     install_a2a_http(app, service)
 
@@ -446,14 +411,12 @@ def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
 
 @pytest.mark.asyncio
 async def test_subscribe_task_multiple_subscribers_receive_same_events() -> None:
-    async def streamer(message: FlowMessage, ctx) -> str:
+    async def streamer(run: ScriptedRun) -> str:
         await asyncio.sleep(0.1)
-        await ctx.emit_chunk(parent=message, text="hello", done=True)
+        run.emit_chunk("hello", done=True)
         return "hello"
 
-    node = Node(streamer, name="streamer", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(streamer), agent_card=_agent_card(), config=A2AConfig())
     await service.start()
     try:
         request = SendMessageRequest(

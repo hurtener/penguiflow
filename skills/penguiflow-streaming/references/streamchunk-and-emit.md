@@ -1,149 +1,79 @@
-# `StreamChunk` and `ctx.emit_chunk`
+# Planner Stream Events and `ctx.emit_chunk`
 
-## `StreamChunk` schema
-
-```python
-StreamChunk(
-    stream_id: str,          # defaults to parent's trace_id
-    seq: int,                # monotonically increasing per stream_id
-    text: str,               # the chunk content
-    done: bool = False,      # True marks the terminator chunk
-    meta: dict = {},         # JSON-friendly side data
-)
-```
-
-Lives in `penguiflow.types`.
-
-### Field semantics
-
-- **`stream_id`** — Correlates chunks belonging to the same logical stream. Default is the parent message's `trace_id`. Override only when one trace has multiple concurrent streams (e.g., "answer" and "thinking"); pick distinct stable names.
-- **`seq`** — Auto-assigned by `emit_chunk` if you don't supply it. Strictly increasing per `stream_id`. Resets after a chunk with `done=True`.
-- **`text`** — The content. For non-text streams, base64-encode and put the MIME in `meta`.
-- **`done`** — `True` exactly once per stream. After this, internal seq tracking resets and the consumer should release the stream.
-- **`meta`** — JSON-friendly auxiliary data. Common keys: `mime_type`, `provider`, `tokens`, `latency_ms`.
-
-## `ctx.emit_chunk(...)`
+All partial output from a `ReactPlanner` reaches you as `PlannerEvent`s through the planner's `event_callback`:
 
 ```python
-await ctx.emit_chunk(
-    parent: Message,            # required
-    text: str,
-    done: bool = False,
-    meta: dict | None = None,
-    to: Node | Sequence[Node] | None = None,
-    stream_id: str | None = None,    # rare; defaults to parent.trace_id
-    seq: int | None = None,          # rare; auto-assigned
-)
+from penguiflow.planner import PlannerEvent
+
+def on_event(event: PlannerEvent) -> None:   # synchronous; never block here
+    ...
 ```
 
-### Why `parent` is required
-- Inherits `trace_id` (for cancellation, fetch, fan-out join).
-- Inherits `Headers` (tenant, topic, priority).
-- Inherits `deadline_s` (chunks expire with their parent message).
-- Inherits relevant `meta` (your custom metadata propagates).
+`PlannerEvent` fields: `event_type`, `ts`, `trajectory_step`, `thought`, `node_name`, `latency_ms`, `token_estimate`, `error`, `extra`. `event.to_payload()` flattens them (`event`, `ts`, `step`, optional fields, then `extra` keys) into a JSON-friendly dict.
 
-Don't construct chunks manually with `ctx.emit(Message(payload=StreamChunk(...)))` — you'll bypass the auto-assign of `seq` and lose envelope inheritance.
+## `llm_stream_chunk` — the planner's own LLM output
 
-### `to` parameter
+Emitted while the LLM is generating, when `stream_final_response=True` and the client supports callback streaming.
 
-Same semantics as `ctx.emit(..., to=...)`. Pass a `Node` or list of `Node`s to fan out to specific sinks. If omitted, chunks route to all successors of the current node.
+| `extra` key | Meaning |
+|---|---|
+| `text` | the new text delta |
+| `done` | `True` on the last chunk of a sequence |
+| `channel` | `"answer"` (user-facing final answer) or `"thinking"` (reasoning, when the model emits it) |
+| `phase` | finer-grained source (`"answer"`, `"thinking"`, `"args"`, `"revision"`) |
+| `action_seq` | id of the planner step producing the text |
 
-### Common patterns
+Rules:
+- Show `channel == "answer"` to end users; `thinking` belongs in a collapsible panel, if anywhere.
+- A **new `action_seq`** means the planner restarted its answer (e.g. a finish-repair re-streams the corrected answer). Replace, don't append.
+- `PlannerFinish.metadata["answer_action_seq"]` names the sequence that produced the final answer.
+- These events are only emitted when an `event_callback` is set.
 
-#### Single text stream
+## `stream_chunk` — progress from inside a tool
+
+Tools receive a `ToolContext` and can stream while they run:
+
 ```python
-async def compose(msg, ctx):
-    for token in stream_tokens(msg.payload.prompt):
-        await ctx.emit_chunk(parent=msg, text=token, to=chunk_sink)
-    await ctx.emit_chunk(parent=msg, text="", done=True, to=chunk_sink)
+@tool(desc="Summarize a long document")
+async def summarize(args: SummarizeArgs, ctx) -> Summary:
+    parts = []
+    async for seq, token in aenumerate(llm.stream(args.text)):
+        parts.append(token)
+        await ctx.emit_chunk("summary", seq, token, meta={"channel": "answer"})
+    await ctx.emit_chunk("summary", len(parts), "", done=True, meta={"channel": "answer"})
+    return Summary(text="".join(parts))
 ```
 
-#### Two concurrent streams: answer + thinking
-```python
-async def compose(msg, ctx):
-    async for event in llm.stream(...):
-        if event.kind == "thinking":
-            await ctx.emit_chunk(
-                parent=msg,
-                text=event.text,
-                stream_id="thinking",
-                to=thinking_sink,
-            )
-        else:
-            await ctx.emit_chunk(
-                parent=msg,
-                text=event.text,
-                stream_id="answer",
-                to=answer_sink,
-            )
-    await ctx.emit_chunk(parent=msg, text="", done=True, stream_id="thinking", to=thinking_sink)
-    await ctx.emit_chunk(parent=msg, text="", done=True, stream_id="answer", to=answer_sink)
-```
+Signature: `await ctx.emit_chunk(stream_id, seq, text, *, done=False, meta=None)`.
+- `stream_id` — your name for the stream; use distinct ids for concurrent streams.
+- `seq` — supplied by the tool; keep it monotonically increasing per `stream_id`.
+- `meta["channel"]` defaults to `"thinking"`; set `"answer"` for user-facing text.
+- The event's `extra` is `{"stream_id", "seq", "text", "done", "meta"}`.
+- Chunks are also recorded on the trajectory: `result.metadata["steps"][i]["streams"][stream_id]`.
 
-#### Status updates alongside content
-```python
-async def compose(msg, ctx):
-    await ctx.emit_chunk(parent=msg, text="searching…", meta={"kind": "status"}, to=chunk_sink)
-    results = await search(msg.payload.query)
-    await ctx.emit_chunk(parent=msg, text="synthesizing…", meta={"kind": "status"}, to=chunk_sink)
-    async for token in synthesize(results):
-        await ctx.emit_chunk(parent=msg, text=token, meta={"kind": "content"}, to=chunk_sink)
-    await ctx.emit_chunk(parent=msg, text="", done=True, to=chunk_sink)
-```
+## `artifact_chunk` — partial structured output
 
-Consumers filter by `meta["kind"]` to render status separately from content.
+`await ctx.emit_artifact(stream_id, chunk, *, done=False, artifact_type=None, meta=None)` streams partial structured data (e.g. a chart config being built). Consumers merge chunks per `stream_id`.
+
+## Status events
+
+For progress indicators, use the loop events: `step_start` / `step_complete`, `tool_call_start` / `tool_call_end` / `tool_call_result` (`extra["tool_name"]`, `extra["tool_call_id"]`), `finish` (with `extra["reason"]`). See `status-and-progressive-ui.md`.
 
 ## Ordering guarantees
-
-- **Within one `stream_id`**: chunks are FIFO. The runtime preserves order through edges.
-- **Across `stream_id`s**: no ordering guarantee. Two streams can interleave arbitrarily.
-- **Across traces**: each trace is independent.
-
-For UIs that need strict global order across status + content + tool calls, encode order in `meta` (e.g., a global counter) and reconcile client-side.
-
-## Multi-producer hazards
-
-Two producers emitting to the **same** `stream_id` is a bug. `seq` will be inconsistent across producers and consumers can't reassemble. Either:
-- Split into distinct `stream_id`s (one per producer), or
-- Funnel through a single producer node that serializes the input.
-
-## `done=True` semantics
-
-A chunk with `done=True`:
-- Closes the stream.
-- Resets the runtime's `seq` counter for that `stream_id`.
-- Tells the consumer "you can now release any stream-level state."
-
-Emit it exactly once. Emitting twice corrupts the consumer's state machine. Forgetting to emit it leaves the consumer waiting forever (typically a UI spinner that never stops).
+- Events are delivered synchronously, in emission order, from the task running `planner.run()`.
+- Within one `stream_id` (tool chunks) or one `action_seq` (LLM chunks), order is preserved.
+- Parallel tool calls can interleave chunks from different `stream_id`s — group by id on the client.
 
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| No chunks | Parent is not a `Message` envelope | Switch the flow to envelope style |
-| Out-of-order chunks | Multiple producers, same `stream_id` | One producer per stream, or distinct ids |
-| Stream never closes | Forgot `done=True` | Always emit a terminator |
-| `seq` discontinuity | Manual `seq` clashes with auto-assign | Don't supply `seq` manually |
-| Chunk leaks across traces | Reusing `trace_id` | Generate fresh `trace_id` per request |
-| Backpressure stalls | Sink slow, chunk edge bounded | Raise `queue_maxsize` on the chunk edge, or make sink faster |
+| No `llm_stream_chunk` | `stream_final_response=False`, non-streaming client, or no `event_callback` | Enable all three |
+| Answer shown twice | Re-stream after repair | Reset on new `action_seq` |
+| Tool chunks hidden from users | default `channel="thinking"` | Pass `meta={"channel": "answer"}` |
+| Out-of-order tool chunks | `seq` reused or concurrent producers on one `stream_id` | One producer per `stream_id`, increasing `seq` |
+| Event loop stalls | blocking work in `event_callback` | Only enqueue in the callback |
 
 ## Observability
 
-Chunk emission shows up as `node_*` events on the **producer** node. The runtime doesn't emit a special "stream event" — chunks are just messages. To track stream-specific metrics, instrument the sink:
-
-```python
-async def chunk_sink(msg, _ctx):
-    chunk: StreamChunk = msg.payload
-    metrics.histogram("stream.chunk_chars", len(chunk.text), tags=[f"stream:{chunk.stream_id}"])
-    if chunk.seq == 0:
-        metrics.histogram("stream.time_to_first_chunk_ms",
-                          (time.monotonic() - producer_start_ms[msg.trace_id]) * 1000)
-    if chunk.done:
-        metrics.increment("stream.completed", tags=[f"stream:{chunk.stream_id}"])
-```
-
-Track:
-- Time-to-first-chunk (TTFC) p50/p95/p99.
-- Chunks per second per stream.
-- Stream completion rate (terminated vs abandoned).
-- Chunk size distribution.
+Every event is also logged by the planner (`llm_stream_chunk` at DEBUG, the rest at INFO) with `to_payload()` as `extra`. See [[penguiflow-observability]].

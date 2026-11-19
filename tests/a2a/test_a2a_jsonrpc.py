@@ -1,13 +1,12 @@
-import asyncio
 import json
 from typing import Any
 
 from fastapi.testclient import TestClient
 
-from penguiflow import Message as FlowMessage
-from penguiflow import Node, NodePolicy, create
 from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill, TaskState
+
+from .planner_doubles import echo_planner, slow_planner, streaming_planner
 
 
 def _agent_card() -> AgentCard:
@@ -30,38 +29,22 @@ def _agent_card() -> AgentCard:
 
 
 def _build_client() -> TestClient:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    planner = echo_planner()
+    service = A2AService(planner, agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_stream_client() -> TestClient:
-    async def streamer(message: FlowMessage, ctx) -> str:
-        words = str(message.payload).split()
-        for idx, word in enumerate(words):
-            await ctx.emit_chunk(parent=message, text=word, done=idx == len(words) - 1)
-        return " ".join(words)
-
-    node = Node(streamer, name="streamer", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    planner = streaming_planner()
+    service = A2AService(planner, agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_slow_client(delay: float = 0.4) -> TestClient:
-    async def slow(message: FlowMessage, _ctx) -> str:
-        await asyncio.sleep(delay)
-        return f"slow:{message.payload}"
-
-    node = Node(slow, name="slow", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    planner = slow_planner(delay)
+    service = A2AService(planner, agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 

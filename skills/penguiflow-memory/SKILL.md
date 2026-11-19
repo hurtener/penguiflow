@@ -110,7 +110,7 @@ When STM is active, `llm_context` gains `conversation_memory` with `recent_turns
 - **Memory doesn't survive restart** — attach a `StateStore` with `save_memory_state`/`load_memory_state`.
 
 ## Worked examples
-- `examples/memory_basic/flow.py`, `examples/memory_callbacks/flow.py`, `examples/memory_truncation/flow.py`, `examples/memory_custom/flow.py`, `examples/memory_persistence/flow.py`, `examples/memory_redis/flow.py`, `examples/react_memory_context/flow.py`.
+- `examples/memory_basic/flow.py`, `examples/memory_callbacks/flow.py`, `examples/memory_truncation/flow.py`, `examples/memory_custom/flow.py`, `examples/memory_persistence/flow.py`, `examples/memory_redis/flow.py`, `examples/react_memory_context/main.py`.
 
 ## References (load only as needed)
 - `references/config-and-budgets.md` — `ShortTermMemoryConfig`, `MemoryBudget`, `MemoryIsolation`, `MemoryKey`, every field.

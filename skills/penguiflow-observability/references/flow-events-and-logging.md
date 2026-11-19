@@ -1,4 +1,4 @@
-# `FlowEvent` Catalog and Structured Logging
+# `PlannerEvent` Catalog and Structured Logging
 
 ## `configure_logging(...)`
 
@@ -6,203 +6,123 @@
 from penguiflow import configure_logging
 
 configure_logging(
-    level="INFO",          # standard logging level
-    structured=True,       # JSON lines; False = human-readable
-    include_extras=False,  # when structured=False, append extra fields
+    level="INFO",            # standard logging level
+    structured=True,         # JSON lines; False = human-readable
+    include_extras=True,     # when structured=False, append extra fields
+    logger_name="penguiflow",
 )
 ```
 
-Configures the `penguiflow` logger and its children. Subloggers:
-- `penguiflow.core` — runtime worker loop, queue ops.
-- `penguiflow.flow` — middleware output (when you use that logger name).
-- `penguiflow.planner` — planner-internal.
-- `penguiflow.tools` — ToolNode and external tool calls.
+Configures the `penguiflow` logger and its children. Useful sub-loggers:
+- `penguiflow.planner` — every `PlannerEvent` (`llm_stream_chunk` at DEBUG, others at INFO), plus planner warnings (`deadline_exhausted`, `event_callback_error`, ...).
+- `penguiflow.llm.telemetry`, `penguiflow.llm.tracing` — LLM call telemetry and spans.
+- `penguiflow.tools.node` — ToolNode / MCP / UTCP connections and calls.
+- `penguiflow_a2a` — the A2A server (failed planner runs are logged with `task_id`).
 
 Call once at process startup. Re-calling resets handlers.
 
-## `FlowEvent`
-
-Actual frozen dataclass (`penguiflow.metrics.FlowEvent`):
+## `PlannerEvent`
 
 ```python
-FlowEvent(
-    event_type: str,                # see catalog below
-    ts: float,
-    node_name: str | None,
-    node_id: str | None,
-    trace_id: str | None,
-    attempt: int,
-    latency_ms: float | None,
-    queue_depth_in: int,
-    queue_depth_out: int,
-    outgoing_edges: int,            # number of successor edges for this node
-    queue_maxsize: int,             # `queue_maxsize` applied to this edge
-    trace_pending: int | None,
-    trace_inflight: int,
-    trace_cancelled: bool,
-    extra: Mapping[str, Any] = MappingProxyType({}),
-)
+@dataclass(frozen=True, slots=True)
+class PlannerEvent:
+    event_type: str
+    ts: float
+    trajectory_step: int
+    thought: str | None = None
+    node_name: str | None = None
+    latency_ms: float | None = None
+    token_estimate: int | None = None
+    error: str | None = None
+    extra: Mapping[str, Any] = {}
 ```
 
-`queue_depth_total` is a **computed property** (`queue_depth_in + queue_depth_out`), not a field. Constructor expects all fields except `extra` (which defaults).
+`event.to_payload()` returns `{"event": event_type, "ts", "step", ...optional fields, **extra}` (reserved `logging` keys are filtered out of `extra`). That is what the planner logs and what you should ship to log pipelines.
 
-Methods:
-- `event.to_payload() -> dict` — JSON-friendly serialization for logging. Renames `event_type` to `event` and renames depth fields to `q_depth_in`/`q_depth_out`/`q_depth_total`. Merges `extra` flat into the payload.
-- `event.metric_samples() -> dict[str, float]` — numeric samples for metrics (`queue_depth_in/out/total`, `attempt`, `trace_inflight`, `trace_pending`, `trace_cancelled` as 0/1, plus `latency_ms` when present; `extra["latency_ms"]` overrides if supplied).
-- `event.tag_values() -> dict[str, str]` — bounded-cardinality tags starting with `event_type`.
-- `event.error_payload` (property) — returns the structured `FlowError` payload when `extra["flow_error"]` is present.
+Receive events with `ReactPlanner(..., event_callback=fn)`, where `fn(event)` is synchronous. Exceptions in the callback are logged (`event_callback_error`) and swallowed.
 
 ## Event type catalog
 
-### Node lifecycle
+### Loop lifecycle
+| `event_type` | When | Useful fields |
+|---|---|---|
+| `step_start` | a planning step begins | `extra["action_seq"]` |
+| `step_complete` | a tool step finished | `node_name` (tool), `latency_ms`, `thought` |
+| `finish` | the run finished | `extra["reason"]`, `extra["cost"]`, `extra["error"]`, `thought` |
+| `resume` | a paused run resumed | `extra["user_input"]` |
+| `steering_received` | a steering event was consumed | `extra["event_type"]`, `extra["source"]` |
 
-| Event | Phase | Latency? | Notes |
-|---|---|---|---|
-| `node_start` | Worker dequeued a message | No | Used for throughput counters. |
-| `node_success` | Node returned normally | Yes | Most useful latency signal. |
-| `node_error` | Node raised | Yes (for the attempt) | Retry may follow. |
-| `node_timeout` | `timeout_s` fired | Yes (= timeout_s) | Retry may follow. |
-| `node_retry` | Retry scheduled | No | `extra.backoff_s` carries the delay. |
-| `node_failed` | Retries exhausted | Total elapsed | `extra.flow_error` carries the `FlowError` payload. |
-| `node_trace_cancelled` | In-flight task cancelled | Yes (elapsed) | Trace cancellation propagated. |
+Pauses don't emit an event — `planner.run()` returns a `PlannerPause`.
 
-### Trace lifecycle
-
-| Event | Meaning |
+### Tool calls
+| `event_type` | Useful fields |
 |---|---|
-| `trace_cancel_start` | `flow.cancel(trace_id)` invoked. |
-| `trace_cancel_drop` | Runtime dropped a queued message for the trace. |
-| `deadline_skip` | A message expired before its node could process it. |
+| `tool_call_start` | `tool_name`, `tool_call_id`, `args_json`, `action_seq` |
+| `tool_call_end` | `tool_name`, `tool_call_id`, `action_seq` |
+| `tool_call_result` | `tool_name`, `tool_call_id`, `result_json` |
+| `tool_activated`, `tool_activation_denied`, `tool_search_query`, `tool_get` | tool discovery |
+| `observation_clamped` | an observation exceeded its size guardrail |
 
-### Other (extension points)
-Custom middleware can attach additional events by emitting `FlowEvent` instances through the same hook. The runtime treats them as opaque — define your own `event_type` namespace.
+### Quality and repair
+`planner_args_invalid` (`extra["tool"]`, `extra["error"]`), `planner_args_suspect`, `planner_repair_attempt`, `arg_fill_failure`, `finish_repair_success` / `finish_repair_failure`, `graceful_failure_attempt` / `graceful_failure_success`, `multi_action_fallback_used`, `reflection_critique`, `guardrail_retry`.
 
-## `log_flow_events(...)` middleware
+### Streaming
+`llm_stream_chunk`, `stream_chunk`, `artifact_chunk` — see [[penguiflow-streaming]].
 
-Actual signature:
-```python
-log_flow_events(
-    logger: logging.Logger | None = None,
-    *,
-    start_level: int = logging.INFO,
-    success_level: int = logging.INFO,
-    error_level: int = logging.ERROR,
-    latency_callback: Callable[[str, float, FlowEvent], None] | None = None,
-) -> Middleware
-```
+### Context and skills
+`llm_before`, `llm_context_hook_applied` / `llm_context_hook_failed`, `skills_retrieved`, `skill_pack_loaded`, `skill_directory_rendered`, `tool_directory_rendered`, `tool_hints_generated`.
 
-Returns a middleware that logs **only** `node_start`, `node_success`, and `node_error` events. All other event types (`node_timeout`, `node_retry`, `node_failed`, `deadline_skip`, `trace_cancel_*`, `node_trace_cancelled`, …) pass through silently — write a custom middleware if you need to log them. There is no `level` or `include_payload` knob; the payload always comes from `event.to_payload()` (plus `error_payload` injected for `node_error`).
+Grep the planner for `event_type="` when you need the exact payload of a rarer event.
 
-```python
-import logging
-from penguiflow import log_flow_events
+## Reducing volume
+- Keep `penguiflow.planner` at INFO in staging; in production raise it to WARNING and rely on `event_callback` metrics plus sampled logs.
+- `llm_stream_chunk` is already DEBUG.
+- Drop `tool_call_start.args_json` / `tool_call_result.result_json` from shipped logs if they can be large or sensitive.
 
-mw = log_flow_events(
-    logging.getLogger("penguiflow.flow"),
-    start_level=logging.DEBUG,
-    success_level=logging.INFO,
-    error_level=logging.ERROR,
-    latency_callback=lambda name, ms, evt: histogram.observe(ms, tags=[f"event:{name}"]),
-)
-```
+## Run-level record
 
-When `logger` is omitted, the middleware uses `logging.getLogger("penguiflow.flow")`. The optional `latency_callback` fires on `node_success`/`node_error` events with `latency_ms` present.
-
-### Reducing volume
-
-`node_start` and `node_success` dominate volume. Reduce by:
-- Raising `start_level` so the start logs sit below your handler threshold.
-- Wrapping `log_flow_events` in a custom middleware that drops or samples events before delegating.
-
-```python
-def filtered(logger):
-    base = log_flow_events(logger)
-    async def mw(event):
-        if event.event_type == "node_start":
-            return                                       # drop
-        if event.event_type == "node_success" and random.random() > 0.1:
-            return                                       # 10% sample
-        await base(event)
-    return mw
-```
-
-To log the events `log_flow_events` ignores (timeouts, retries, deadline skips, cancellations), add a sibling middleware that handles those types explicitly.
-
-## Custom middleware
-
-A middleware is any async callable accepting a `FlowEvent`:
-
-```python
-async def my_mw(event):
-    if event.event_type == "node_failed":
-        await alert_pager(event.to_payload())
-```
-
-Attach in `create(...)`:
-```python
-flow = create(..., middlewares=[log_flow_events(...), my_mw])
-```
-
-Or dynamically: `flow.add_middleware(mw)`.
-
-Middleware runs sequentially in declaration order. **Don't do blocking I/O** — it stalls the worker loop. Use queue-based dispatch for external sinks.
+The returned `PlannerFinish.metadata` is the best single record of a run: `steps` (trajectory history with actions, observations, errors, streams), `step_count`, `cost`, `sources`, `artifacts`, `trajectory_metadata`, and repair counters (`validation_failures_count`, `repair_attempts`, `finish_repair_success_count`, ...). Log a summary of it (not the whole thing) per run.
 
 ## Trace correlation
-
-Every `FlowEvent` with a `trace_id` is correlatable across:
-- Logs (`extra.trace_id`).
-- Metrics (don't tag by `trace_id`, but include in exemplars if your backend supports them).
-- StateStore audit (`save_event` persists with `trace_id` indexed).
-
-For end-to-end correlation:
-- Set `trace_id` from your inbound HTTP/WS request id (or generate one and return it).
-- Propagate via `Message.trace_id`.
-- Include in your `meta` for outbound calls to other services.
+- Put a request/trace id in `tool_context` (e.g. `trace_id`, `session_id`) — sessions do this for you (`tool_context["trace_id"]`, `["task_id"]`).
+- Add it to your log records with a `logging.Filter` or `LoggerAdapter` in the code that calls `planner.run()`.
+- Never use it as a metric label.
 
 ## Redaction
 
 PenguiFlow does **not** redact secrets. Common leak vectors:
-- `repr(exc)` in `node_error` events contains URLs, headers, tokens.
-- `Message.payload` if you log full events.
-- `Message.meta` if it carries secrets.
+- `tool_call_start.extra["args_json"]` and `tool_call_result.extra["result_json"]`.
+- Exception messages from tools (surface in step errors).
+- `llm_context` (sent to the LLM *and* returned in `PlannerFinish.metadata["llm_context"]`).
 
-Mitigation patterns:
-
-### Middleware-level redaction
 ```python
-SECRET_KEYS = {"authorization", "api_key", "token", "cookie"}
+SECRET_KEYS = {"authorization", "api_key", "token", "cookie", "password"}
 
-def redact(payload):
-    if isinstance(payload, dict):
-        return {k: ("[redacted]" if k.lower() in SECRET_KEYS else redact(v)) for k, v in payload.items()}
-    if isinstance(payload, list):
-        return [redact(x) for x in payload]
-    return payload
+def redact(value):
+    if isinstance(value, dict):
+        return {k: ("[redacted]" if k.lower() in SECRET_KEYS else redact(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    return value
 
-async def redacting_mw(event):
-    safe = redact(event.to_payload())
-    logger.info("flow_event", extra=safe)
+def on_event(event):
+    log.info(event.event_type, extra=redact(event.to_payload()))
 ```
 
-### At the boundary
-- Tools should never put secrets in tool outputs.
-- Don't `raise Exception(f"bearer {token} failed")` — sanitize messages.
+At the boundary: keep secrets in `tool_context` (never shown to the LLM), and sanitize exception messages raised by tools.
 
 ## Operational defaults
-
 - `configure_logging(structured=True)` in production.
-- `log_flow_events` on every flow (one logger per service).
-- Volume tuning: drop `node_start`, sample `node_success`, keep everything else.
+- One metrics `event_callback` per planner (or per planner factory).
 - Tag logs with `service`, `env`, `worker_id`.
-- Centralized log aggregation indexed by `trace_id`.
+- Index logs by your trace/session id.
 
 ## Common failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| No events | Middleware not attached | `create(..., middlewares=[log_flow_events(...)])` |
-| Duplicate logs | Root logger + `configure_logging` both add handlers | One entrypoint per process |
-| Missing `trace_id` | Payload-only flow | Envelope (`Message`) |
-| Worker stall | Slow middleware | Don't do blocking I/O in middlewares; queue and dispatch |
-| Secrets in logs | No redaction | Add redaction middleware |
-| Logs too verbose | All events at INFO | Lower `node_start` / sample `node_success` |
+| No planner events | logging not configured or level too high | `configure_logging(...)`; check `penguiflow.planner` level |
+| Duplicate logs | root handler + `configure_logging` | one entrypoint per process |
+| Callback metrics missing | callback replaced per request on a shared planner | process-wide callback or planner factory |
+| Event loop stalls | blocking I/O in `event_callback` | enqueue and export asynchronously |
+| Secrets in logs | args/results logged verbatim | redact in the callback / logging filter |

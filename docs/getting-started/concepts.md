@@ -6,9 +6,9 @@ This page defines the *major moving parts* of PenguiFlow and how they fit togeth
 
 Use it when you want to:
 
-- pick the right “message style” (payload-only vs envelopes),
-- understand where reliability and backpressure come from,
-- decide when you need the planner vs the core runtime.
+- understand how tools, the planner and its LLM client relate,
+- decide which production surface (sessions, state store, A2A) you need,
+- know where reliability, pause/resume and observability come from.
 
 If you want runnable code first, start with **[Quickstart](quickstart.md)**.
 
@@ -16,132 +16,86 @@ If you want runnable code first, start with **[Quickstart](quickstart.md)**.
 
 - This page is not a full API reference. It focuses on the mental model and the contracts that matter.
 - It does not cover external tool configuration and auth (see **[Tooling](../planner/tooling.md)** and **[Tools & integrations](../tools/configuration.md)**).
-- It does not prescribe an application architecture; “planner-only”, “runtime-only”, and “mixed” are all valid.
 
 ## Contract surface (the pieces you compose)
 
-### Flow (runtime)
+### Tool (typed async function)
 
-A **flow** is a directed graph of async nodes. It provides:
+A **tool** is an async function with typed input and output:
 
-- `flow.run(...)` / `await flow.stop()` lifecycle
-- `await flow.emit(...)` ingress (OpenSea)
-- `await flow.fetch(...)` egress (Rookery)
-- optional per-trace cancellation: `await flow.cancel(trace_id)`
+- signature: `async def fn(args: InModel, ctx: ToolContext) -> OutModel`
+- `@tool(desc=..., side_effects=..., tags=...)` adds the metadata the planner shows the LLM
+- `Node(fn, name=...)` wraps it, and `ModelRegistry.register(name, InModel, OutModel)` declares its contract
+- `build_catalog(nodes, registry)` turns them into the planner's tool catalog
 
-Canonical: **[Flows & nodes](../core/flows-and-nodes.md)**.
+External tools (MCP, UTCP, HTTP) plug in the same way through `ToolNode`; see **[Tooling](../planner/tooling.md)**.
 
-### Node (runtime)
+### ToolContext (in-tool capabilities)
 
-A **node** is an async function wrapped with metadata and policy:
+Every tool receives a `ctx` that exposes:
 
-- signature: `async def fn(message, ctx) -> Any`
-- `NodePolicy`: timeouts, retries, validation
-- edges: `a.to(b, c)` creates bounded queues (backpressure)
-
-Canonical: **[Errors, retries, timeouts](../core/errors-retries-timeouts.md)** and **[Concurrency](../core/concurrency.md)**.
-
-### Message (data + metadata)
-
-PenguiFlow supports two message styles:
-
-1. **Payload-only** (fastest start): nodes receive and return plain Pydantic models.
-2. **Envelope-based** (recommended for production): nodes pass a `Message(payload=..., headers=..., trace_id=...)`, enabling:
-   - per-trace correlation (`trace_id`),
-   - per-trace cancellation,
-   - deadlines,
-   - streaming chunks that inherit routing metadata,
-   - multi-tenant isolation via `Headers.tenant`.
-
-Canonical: **[Messages & envelopes](../core/messages-and-envelopes.md)**.
-
-### Context (in-node capabilities)
-
-Every node receives a `ctx` that can:
-
-- emit follow-up work (`await ctx.emit(...)`),
-- emit streaming chunks (`await ctx.emit_chunk(...)`),
-- access trace-scoped metadata used for observability and control (cancellation / deadlines).
-
-Canonical: **[Streaming](../core/streaming.md)** and **[Cancellation](../core/cancellation.md)**.
+- `ctx.llm_context` (visible to the LLM) and `ctx.tool_context` (tool-only: tenant, session, callbacks),
+- `await ctx.pause(reason, payload)` for human-in-the-loop checkpoints,
+- `await ctx.emit_chunk(...)` / artifact helpers for streaming partial output,
+- artifact and session KV stores when configured.
 
 ### Planner (ReactPlanner)
 
-The **planner** is an LLM-driven loop that selects tools and orchestrates their execution (including parallel calls) with:
+The **planner** is an LLM-driven loop that selects tools and orchestrates their execution with:
 
-- typed action schema and repair attempts,
-- pause/resume (HITL) and session semantics,
-- optional short-term memory,
-- trajectory logging/observability hooks.
+- a typed action schema and repair attempts,
+- parallel tool calls and joins,
+- pause/resume (HITL) and steering (cancel, inject guidance),
+- optional short-term memory, guardrails, reflection, skills and rich output,
+- `PlannerEvent` callbacks for observability and streaming.
+
+`await planner.run(query, tool_context=...)` returns a `PlannerFinish` (answer, or no path / budget exhausted) or a `PlannerPause` (resume with `planner.resume(token, user_input=...)`).
 
 Canonical: **[ReactPlanner overview](../planner/overview.md)**.
 
+### Production surfaces
+
+- **Sessions** (`StreamingSession`, `SessionManager`, `PlannerTaskPipeline`): multi-turn sessions with foreground/background tasks and live updates. See **[Background tasks](../planner/background-tasks.md)**.
+- **State store** (`StateStore`): durable pause records, memory, task state and remote bindings. See **[State store](../tools/statestore.md)**.
+- **A2A** (`penguiflow_a2a`): serve a planner as an A2A agent with `A2AService(planner, ...)`, and call remote agents as tools with `A2AAgentToolset`.
+
 ## Operational defaults (safe starting points)
 
-- Prefer **bounded queues** (`queue_maxsize` > 0) and treat queue depth as a first-class signal.
-- Prefer **envelopes** (`Message`) when you need streaming, cancellation, deadlines, multi-tenant boundaries, or deterministic correlation.
-- Keep `trace_id` **unique per request/session**; treat it as part of your authorization story (don’t let a user fetch/cancel another user’s trace).
-- In production, add:
-  - middlewares for structured `FlowEvent` logging, and/or
-  - a `StateStore` for durability and event persistence.
+- Give every tool an explicit input/output model; validation errors become planner observations the LLM can repair.
+- Pass `tenant` and `session_id` in `tool_context` so memory, pause records and state are scoped correctly.
+- Set budgets (`max_iters`, token budgets, deadlines) before production rollout.
+- Attach an `event_callback` early and decide where planner events go (logs, metrics, UI).
 
 ## Failure modes & recovery
 
-- **`fetch()` hangs**: nothing reached the Rookery sink (no egress node, egress returns `None`, or you didn’t call `run()`).
-- **Cross-trace mixups**: you reused `trace_id` across concurrent requests (use trace-scoped fetch or unique trace ids).
-- **Streaming “does nothing”**: you’re using payload-only messages; switch to envelope style and call `ctx.emit_chunk(parent=Message(...), ...)`.
-- **Retries amplify side effects**: the node is not idempotent (use idempotency keys, or emit side effects only once).
-
-Canonical runbooks live in the core pages:
-
-- **[Flows & nodes](../core/flows-and-nodes.md)**
-- **[Messages & envelopes](../core/messages-and-envelopes.md)**
-- **[Errors, retries, timeouts](../core/errors-retries-timeouts.md)**
+- **The planner loops or stalls**: tighten tool descriptions and budgets; see **[Troubleshooting](../planner/troubleshooting.md)**.
+- **Tool output fails validation**: the tool's return value doesn't match its registered output model.
+- **Pause tokens are lost across processes**: configure a `StateStore` so pause records survive restarts.
+- **Retries amplify side effects**: mark tools with the right `side_effects` and make them idempotent.
 
 ## Observability
 
-The runtime emits structured `FlowEvent` for:
-
-- node lifecycle (`node_start`, `node_success`, `node_error`, `node_timeout`, …),
-- queue depth and pending/inflight counts (critical for backpressure debugging),
-- trace cancellation and deadline skips.
-
-Operationally:
-
-- attach a middleware (e.g. `penguiflow.middlewares.log_flow_events`) early, and
-- decide where you persist events (often via `StateStore`) before production rollout.
-
-See **[Logging](../observability/logging.md)** and **[Telemetry patterns](../observability/telemetry-patterns.md)**.
+The planner emits `PlannerEvent`s (step start/end, tool calls, LLM stream chunks, finish, errors) to `event_callback`. Use `configure_logging(structured=True)` for JSON logs. See **[Planner observability](../planner/observability.md)** and **[Logging](../observability/logging.md)**.
 
 ## Security / multi-tenancy notes
 
-- Always set `Headers.tenant` when you use envelopes, and keep tenant boundaries consistent across a trace.
-- Don’t put secrets in payloads or message `meta` if you persist events/logs; prefer secret managers + redaction.
-- Treat `trace_id` + `fetch(trace_id=...)` + `cancel(trace_id)` as sensitive control surfaces in applications.
+- Keep secrets in `tool_context` (never in `llm_context`), and never echo them into tool outputs.
+- Scope memory and state by tenant/user/session.
+- Treat resume tokens and session ids as sensitive control surfaces in applications.
 
 ## Runnable examples
 
-Run a minimal flow:
-
-```bash
-uv run python examples/quickstart/flow.py
-```
-
-Run a streaming example (chunks + final answer):
-
-```bash
-uv run python examples/roadmap_status_updates/flow.py
-```
-
-If you’re building an LLM agent, start with the minimal planner example:
+Start with the minimal planner example (stubbed LLM, no API key needed):
 
 ```bash
 uv run python examples/react_minimal/main.py
 ```
 
+More: `examples/react_parallel/`, `examples/react_pause_resume/`, `examples/streaming_llm/stream_answer.py`, `examples/a2a_grpc_server/main.py`.
+
 ## Troubleshooting checklist
 
-- **Need cancellation/deadlines/streaming**: switch to envelopes (`Message`) and use `trace_id` per request.
-- **Need parallel fan-out + join**: use `join_k` and ensure you pass `trace_id` (see **[Concurrency](../core/concurrency.md)**).
-- **Need pause/resume / HITL**: use the planner (see **[Pause/resume](../planner/pause-resume-hitl.md)**).
+- **Need parallel tool calls + join**: see **[Parallel & joins](../planner/parallel-and-joins.md)**.
+- **Need pause/resume / HITL**: see **[Pause/resume](../planner/pause-resume-hitl.md)**.
 - **Need tool integrations**: use ToolNode and configure auth (see **[Tools configuration](../tools/configuration.md)**).
+- **Need to expose the agent to other agents**: serve it with `penguiflow_a2a.A2AService`.

@@ -234,7 +234,13 @@ class InMemoryTaskStore:
                 else:
                     artifacts.append(artifact)
             else:
-                artifacts.append(artifact)
+                # A non-append update replaces any artifact previously sent with the same id.
+                for idx, existing in enumerate(artifacts):
+                    if existing.artifact_id == artifact.artifact_id:
+                        artifacts[idx] = artifact
+                        break
+                else:
+                    artifacts.append(artifact)
             stored.task = stored.task.model_copy(update={"artifacts": artifacts}, deep=True)
             stored.updated_at = _utc_now()
             event = TaskArtifactUpdateEvent(

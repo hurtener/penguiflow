@@ -9,10 +9,8 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from penguiflow import Message as FlowMessage
-from penguiflow import Node, NodePolicy, create
 from penguiflow.artifacts import NoOpArtifactStore, ScopedArtifacts
-from penguiflow.planner import ReactPlanner
+from penguiflow.planner import PlannerFinish, ReactPlanner
 from penguiflow.remote import (
     RemoteTaskAuthRequired,
     RemoteTaskEvent,
@@ -23,6 +21,8 @@ from penguiflow.remote import (
 from penguiflow.state import InMemoryStateStore, RemoteBinding
 from penguiflow_a2a import A2AAgentToolset, A2AConfig, A2AService, create_a2a_http_app
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+
+from .planner_doubles import ScriptedPlanner, ScriptedRun
 
 
 class StubClient:
@@ -76,15 +76,11 @@ class ContextEchoResult(EchoResult):
 
 @pytest.mark.asyncio
 async def test_a2a_agent_toolset_unary_executes_via_planner() -> None:
-    async def echo(message: FlowMessage, _ctx: Any) -> dict[str, str]:
-        payload = message.payload
-        if not isinstance(payload, Mapping):
-            raise AssertionError("Expected dict payload")
-        return {"echo": str(payload.get("text"))}
+    async def echo(run: ScriptedRun) -> PlannerFinish:
+        payload = json.loads(run.query)
+        return PlannerFinish(reason="answer_complete", payload={"echo": str(payload.get("text"))})
 
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(streaming=False), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(echo), agent_card=_agent_card(streaming=False), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
 
     transport = httpx.ASGITransport(app=app)
@@ -124,18 +120,18 @@ async def test_a2a_agent_toolset_unary_executes_via_planner() -> None:
 
 @pytest.mark.asyncio
 async def test_a2a_agent_toolset_reuses_remote_context_within_router_session() -> None:
-    async def echo_context(message: FlowMessage, _ctx: Any) -> dict[str, str]:
-        payload = message.payload
-        if not isinstance(payload, Mapping):
-            raise AssertionError("Expected dict payload")
-        context_id = message.meta.get("a2a_context_id")
+    async def echo_context(run: ScriptedRun) -> PlannerFinish:
+        payload = json.loads(run.query)
+        context_id = run.tool_context.get("a2a_context_id")
         if not isinstance(context_id, str):
             raise AssertionError("Expected A2A context id")
-        return {"echo": str(payload.get("text")), "context_id": context_id}
+        assert run.tool_context["session_id"] == context_id
+        return PlannerFinish(
+            reason="answer_complete",
+            payload={"echo": str(payload.get("text")), "context_id": context_id},
+        )
 
-    node = Node(echo_context, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(streaming=False), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(echo_context), agent_card=_agent_card(streaming=False), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     state_store = InMemoryStateStore()
 
@@ -183,14 +179,12 @@ async def test_a2a_agent_toolset_reuses_remote_context_within_router_session() -
 
 @pytest.mark.asyncio
 async def test_a2a_agent_toolset_streaming_records_chunks_in_planner_history() -> None:
-    async def streamer(message: FlowMessage, ctx: Any) -> dict[str, str]:
+    async def streamer(run: ScriptedRun) -> PlannerFinish:
         # Emit a partial chunk without marking it as the final A2A chunk.
-        await ctx.emit_chunk(parent=message, text="hello", done=False)
-        return {"echo": "hello"}
+        run.emit_chunk("hello", done=False)
+        return PlannerFinish(reason="answer_complete", payload={"echo": "hello"})
 
-    node = Node(streamer, name="streamer", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(streaming=True), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(streamer), agent_card=_agent_card(streaming=True), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
 
     transport = httpx.ASGITransport(app=app)

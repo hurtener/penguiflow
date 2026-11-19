@@ -1,4 +1,0 @@
-interface:
-  display_name: "PenguiFlow Core Flows"
-  short_description: "Build deterministic async pipelines and agent graphs"
-  default_prompt: "Help me build a PenguiFlow runtime graph: define Nodes with NodePolicy, wire them with create(...) and adjacency tuples, choose payload-only vs Message envelopes, branch with predicate_router/union_router, fan-out and join_k, cancel a trace, set deadlines, and surface FlowError to callers."

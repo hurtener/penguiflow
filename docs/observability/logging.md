@@ -2,15 +2,15 @@
 
 ## What it is / when to use it
 
-PenguiFlow uses standard Python logging and emits structured runtime events (`FlowEvent`) that you can capture and forward to your logging/telemetry stack.
+PenguiFlow uses standard Python logging. The planner logs every `PlannerEvent` on the `penguiflow.planner` logger and also hands it to your `event_callback`, so you can capture and forward agent activity to your logging stack.
 
 Use this page when you want:
 
 - consistent JSON logs for production,
-- trace-correlated debugging (`trace_id`),
-- a reliable way to observe node lifecycle (success/error/timeout/retry).
+- trace-correlated debugging (`trace_id`, `session_id`),
+- a reliable way to observe planner steps, tool calls and finish reasons.
 
-Start with **[Observability overview](overview.md)** if you need the full telemetry model across runtime, planner, LLM, and task/session layers.
+Start with **[Observability overview](overview.md)** if you need the full telemetry model across planner, LLM, and task/session layers.
 
 ## Non-goals / boundaries
 
@@ -33,103 +33,60 @@ from penguiflow import configure_logging
 configure_logging(level="INFO", structured=True)
 ```
 
-### Runtime `FlowEvent`
+### Planner events
 
-The runtime emits `FlowEvent` objects with:
+Every `PlannerEvent` carries `event_type`, `ts`, `trajectory_step`, and when relevant `node_name`, `latency_ms`, `thought`, `error` and `extra`. `event.to_payload()` returns a flat dict that is safe to pass as logging `extra`.
 
-- `event_type` (e.g. `node_success`, `node_error`, `node_timeout`, `node_retry`, `deadline_skip`, …),
-- queue depth (incoming/outgoing),
-- latency (ms) when applicable,
-- trace-level inflight/pending counts when a `trace_id` exists.
-
-You can:
-
-- log them directly (`event.to_payload()`), and/or
-- derive metrics (`event.metric_samples()`).
-
-### `log_flow_events(...)` middleware
-
-`log_flow_events` is a ready-to-use middleware that logs node lifecycle events with structured `extra` payloads.
+The planner logs each event itself: `llm_stream_chunk` at DEBUG and everything else at INFO. To route events elsewhere, pass a callback:
 
 ```python
 import logging
 
-from penguiflow import create, log_flow_events
+from penguiflow.planner import PlannerEvent, ReactPlanner
 
-flow = create(
-    ...,
-    middlewares=[log_flow_events(logging.getLogger("penguiflow.flow"))],
-)
+audit = logging.getLogger("myapp.agent")
+
+
+def record(event: PlannerEvent) -> None:
+    audit.info(event.event_type, extra=event.to_payload())
+
+
+planner = ReactPlanner(llm_client=..., catalog=..., event_callback=record)
 ```
 
 ## Operational defaults (recommended)
 
 - Turn on JSON logs in production: `configure_logging(structured=True)`.
-- Log with **stable identifiers**:
-  - `trace_id` (correlation),
-  - `node_name` / `node_id`,
-  - `tenant` (if multi-tenant).
-- Avoid logging large payloads; prefer artifacts/resources and log references.
-- Keep log volumes bounded (sampling or level tuning) for `node_start` events if needed.
+- Log with **stable identifiers**: `trace_id`, `session_id`, `node_name` (tool), `tenant` if multi-tenant.
+- Avoid logging large tool payloads; prefer artifacts and log references.
+- Keep `llm_stream_chunk` at DEBUG; it is high volume.
 
 ## Failure modes & recovery
 
-- **No FlowEvents in logs**: you didn’t attach middleware. Fix: pass `middlewares=[log_flow_events(...)]` to `create(...)`.
-- **Duplicate logs**: you configured both root logger handlers and `configure_logging`, or you enabled propagation incorrectly. Fix: use one logging entrypoint; keep `penguiflow` logger configured once per process.
-- **Logs missing `trace_id`**: you’re using payload-only messages or not setting/propagating trace ids. Fix: use envelopes (`Message`) and trace-scoped emit/fetch.
-- **Sensitive data leaked**: you logged raw tool outputs/payloads. Fix: redact at boundaries; log only ids + summaries.
+- **No planner events in logs**: the `penguiflow` logger isn't configured. Fix: call `configure_logging(...)` once at startup, or configure `penguiflow.planner` yourself.
+- **Duplicate logs**: you configured both root logger handlers and `configure_logging`, or enabled propagation incorrectly. Fix: use one logging entrypoint per process.
+- **Logs missing correlation ids**: pass `tenant`/`session_id` in `tool_context` and include them in your callback's log fields.
+- **Sensitive data leaked**: you logged raw tool outputs or `tool_context`. Fix: redact at boundaries; log only ids and summaries.
 
 ## Observability (what to log)
 
 Minimum recommended log events:
 
-- runtime:
-  - `node_error`, `node_failed`, `node_timeout` at WARNING/ERROR,
-  - `node_success` at INFO (optionally sampled),
-  - `node_retry` at INFO,
-  - `trace_cancel_start` / `trace_cancel_finish` at INFO,
-  - `deadline_skip` at INFO.
+- planner:
+  - `finish` (reason, cost) at INFO,
+  - `tool_call_end` / `step_complete` with `latency_ms` at INFO,
+  - `planner_args_invalid`, `planner_repair_attempt`, `guardrail_retry` at WARNING,
+  - `steering_received`, `resume` at INFO.
 - application:
-  - job/request received (with `trace_id`, `tenant`),
-  - job/request completed (latency + status),
+  - request received (with `tenant`, `session_id`),
+  - request completed (latency + finish reason),
   - external dependency failures (tool boundary).
 
 ## Security / multi-tenancy notes
 
 - Never include secrets in log fields. Assume logs are broadly accessible in an enterprise.
 - Do not tag metrics by `trace_id` (cardinality explosion); for logs, `trace_id` is correct and expected.
-- Treat `trace_id` as sensitive if it can be used to fetch/cancel work in your app.
-
-## Runnable example: structured FlowEvent logging
-
-```python
-from __future__ import annotations
-
-import asyncio
-import logging
-
-from penguiflow import Node, NodePolicy, configure_logging, create, log_flow_events
-
-
-async def nop(msg, _ctx):
-    return msg
-
-
-async def main() -> None:
-    configure_logging(structured=True)
-
-    logger = logging.getLogger("penguiflow.flow")
-    node = Node(nop, name="nop", policy=NodePolicy(timeout_s=5, max_retries=0))
-    flow = create(node.to(), middlewares=[log_flow_events(logger)])
-    flow.run()
-    await flow.emit({"hello": "world"})
-    _ = await flow.fetch()
-    await flow.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
+- Treat resume tokens and session ids as sensitive if they can be used to drive work in your app.
 
 ## Troubleshooting checklist
 

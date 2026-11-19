@@ -3,7 +3,7 @@
 Persistence protocols and adapters for durable session state, stored events, and
 conversation bindings.
 
-The `ContextPatch` object is documented under [Routing policies](routing.md).
+The `ContextPatch` object is documented under [Sessions & scheduling](sessions.md).
 
 ## `penguiflow.state`
 

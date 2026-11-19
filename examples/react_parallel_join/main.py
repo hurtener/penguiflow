@@ -10,10 +10,18 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from penguiflow.catalog import build_catalog, tool
-from penguiflow.errors import FlowError
 from penguiflow.node import Node
 from penguiflow.planner import ReactPlanner, ToolContext
 from penguiflow.registry import ModelRegistry
+
+
+class UpstreamUnavailableError(RuntimeError):
+    """Raised when a search provider cannot be reached."""
+
+    def __init__(self, *, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class SearchArgs(BaseModel):
@@ -49,7 +57,7 @@ async def search_catalog(args: SearchArgs, ctx: ToolContext) -> SearchResult:
 
     if args.provider == "unstable":
         # Simulate a branch failure so join can surface it
-        raise FlowError(
+        raise UpstreamUnavailableError(
             code="UPSTREAM_UNAVAILABLE",
             message="Upstream provider is temporarily offline",
         )
@@ -91,6 +99,8 @@ class ScriptedPlannerLLM:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
         del messages, response_format
         return self._payloads.pop(0)

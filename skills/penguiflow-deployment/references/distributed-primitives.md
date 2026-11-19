@@ -1,67 +1,43 @@
 # Distributed Primitives
 
-PenguiFlow exposes three protocols for distributed deployments: `StateStore`, `MessageBus`, `RemoteTransport`. You provide the implementations; the runtime calls them at the right hooks.
+A planner deployment spreads across processes through two protocols — `StateStore` (durability) and `RemoteTransport` (agent-to-agent calls) — plus the A2A bindings built on them. You provide the backends; the planner, sessions and A2A toolsets call them at the right hooks.
 
 ## `StateStore` (durability + audit)
 
-The cornerstone of distributed PenguiFlow. Required for any feature that must survive a process restart.
+Required for any feature that must survive a process restart or move between workers.
 
-Required methods:
-- `save_event(event: StoredEvent) -> None` — idempotent persistence of every `FlowEvent`.
-- `load_history(trace_id: str) -> Sequence[StoredEvent]` — read events for a trace (audit, replay, debugging).
-- `save_remote_binding(binding: RemoteBinding) -> None` — persist agent-to-agent / RemoteNode bindings.
+Base protocol (`penguiflow.state.StateStore`):
+- `save_event(event: StoredEvent) -> None` — idempotent persistence of runtime events (sessions write task/steering events here).
+- `load_history(trace_id: str) -> Sequence[StoredEvent]` — read events for a trace (audit, `penguiflow-admin`).
+- `save_remote_binding(binding: RemoteBinding) -> None` — persist agent-to-agent bindings.
 
 Optional capabilities (duck-typed, detected at runtime):
-- Planner pause/resume state — see [[penguiflow-hitl-pause-resume]].
-- Memory state — see [[penguiflow-memory]].
-- Conversation bindings for A2A — see [[penguiflow-a2a-integration]].
-- Artifact store — see [[penguiflow-rich-output]].
 
-Pass to flow construction:
+| Capability | Methods | Used by |
+|---|---|---|
+| Planner pause state | `save_planner_state`, `load_planner_state` | `PlannerPause` → resume on any worker ([[penguiflow-hitl-pause-resume]]) |
+| Memory | `save_memory_state`, `load_memory_state` | short-term memory ([[penguiflow-memory]]) |
+| Conversation bindings | `find_binding`, `list_bindings`, `mark_binding_terminal` | `A2AAgentToolset` continuity ([[penguiflow-a2a-integration]]) |
+| Tasks / updates | `save_task`, `list_tasks`, `save_update`, `list_updates` | `StreamingSession` persistence and replay ([[penguiflow-background-tasks]]) |
+| Steering | `save_steering`, `list_steering` | steering audit |
+| Trajectories / planner events | `save_trajectory`, `get_trajectory`, `save_planner_event`, `list_planner_events` | run inspection |
+| Artifacts | artifact store methods | rich output / large payloads ([[penguiflow-rich-output]]) |
+
+Wire it once:
 ```python
-flow = create(..., state_store=my_state_store)
-planner = ReactPlanner(..., state_store=my_state_store)
+planner = ReactPlanner(..., state_store=store)
+sessions = SessionManager(state_store=store)
+service = A2AService(planner, agent_card=card, config=A2AConfig(agent_url=...))   # uses the planner's store for bindings
 ```
 
-Backends: in-memory (dev), Redis, Postgres, custom. Full contract in [[penguiflow-statestore]].
+Backends: in-memory (`InMemoryStateStore`, dev only), Redis, Postgres, custom. Full contract in [[penguiflow-statestore]].
 
 ### Idempotency rule
-`save_event` may be called multiple times for the same `StoredEvent` (retries, recovery). Implementations must dedupe (unique constraint on event id, fingerprint, etc.). The runtime treats `save_event` as best-effort; errors are logged and execution continues.
+`save_event` and `save_update` may be called more than once for the same record (retries, recovery). Implementations must dedupe (unique constraint on event/update id). Event persistence is best-effort; errors are logged and execution continues.
 
-## `MessageBus` (distributed edges)
+## `RemoteTransport` (agent-to-agent calls)
 
-Optional. Lets the runtime publish edge traffic to a queue/bus so out-of-process workers can consume.
-
-Interface (signature):
-```python
-class MessageBus(Protocol):
-    async def publish(self, envelope: BusEnvelope) -> None: ...
-```
-
-`BusEnvelope` carries the message + routing metadata (source node, target node, trace_id).
-
-When configured (`create(..., message_bus=my_bus)`):
-- Every edge `emit` also publishes a `BusEnvelope`.
-- Downstream workers consume from the bus and re-emit into their local flow.
-
-Use when:
-- Splitting one graph across processes/machines (e.g., heavy GPU node on a separate worker).
-- Tracing edge traffic for replay.
-- Hooking PenguiFlow into your event/streaming platform (Kafka, Pub/Sub).
-
-Don't use when:
-- A single process can handle the load (just use the in-process runtime).
-- You don't have a durable bus (you'll lose edges on bus failure).
-
-### Implementation hints
-- The bus must guarantee ordering per `trace_id` if you want join semantics to hold across processes.
-- Treat bus publish as best-effort but log failures loudly — a missed publish silently loses an edge.
-
-## `RemoteTransport` + `RemoteNode`
-
-For calling a remote service as if it were a local node.
-
-`RemoteTransport` protocol (`penguiflow.remote.RemoteTransport`):
+`penguiflow.remote.RemoteTransport`:
 ```python
 class RemoteTransport(Protocol):
     async def send(self, request: RemoteCallRequest) -> RemoteCallResult: ...
@@ -69,92 +45,61 @@ class RemoteTransport(Protocol):
     async def cancel(self, *, agent_url: str, task_id: str) -> None: ...                    # keyword-only
 ```
 
-Optional richer surface: `SupportsRemoteTasks` (in the same module) adds `send_task`, `get_task`, `list_tasks`, `subscribe_task`, and four `*_task_push_notification_config*` methods. `A2AHttpTransport` implements both.
+Optional richer surface: `SupportsRemoteTasks` (same module) adds `send_task`, `get_task`, `list_tasks`, `subscribe_task` and the four `*_task_push_notification_config*` methods. `A2AHttpTransport` implements both.
 
-Construct a remote node via the `RemoteNode(...)` factory (all keyword-only):
-```python
-from penguiflow import NodePolicy, RemoteNode
+`RemoteCallRequest` carries a `penguiflow.types.Message` (`payload` + `Headers(tenant=...)`), the remote `skill`, `agent_url`, optional `context_id` / `task_id` for continuity, and `metadata`.
 
-remote = RemoteNode(
-    transport=my_transport,
-    skill="answer",
-    agent_url="https://specialist.example.com",
-    name="ask_specialist",            # required — becomes Node.name
-    agent_card=card_dict,             # optional but recommended
-    policy=NodePolicy(timeout_s=30.0, max_retries=1),
-    streaming=False,
-    record_binding=True,              # default; persists RemoteBinding
-)
-```
-
-Include `remote` in your graph like any `Node`. The runtime calls the transport on edge dequeue.
-
-### `record_binding=True` (default)
-Persists `RemoteBinding(trace_id, agent_url, task_id, ...)` to the `StateStore`. Required for:
-- Cancellation across worker restarts.
-- A2A conversation continuity.
-- Distributed observability of remote tasks.
-
-If you set `record_binding=False` (or `StateStore.save_remote_binding` isn't implemented), remote tasks can leak — you can spawn them but not cancel them after a restart.
-
-### Cancellation
-`flow.cancel(trace_id)` calls `transport.cancel(agent_url=..., task_id=...)` (keyword-only) for every recorded binding. Best-effort — the remote may or may not honor it.
+Planners consume a transport through `A2AAgentToolset(agent_url=..., transport=...)` / `A2ARouterToolset`, which turn remote skills into catalog tools, persist `RemoteBinding`s, map remote `input-required` / `auth-required` to planner pauses, and propagate cancellation (`cancel_on_cancel=True`).
 
 ### Implementations
-- `A2AHttpTransport` (in `penguiflow_a2a`) implements both protocols for HTTP A2A endpoints.
-- For gRPC, custom HTTP, internal services — implement the protocol yourself.
+- `A2AHttpTransport` (in `penguiflow_a2a`) for HTTP A2A endpoints.
+- For gRPC, internal RPC or message queues — implement the protocol yourself.
 
 ## A2A handoff
 
-`penguiflow_a2a` provides full A2A protocol bindings (server, JSON-RPC, REST, SSE, gRPC, push notifications). For a manager↔specialist topology:
+- **Manager**: `A2AAgentToolset` / `A2ARouterToolset` tools in its catalog.
+- **Specialist**: `A2AService(planner, ...)` + `install_a2a_http(app, service)` (or the gRPC binding).
 
-- **Manager**: uses `A2AAgentToolset` (a higher-level wrapper than `RemoteNode`) to wrap remote agents as planner tools.
-- **Specialist**: uses `A2AService` + an HTTP binding to expose itself.
-
-See [[penguiflow-a2a-integration]]. This deployment skill points there; don't duplicate.
+Each specialist task is one planner run keyed by the A2A `contextId` (`tool_context["session_id"]`), so conversations stay coherent across calls. See [[penguiflow-a2a-integration]]; don't duplicate here.
 
 ## Recovery semantics
 
-On worker restart, the runtime can recover state when:
-- `StateStore.load_history(trace_id)` returns past events.
-- `StateStore.load_planner_state(token)` returns pause records.
-- `StateStore` exposes `list_bindings` and `find_binding` for active remote tasks.
+On worker restart you can recover:
+- **Paused runs** — `load_planner_state(token)`; call `planner.resume(token, user_input=...)` on any worker.
+- **Memory** — `load_memory_state(key)` on the next run for that `session_id`.
+- **Session history** — `list_tasks` / `list_updates` for reconnecting clients.
+- **Remote conversations** — `find_binding` returns the remote `context_id` / `task_id`.
 
 What's NOT recovered automatically:
-- In-flight node tasks. They die with the worker.
-- Edge queue contents. They die with the process unless backed by a `MessageBus`.
-- Tool job state inside a `TaskService`. Depends on the service's persistence.
+- In-flight planner runs. They die with the worker; re-run the job (or resume from the last pause).
+- In-flight tool calls. Their side effects may or may not have happened.
+- Remote tasks started by a dead run — cancel them via the recorded bindings if needed.
 
 Implication: design for at-least-once. Anything sensitive (writes, sends) needs idempotency keys.
 
 ## At-least-once + idempotency rules
 
-In a distributed deployment with retries, redeliveries, and recovery:
-
-1. **Every external write** has an idempotency key (use `trace_id` or `trace_id:node_name`).
-2. **Plan/commit split** for high-stakes side effects.
-3. **Dead-letter** terminal failures to a human-reviewed queue.
+1. **Every external write** has an idempotency key (job id, or `trace_id:tool_name:args-hash`).
+2. **Plan/commit split** for high-stakes side effects — gate the commit behind HITL.
+3. **Dead-letter** terminal failures (`no_path`, repeated errors) to a human-reviewed queue.
 4. **Re-execute only after verifying** the previous attempt didn't already succeed.
 
 The library can't enforce idempotency for you — it's a property of the surrounding system.
 
 ## A practical distributed setup
 
-For a multi-worker production agent:
+1. **Postgres `StateStore`** — pause state, memory, tasks/updates, bindings, events.
+2. **Redis** (or any queue) for inbound jobs.
+3. **Stateless worker pool** building planners from a factory.
+4. **`A2AHttpTransport`** for outbound agent calls; `A2AService` for inbound.
+5. **LLM tracing** (`PENGUIFLOW_LLM_TRACING=mlflow`) and planner-event metrics.
+6. **OpenTelemetry** for cross-service traces (your request id ↔ `tool_context["trace_id"]`).
 
-1. **Postgres `StateStore`** — events + bindings + pause state + memory.
-2. **Redis** queue for inbound jobs.
-3. **Stateless worker pool** consuming from Redis.
-4. **`A2AHttpTransport`** for outbound agent calls.
-5. **MLflow / Prometheus** exporter via `FlowEvent` middleware.
-6. **OpenTelemetry** for cross-service traces (`trace_id` ↔ OTel `trace_id`).
-
-A2A bindings recover correctly across restarts. Memory persists. Pauses survive worker swaps. Cancellation propagates to remote tasks via `RemoteBinding`.
+Pauses survive worker swaps. Memory persists. A2A bindings recover across restarts.
 
 ## Anti-patterns
 
-- **`StateStore` only in-memory** — defeats every multi-worker capability.
-- **`record_binding=False`** in production — orphaned remote tasks accumulate.
-- **`MessageBus` without `StateStore`** — bus traffic vanishes on restart.
-- **Mixing tenants in the same `trace_id`** — recovery merges them.
+- **`StateStore` only in-memory** in multi-worker production — defeats pause/resume, memory and bindings.
+- **No `agent_url` on specialists** — no bindings recorded for their tasks.
+- **Mixing tenants under one `session_id`** — memory and bindings merge.
 - **No idempotency on external writes** — duplicates on retry and recovery.

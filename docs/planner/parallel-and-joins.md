@@ -10,7 +10,6 @@ Use planner-level parallelism when the task decomposes into independent subqueri
 
 ## Non-goals / boundaries
 
-- This is not runtime-level fan-out/fan-in (see `docs/core/concurrency.md`).
 - Parallel plans do not guarantee ordering across branches.
 
 ## Contract surface

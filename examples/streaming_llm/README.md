@@ -1,42 +1,8 @@
 # Streaming LLM Demo
 
-This example shows how a node can emit streaming chunks using `Context.emit_chunk`
-and how to format those chunks for clients. A mock LLM node breaks the response into
-tokens and sends them downstream, while an SSE-style sink renders each chunk with
-`format_sse_event` and emits a final JSON payload via `chunk_to_ws_json` that can be
-sent to WebSocket listeners.
+`stream_answer.py` shows how `ReactPlanner` picks up streaming chunks from a tool and passes them on through `PlannerEvent` callbacks while the tool is still running.
 
 ## Running
-
-```bash
-uv run python examples/streaming_llm/flow.py
-```
-
-Expected output (timestamps will vary, `<id>` omits the actual identifier):
-
-```
-event: chunk
-id: 0
-data: Penguins 
-
-...
-
-event: done
-id: 4
-data: warm
-{"stream_id": "<id>", "seq": 4, "text": "warm", "done": true, "meta": {"token_index": 4}}
-final: Penguins huddle to stay warm
-```
-
-The sink receives every `StreamChunk` in order, prints SSE-compatible lines, and
-returns the assembled string to the Rookery once `done=True`, demonstrating
-backpressure-friendly streaming end-to-end.
-
-## ReactPlanner streaming demo
-
-The directory also includes `stream_answer.py`, showcasing how `ReactPlanner`
-captures streaming chunks and surfaces them via `PlannerEvent` callbacks while a
-tool is running.
 
 ```bash
 uv run python examples/streaming_llm/stream_answer.py
@@ -49,5 +15,4 @@ Streaming answer: PenguiFlow is a lightweight async agent orchestrator with type
 Final payload: {"answer": "PenguiFlow is a lightweight agent orchestrator."}
 ```
 
-Each streamed token triggers a `stream_chunk` event, prints immediately, and is
-stored on the resulting trajectory (`result.metadata["steps"][0]["streams"]`).
+Each streamed token fires a `stream_chunk` event and prints right away. The chunks are also kept on the resulting trajectory, in `result.metadata["steps"][0]["streams"]`.

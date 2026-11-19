@@ -3,13 +3,14 @@ import asyncio
 import httpx
 import pytest
 
-from penguiflow import Headers, Message, Node, NodePolicy, RemoteNode, create
-from penguiflow.errors import FlowError
-from penguiflow.remote import RemoteCallRequest, RemoteTaskState
-from penguiflow.types import StreamChunk
+from penguiflow import Headers, Message
+from penguiflow.planner import PlannerFinish
+from penguiflow.remote import RemoteCallRequest, RemoteTaskInputRequired, RemoteTaskState
 from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from penguiflow_a2a.transport import A2AHttpTransport, _build_send_message
+
+from .planner_doubles import ScriptedPlanner, ScriptedRun
 
 
 def _agent_card() -> AgentCard:
@@ -93,122 +94,96 @@ async def test_a2a_http_transport_merges_agent_specific_headers() -> None:
     assert seen_headers["authorization"] == "Bearer test-token"
 
 
+def _request(text: str = "hello", **kwargs) -> RemoteCallRequest:
+    return RemoteCallRequest(
+        message=Message(payload=text, headers=Headers(tenant="t")),
+        skill="echo",
+        agent_url="http://test",
+        **kwargs,
+    )
+
+
 @pytest.mark.asyncio
 async def test_a2a_http_transport_unary() -> None:
-    async def echo(message, _ctx) -> dict[str, str]:
-        return {"echo": str(message.payload)}
+    async def echo(run: ScriptedRun) -> PlannerFinish:
+        return PlannerFinish(reason="answer_complete", payload={"echo": run.query})
 
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(echo), agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         transport = A2AHttpTransport(client=client)
-        remote = RemoteNode(
-            transport=transport,
-            skill="echo",
-            agent_url="http://test",
-            name="remote-echo",
-        )
-        client_flow = create(remote.to())
-        client_flow.run()
-        try:
-            message = Message(payload="hello", headers=Headers(tenant="t"))
-            await client_flow.emit(message)
-            result = await client_flow.fetch()
-            assert result == {"echo": "hello"}
-        finally:
-            await client_flow.stop()
+        result = await transport.send(_request())
+        assert result.result == {"echo": "hello"}
+        assert result.context_id
+        assert result.task_id
     await service.stop()
 
 
 @pytest.mark.asyncio
 async def test_a2a_http_transport_streaming() -> None:
-    async def streamer(message, ctx) -> str:
-        await ctx.emit_chunk(parent=message, text="hello", done=True, meta={"step_id": "stream"})
+    async def streamer(run: ScriptedRun) -> str:
+        run.emit_chunk("hel")
+        run.emit_chunk("lo", done=True)
         return "hello"
 
-    node = Node(streamer, name="streamer", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(streamer), agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         transport = A2AHttpTransport(client=client)
-        remote = RemoteNode(
-            transport=transport,
-            skill="stream",
-            agent_url="http://test",
-            name="remote-stream",
-            streaming=True,
-        )
-        client_flow = create(remote.to())
-        client_flow.run()
-        try:
-            message = Message(payload="hello", headers=Headers(tenant="t"))
-            await client_flow.emit(message)
-            chunk_message = await client_flow.fetch()
-            assert isinstance(chunk_message, Message)
-            chunk = chunk_message.payload
-            assert isinstance(chunk, StreamChunk)
-            assert chunk.text == "hello"
-            assert chunk.meta["step_id"] == "stream"
-            final = await client_flow.fetch()
-            assert final == "hello"
-        finally:
-            await client_flow.stop()
+        events = [event async for event in transport.stream(_request())]
+
+    texts = [event.text for event in events if event.text]
+    assert texts[:2] == ["hel", "lo"]
+    assert events[-1].done is True
+    assert events[-1].result == "hello"
     await service.stop()
 
 
 @pytest.mark.asyncio
 async def test_a2a_http_transport_streaming_surfaces_failed_status_update() -> None:
-    async def fail(message, _ctx) -> str:
-        raise RuntimeError(f"boom:{message.payload}")
+    async def fail(run: ScriptedRun) -> str:
+        raise RuntimeError(f"boom:{run.query}")
 
-    node = Node(fail, name="fail", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    service = A2AService(ScriptedPlanner(fail), agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         transport = A2AHttpTransport(client=client)
-        remote = RemoteNode(
-            transport=transport,
-            skill="fail",
-            agent_url="http://test",
-            name="remote-fail",
-            streaming=True,
-        )
-        client_flow = create(remote.to(), emit_errors_to_rookery=True)
-        client_flow.run()
-        try:
-            message = Message(payload="hello", headers=Headers(tenant="t"))
-            await client_flow.emit(message)
-            result = await client_flow.fetch()
-            assert isinstance(result, FlowError)
-            assert "Remote task failed" in result.message
-            assert "boom:hello" in result.message
-        finally:
-            await client_flow.stop()
+        with pytest.raises(RuntimeError, match="Remote task failed: boom:hello"):
+            async for _event in transport.stream(_request()):
+                pass
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_a2a_http_transport_surfaces_input_required() -> None:
+    async def ask(run: ScriptedRun):
+        return run.pause("await_input", prompt="Which region?")
+
+    service = A2AService(ScriptedPlanner(ask), agent_card=_agent_card(), config=A2AConfig())
+    app = create_a2a_http_app(service, include_docs=False)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        transport = A2AHttpTransport(client=client)
+        with pytest.raises(RemoteTaskInputRequired) as excinfo:
+            await transport.send(_request())
+    assert excinfo.value.snapshot.status.state is RemoteTaskState.INPUT_REQUIRED
+    assert excinfo.value.snapshot.status.message == "Which region?"
     await service.stop()
 
 
 @pytest.mark.asyncio
 async def test_a2a_http_transport_task_lifecycle_and_push_config() -> None:
-    async def slow(message, _ctx) -> dict[str, str]:
+    async def slow(run: ScriptedRun) -> PlannerFinish:
         await asyncio.sleep(0.05)
-        return {"echo": str(message.payload)}
+        return PlannerFinish(reason="answer_complete", payload={"echo": run.query})
 
-    node = Node(slow, name="slow", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
     card = _agent_card().model_copy(
         update={"capabilities": _agent_card().capabilities.model_copy(update={"push_notifications": True})}
     )
-    service = A2AService(flow, agent_card=card, config=A2AConfig())
+    service = A2AService(ScriptedPlanner(slow), agent_card=card, config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
 
     asgi_transport = httpx.ASGITransport(app=app)

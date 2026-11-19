@@ -1,18 +1,18 @@
 ---
 name: penguiflow-a2a-integration
-description: Expose a PenguiFlow agent as an A2A-spec service or call remote A2A agents from a planner — wire `A2AService` to a FastAPI app via `install_a2a_http`/`create_a2a_http_router`/`create_a2a_http_app`, serve the agent card at `/.well-known/agent-card.json`, handle JSON-RPC + REST + SSE + push-notification transports, optionally enable the gRPC binding, build manager↔specialist topologies with `A2AAgentToolset` and an `AgentRegistry`, persist conversation continuity via `RemoteBinding`/`StateStore`, and choose blocking/stream/task execution modes. Use when a user says "expose as A2A", "agent-to-agent", "call a remote agent", "agent card", "manager/specialist", "JSON-RPC", "SSE for agents", "push notifications for agents", or names `A2AService`, `RemoteBinding`, `A2AAgentToolset`.
+description: Expose a ReactPlanner agent as an A2A-spec service or call remote A2A agents from a planner — wrap the planner in `A2AService(planner, ...)`, mount it on a FastAPI app via `install_a2a_http`/`create_a2a_http_router`/`create_a2a_http_app`, serve the agent card at `/.well-known/agent-card.json`, handle JSON-RPC + REST + SSE + push-notification transports, optionally enable the gRPC binding, build manager↔specialist topologies with `A2AAgentToolset` and an `AgentRegistry`, map planner pauses to `input-required` and resume them, persist conversation continuity via `RemoteBinding`/`StateStore`, and choose blocking/stream/task execution modes. Use when a user says "expose as A2A", "agent-to-agent", "call a remote agent", "agent card", "manager/specialist", "JSON-RPC", "SSE for agents", "push notifications for agents", or names `A2AService`, `RemoteBinding`, `A2AAgentToolset`.
 ---
 
 # PenguiFlow A2A Integration
 
 ## When to use
-- Exposing an existing PenguiFlow agent over the A2A protocol (HTTP + JSON-RPC, SSE, gRPC, push).
+- Exposing an existing `ReactPlanner` agent over the A2A protocol (HTTP + JSON-RPC, SSE, gRPC, push).
 - Calling a remote A2A agent as a planner tool (specialist).
 - Building a manager agent that routes to specialist A2A agents.
 - Needing conversation continuity across calls to the same remote skill.
 
 ## When NOT to use
-- Generic remote node execution that isn't A2A → use [[penguiflow-deployment]] (RemoteTransport/RemoteNode).
+- Custom (non-A2A) remote transports → implement the `penguiflow.remote.RemoteTransport` protocol; see [[penguiflow-deployment]].
 - Wiring MCP servers as planner tools → use [[penguiflow-mcp-integration]].
 - Configuring the host planner itself → use [[penguiflow-reactplanner-config]].
 - Persisting bindings in production → use [[penguiflow-statestore]] (this skill names the methods but the durable backend lives there).
@@ -23,29 +23,37 @@ This skill is the A2A wire contract: agent cards, transports, conversation bindi
 ## Workflow
 
 ### 1) Decide your role: server, client, or both
-- **Server (specialist)**: another agent will call you. Build an `A2AService`, mount it on FastAPI, publish your agent card.
+- **Server (specialist)**: another agent will call you. Wrap your `ReactPlanner` in an `A2AService`, mount it on FastAPI (or gRPC), publish your agent card.
 - **Client (manager)**: you will call other A2A agents from your planner. Use `A2AAgentToolset` to wrap remote skills as planner tools.
 - **Hybrid**: both — common in router-and-specialist topologies.
 
 See `references/server-binding.md` for the server path, `references/client-and-toolset.md` for the client path.
 
-### 2) Server path — build an `A2AService`
+### 2) Server path — wrap the planner in an `A2AService`
 ```python
 from penguiflow_a2a import A2AConfig, A2AService
 
 service = A2AService(
-    flow,                         # your PenguiFlow runtime
-    agent_card=agent_card,        # A2AAgentCard or AgentCard
-    config=A2AConfig(             # supported versions, tenant prefix, payload mode
+    planner,                      # your ReactPlanner
+    agent_card=agent_card,        # penguiflow_a2a.models.AgentCard
+    config=A2AConfig(             # supported versions, tenant prefix, agent URL
         supported_versions=("0.3",),
         allow_v1_aliases=True,
         allow_tenant_prefix=True,
         default_tenant="default",
-        payload_mode=PayloadMode.AUTO,
     ),
+    tool_context={"db": db},       # optional static tool_context merged into every run
+    tool_visibility=a2a_policy,    # optional ToolVisibilityPolicy (e.g. hide UI-only tools)
 )
 ```
-Full `A2AConfig` reference and agent-card schema in `references/server-binding.md`.
+Each A2A task drives one planner run:
+- The query is the joined text parts of the message (JSON of the data parts if there is no text).
+- `tool_context` gets `tenant`, `session_id` (= A2A `contextId`), `a2a_task_id`, `a2a_context_id`, `a2a` (the request envelope) and `delivery_channel="a2a"`. Using `contextId` as `session_id` serializes runs within one conversation and runs different conversations in parallel.
+- `PlannerFinish(answer_complete)` → `completed`, answer text as artifact `output-0` (full payload in `artifact.metadata["planner_payload"]`). `no_path` / `budget_exhausted` / exceptions → `failed`.
+- `PlannerPause` → `input-required` with the pause `prompt` as the status message; the next `message/send` to that `taskId` resumes the planner with the message text as `user_input`.
+- `tasks/cancel` cancels the run through its `SteeringInbox` → `cancelled`.
+
+Full constructor, outcome mapping and agent-card schema in `references/server-binding.md`.
 
 ### 3) Mount it on FastAPI
 Three options, ordered by integration depth:
@@ -60,7 +68,7 @@ All three publish `GET /.well-known/agent-card.json` and `GET /extendedAgentCard
 - **Push notifications**: `HttpPushNotificationSender` with safe-URL gating (`is_safe_webhook_url`) blocks SSRF to RFC1918 / loopback.
 - **gRPC**: `from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service` — adds the A2A protobuf service to a `grpc.aio.server`. Requires `penguiflow-lite[a2a-grpc]`.
 
-Worked gRPC example: `examples/a2a_grpc_server/flow.py`. Push/SSE deep dive: `references/transports-push-sse-grpc.md`.
+Worked gRPC example: `examples/a2a_grpc_server/main.py`. Push/SSE deep dive: `references/transports-push-sse-grpc.md`.
 
 ### 5) Client path — wrap a remote agent as planner tools
 ```python
@@ -82,7 +90,7 @@ node_spec = toolset.tool(
     execution_mode="auto",   # auto|blocking|stream|task
 )
 ```
-Add `node_spec` to your planner's tool catalog. Full pattern + `execution_mode` semantics + cancel-on-cancel + chunk channels in `references/client-and-toolset.md`.
+Add `node_spec` to your planner's tool catalog. A plain-text remote answer is wrapped into `out_model` when it has exactly one field. Full pattern + `execution_mode` semantics + cancel-on-cancel + chunk channels in `references/client-and-toolset.md`.
 
 ### 6) Conversation continuity (manager↔specialist)
 The toolset auto-persists a `RemoteBinding` per `(agent_url, skill, tenant, user)` so the next call to the same skill resumes the same remote `task_id` / `context_id`. Requires a `StateStore` exposing `save_remote_binding`, `find_binding`, `mark_binding_terminal`. Behavior is best-effort if no store is present (the planner falls back to fresh calls). See [[penguiflow-statestore]] for the durable backend.
@@ -99,12 +107,14 @@ The toolset auto-persists a `RemoteBinding` per `(agent_url, skill, tenant, user
 - **JSON-RPC `-32600 Request payload validation error`** — missing `id`, non-string `method`, or `jsonrpc != "2.0"`. The router enforces JSON-RPC 2.0 strictly.
 - **gRPC import errors** — `pip install "penguiflow-lite[a2a-grpc]"`; the optional import in `penguiflow_a2a/__init__.py` is wrapped in `try/except RuntimeError`.
 - **Tenant prefix routes 404** — `A2AConfig.allow_tenant_prefix=False`; flip it to `True` and remount.
+- **`message/stream` sends no partial chunks** — the planner only streams its final answer with `stream_final_response=True`; otherwise the stream carries status updates and the final artifact only.
+- **Task stuck in `input-required`** — the planner paused; send another `message/send` with the same `taskId` (and `contextId`) to resume it, or `tasks/cancel` it.
 
 ## Worked examples
-- `examples/a2a_grpc_server/flow.py` — minimal end-to-end gRPC server + client.
+- `examples/a2a_grpc_server/main.py` — a `ReactPlanner` served over gRPC, plus a client call.
 
 ## References (load only as needed)
-- `references/server-binding.md` — `A2AService`, `A2AConfig`, `A2AAgentCard`, REST + JSON-RPC route map, three binding modes.
+- `references/server-binding.md` — `A2AService`, `A2AConfig`, `AgentCard`, planner outcome mapping, REST + JSON-RPC route map, three binding modes.
 - `references/client-and-toolset.md` — `A2AAgentToolset`, `A2AHttpTransport`, `RemoteCallRequest`, execution modes, conversation bindings.
 - `references/transports-push-sse-grpc.md` — SSE encoding, `HttpPushNotificationSender` + SSRF guards, gRPC binding setup.
 - `references/router-and-registry.md` — `AgentRegistry`, `RouterPolicy`, `A2ARouterToolset`, `AgentRouteRequest` scoring.

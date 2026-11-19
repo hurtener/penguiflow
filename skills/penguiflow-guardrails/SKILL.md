@@ -100,7 +100,7 @@ Every decision carries a stable `rule_id`. Log in shadow mode for 1-2 weeks: mea
 - **Async rules never fire** — `SteeringGuardInbox` not wired; check `async_fail_open` semantics.
 
 ## Worked example
-- `examples/guardrails/flow.py` — runnable guardrail policy pack with shadow→enforce migration.
+- `examples/guardrails/scope_classifier/flow.py` and `examples/guardrails/huggingface/flow.py` — runnable async guardrail rules (in-scope classifier with RETRY guidance; prompt-injection detection); `examples/guardrails/custom/README.md` for writing your own.
 - Integration tests under `tests/test_guardrails*.py` exercise sync+async rules end-to-end.
 
 ## References (load only as needed)

@@ -1,13 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-
-
-class PayloadMode(str, Enum):
-    AUTO = "auto"
-    ENVELOPE = "envelope"
-
 
 SUPPORTED_CONTENT_TYPES = ("application/a2a+json", "application/json")
 
@@ -19,7 +12,6 @@ class A2AConfig:
     allow_v1_aliases: bool = True
     allow_tenant_prefix: bool = True
     default_tenant: str = "default"
-    payload_mode: PayloadMode = PayloadMode.AUTO
     agent_url: str | None = None
 
     def __post_init__(self) -> None:

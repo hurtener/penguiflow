@@ -53,6 +53,8 @@ class SequenceLLM:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
         del messages, response_format
         if not self._responses:

@@ -2,26 +2,22 @@
 
 ## Executive Summary
 
-Penguiflow is a sophisticated, production-ready Python library designed for orchestrating asynchronous agent pipelines with typed messages, concurrent fan-out/fan-in, routing/decision points, and dynamic multi-hop controller loops. The system combines a robust core runtime with advanced planning capabilities, enabling complex autonomous workflows driven by LLMs and traditional compute nodes.
+Penguiflow is a production-ready Python library for LLM tool-using agents built on `ReactPlanner`: typed tools, parallel tool calls and joins, pause/resume, steering, memory, guardrails, streaming sessions, background tasks, and A2A serving/delegation.
 
 ## Architectural Philosophy
 
 The Penguiflow architecture follows several key principles:
 
 - **Type Safety**: Pydantic v2 models ensure type safety across all message boundaries
-- **Backpressure Handling**: Queue-based flow control with configurable limits prevents resource exhaustion
+- **Bounded Execution**: Planner budgets, tool concurrency limits and timeouts prevent resource exhaustion
 - **Graceful Degradation**: Comprehensive error handling and circuit breaker patterns ensure system stability
 - **Modular Design**: Well-defined interfaces between subsystems enable independent evolution
 - **Observability First**: Structured logging and metrics collection built into core operations
-- **Scalability**: Designed for horizontal scaling with distributed execution capabilities
+- **Scalability**: Stateless planners backed by pluggable state stores; agents compose over A2A
 
 ## Architecture Organization
 
 The Penguiflow architecture is organized into several focused domains, each with dedicated documentation:
-
-### Core Runtime Domain
-Located in `/architecture/core_runtime/`, this domain covers:
-- [Runtime Infrastructure](./core_runtime/runtime_infrastructure.md) - The foundational execution environment with message passing, backpressure handling, and node execution
 
 ### Planning & Orchestration Domain
 Located in `/architecture/planning_orchestration/`, this domain covers:
@@ -40,7 +36,6 @@ Located in `/architecture/integration_connectivity/`, this domain covers:
 
 ### Infrastructure Domain
 Located in `/architecture/infrastructure/`, this domain covers:
-- [Distributed Execution](./infrastructure/distributed_execution.md) - Remote nodes, A2A protocols, and message bus integration
 - [Observability & Monitoring](./infrastructure/observability_monitoring.md) - Structured logging, metrics, and MLflow integration
 - [Security & Compliance](./infrastructure/security_compliance.md) - Authentication, authorization, and audit trails
 - [Performance & Scalability](./infrastructure/performance_scalability.md) - Resource management and scaling patterns
@@ -49,29 +44,15 @@ Located in `/architecture/infrastructure/`, this domain covers:
 
 ## Core Architecture Layers
 
-### 1. Runtime Infrastructure Layer
+### 1. Tool Definition Layer
 
-The Runtime Infrastructure Layer provides the foundational execution environment for agent pipelines:
+Tools are the units of work the planner calls:
 
-#### PenguiFlow Runtime
-- **Message Passing**: Implements a queue-based message passing system using `Floe` objects as edges between nodes
-- **Backpressure Management**: Configurable queue sizes prevent resource exhaustion with maxsize limits
-- **Cycle Detection**: Topological sorting detects cycles in the flow graph with optional opt-in cycle support
-- **Graceful Shutdown**: Cancels and awaits all tasks to prevent resource leaks
-- **Trace Management**: Correlates messages across the flow using trace_id for end-to-end tracking
-- **Deadline Enforcement**: Automatic expiration of messages that exceed their deadline_s
-
-#### Context Abstraction
-- **Fetch/Emit Interface**: Standardized methods for nodes to interact with the flow
-- **Streaming Support**: Chunk-based streaming with sequence number management
-- **Subflow Execution**: `call_playbook()` enables launching nested flows with proper cancellation propagation
-- **Buffer Management**: Internal buffering for efficient message handling
-
-#### Node Execution Model
-- **Async-Only**: Pure asyncio implementation with no threading
-- **Policy-Based Execution**: `NodePolicy` controls validation, timeouts, retries, and backoff strategies
-- **Validation Pipeline**: Optional input/output validation using Pydantic TypeAdapters
-- **Resource Management**: Timeout enforcement and retry mechanisms with exponential backoff
+#### Node & Catalog
+- **Async-Only**: Tools are `async def fn(args, ctx)` functions wrapped in `Node`
+- **Typed Contracts**: `ModelRegistry` registers Pydantic input/output models; the planner validates arguments and results
+- **Catalog**: `build_catalog()` / `@tool(...)` produce `NodeSpec`s with descriptions, side effects, tags and loading modes
+- **External Tools**: `ToolNode` exposes MCP/UTCP/HTTP tools through the same catalog
 
 ### 2. Planning & Orchestration Layer
 
@@ -164,13 +145,13 @@ The LLM Interface Layer abstracts LLM interactions:
 
 ## Data Flow Patterns
 
-### 1. Request Processing Flow
+### 1. A2A Serving Flow
 ```
-User Input → OpenSea → Node Chain → Rookery → Response
+A2A Request → A2AService → ReactPlanner.run/resume → Task Status & Artifacts → A2A Response/SSE
 ```
-- Messages enter through OpenSea and traverse the configured node graph
-- Each node processes messages and emits results to successor nodes
-- Final results exit through Rookery endpoint
+- `A2AService` maps each A2A task to one planner run, using the A2A contextId as the planner session id
+- `PlannerFinish` completes or fails the task; `PlannerPause` marks it `input-required` until the next message resumes it
+- Streamed final answers become artifact chunks on `message/stream`
 
 ### 2. Planning Execution Flow
 ```

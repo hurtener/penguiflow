@@ -1,4 +1,4 @@
 interface:
   display_name: "PenguiFlow Deployment"
   short_description: "Production runbook: workers, sizing, distributed"
-  default_prompt: "Help me take a PenguiFlow agent to production. Cover deployment shape (embedded vs queue-worker vs distributed), envelope discipline, sizing (queue_maxsize, NodePolicy.timeout_s, max_retries, deadline_s), worker lifecycle, graceful shutdown, distributed primitives (StateStore, MessageBus, RemoteTransport/RemoteNode), and tool hardening."
+  default_prompt: "Help me take a ReactPlanner agent to production. Cover deployment shape (embedded service vs sessions vs queue-worker vs A2A specialist), planner factories, sizing (max_iters, deadline_s, hop_budget, llm_timeout_s, SessionLimits, ToolNode timeouts/concurrency), worker lifecycle with pause/resume, graceful shutdown via steering, durability (StateStore capabilities), A2A/RemoteTransport, and tool hardening."

@@ -45,8 +45,8 @@ If a Tier B doc contains information that is canonically documented elsewhere:
   - **runnable** (copy/paste; includes imports), or
   - explicitly marked as **pseudocode**.
 - Prefer examples that match the repo’s actual API:
-  - use `Node(...).to(...)` and `create(...)` adjacency tuples,
-  - avoid fictional APIs like `flow.node(...)` unless it exists.
+  - define tools with `@tool(...)`, `Node(...)`, `ModelRegistry` and `build_catalog(...)`,
+  - avoid fictional APIs unless they exist.
 - Include at least one **negative path** per major doc set (e.g. invalid args, join injection errors, missing env vars).
 
 ### Diagrams
@@ -74,6 +74,5 @@ Prefer ownership by subsystem:
 
 - `docs/planner/**`: planner maintainers
 - `docs/tools/**`: ToolNode/integrations maintainers
-- `docs/core/**`: runtime maintainers
 - `docs/deployment/**` and `docs/observability/**`: platform/ops maintainers
 

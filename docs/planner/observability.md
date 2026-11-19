@@ -13,7 +13,7 @@ For the full cross-layer model, start with **[Observability overview](../observa
 ## Non-goals / boundaries
 
 - This page does not mandate a specific telemetry backend (Datadog, Prometheus, OpenTelemetry).
-- This page does not cover runtime-level `FlowEvent` in detail (see `docs/observability/*`).
+- This page does not cover LLM-layer telemetry or session telemetry in detail (see `docs/observability/*`).
 
 ## Contract surface
 
@@ -93,7 +93,7 @@ Prefer:
 
 ## Troubleshooting checklist
 
-- **Wrong layer**: planner events do not replace runtime `FlowEvent`, LLM telemetry hooks, or task/session telemetry. See **[Observability overview](../observability/overview.md)**.
+- **Wrong layer**: planner events do not replace LLM telemetry hooks or task/session telemetry. See **[Observability overview](../observability/overview.md)**.
 - **No planner events**: confirm `event_callback` is passed and not overwritten by per-session dispatch.
 - **Missing stream chunks**: verify `stream_final_response` and tool streaming usage; confirm UI is wired to the stream sink.
 - **High tool error rate**: tighten retries/timeouts and reduce concurrency to respect rate limits.

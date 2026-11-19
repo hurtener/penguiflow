@@ -102,7 +102,7 @@ ToolNodes with `AuthType.OAUTH2_USER` pause with `reason="external_event"` and p
 - **Payload too large** — offload to artifacts; reference by id.
 
 ## Worked example
-- `examples/react_pause_resume/flow.py` — approval-gated tool with explicit pause + resume.
+- `examples/react_pause_resume/main.py` — approval-gated tool with explicit pause + resume.
 
 ## References (load only as needed)
 - `references/pause-contract.md` — `ctx.pause(...)`, pause reasons, the "raise-and-replay" mental model, payload schema rules.

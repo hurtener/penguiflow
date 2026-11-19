@@ -1,10 +1,11 @@
 # PenguiFlow
 
-PenguiFlow is an **async-first orchestration library** for building:
+PenguiFlow is an **async-first library for LLM tool-using agents** built on
+`ReactPlanner`:
 
-- **Typed agent workflows** (LLM planner + tools)
-- **Concurrent pipelines** (fan-out/fan-in, joins, routers)
-- **Production-ready runtime behavior** (timeouts, retries, backpressure, cancellation, telemetry hooks)
+- **Typed tools** (Pydantic input/output contracts, MCP/UTCP/HTTP tool sources)
+- **Planner runtime** (parallel tool calls, pause/resume, steering, memory, guardrails, reflection)
+- **Production surfaces** (streaming sessions, background tasks, state stores, A2A serving and delegation)
 
 ## Start here
 
@@ -27,11 +28,10 @@ Those are valuable for contributors, but they are not part of the curated docs a
 
 | If you want to… | Start here |
 |---|---|
-| Build a typed async pipeline | [Flows & nodes](core/flows-and-nodes.md) |
-| Add parallel fan-out / joins | [Concurrency](core/concurrency.md) |
-| Stream partial output (tokens/status) | [Streaming](core/streaming.md) |
-| Cancel in-flight work | [Cancellation](core/cancellation.md) |
-| Build an LLM-driven orchestrator | [ReactPlanner](planner/overview.md) |
+| Build an LLM-driven agent | [ReactPlanner](planner/overview.md) |
+| Run tools in parallel / join results | [Parallel & joins](planner/parallel-and-joins.md) |
+| Stream partial output (tokens/status) | [Observability](planner/observability.md) |
+| Cancel or steer in-flight work | [Steering](planner/steering.md) |
 | Connect MCP/UTCP/HTTP tools | [Tooling](planner/tooling.md) |
 | Ship pause/resume (OAuth/HITL) | [Pause/resume](planner/pause-resume-hitl.md) |
 | Persist/replay/operate at scale | [State store](tools/statestore.md) |

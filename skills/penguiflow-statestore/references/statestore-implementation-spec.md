@@ -189,7 +189,7 @@ require_capabilities(store, feature="sessions", methods=["save_task", "list_task
 
 ### StoredEvent
 
-Represents a persisted runtime event. Created via `StoredEvent.from_flow_event()`.
+Represents a persisted runtime event (audit log entry).
 
 ```python
 @dataclass(slots=True)
@@ -197,50 +197,18 @@ class StoredEvent:
     trace_id: str | None       # Trace identifier (nullable for global events)
     ts: float                  # Unix timestamp (time.time())
     kind: str                  # Event type (see Event Types below)
-    node_name: str | None      # Node that emitted the event
-    node_id: str | None        # Unique node instance ID
+    node_name: str | None      # Emitting component, if applicable
+    node_id: str | None        # Emitting component instance ID, if applicable
     payload: Mapping[str, Any] # Structured event data
-
-    @classmethod
-    def from_flow_event(cls, event: FlowEvent) -> StoredEvent:
-        """Factory method to convert FlowEvent to StoredEvent."""
 ```
 
 #### Event Types (`kind` field)
 
-`StoredEvent.kind` is a **string discriminator**. In v2.11.x, PenguiFlow persists multiple *families* of events.
+`StoredEvent.kind` is a **string discriminator**.
 
-Important: `kind` values are an **open set**. StateStore backends MUST accept novel/unknown kinds and persist them as opaque strings.
+Important: `kind` values are an **open set**. StateStore backends MUST accept novel/unknown kinds and persist them as opaque strings. Applications may write their own audit events through `save_event`.
 
-1) **Core runtime events** (`FlowEvent.event_type`): emitted by the `PenguiFlow` runtime around node execution and trace lifecycle.
-
-| Event Kind | Description |
-|------------|-------------|
-| `node_start` | Node began processing |
-| `node_success` | Node completed successfully |
-| `node_timeout` | Node exceeded deadline/budget |
-| `node_retry` | Node retry cycle started |
-| `node_error` | Node raised an exception |
-| `node_failed` | Node failure after retries exhausted |
-| `node_cancelled` | Node cancelled locally (steering/budget) |
-| `node_trace_cancelled` | Node skipped because trace is cancelled |
-| `deadline_skip` | Work skipped due to deadline pre-check |
-| `trace_cancel_start` | Trace cancellation started |
-| `trace_cancel_finish` | Trace cancellation finished |
-| `trace_cancel_drop` | Cancellation requested for unknown/finished trace |
-
-2) **Remote transport events** (`FlowEvent.event_type`): emitted by the runtime when a `RemoteNode` performs remote calls/streams.
-
-| Event Kind | Description |
-|------------|-------------|
-| `remote_call_start` | Remote call initiated |
-| `remote_call_success` | Remote call completed successfully |
-| `remote_call_error` | Remote call failed |
-| `remote_call_cancelled` | Remote call cancelled due to trace cancellation |
-| `remote_cancel_error` | Failed to cancel a remote task |
-| `remote_stream_event` | Remote streaming event observed |
-
-3) **Session/task pseudo-events**: when a session store is adapted onto a core `StateStore`, it persists session state as audit-log entries under `trace_id="session:{session_id}"`.
+1) **Session/task pseudo-events**: when a session store is adapted onto a core `StateStore` (`StateStoreSessionAdapter`), it persists session state as audit-log entries under `trace_id="session:{session_id}"` (table below).
 
 | Event Kind | Description |
 |------------|-------------|
@@ -248,38 +216,13 @@ Important: `kind` values are an **open set**. StateStore backends MUST accept no
 | `session.update` | Task streaming/progress update persisted |
 | `session.steering` | Steering event persisted |
 
-4) **Planner/tool streaming events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
+2) **Planner/tool events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
 
 > **Callout (important):** If you want to persist tool/LLM streaming events for a UI client or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
 
 #### Payload Structure
 
-The `payload` dict contains event-specific fields. Common fields:
-
-```python
-{
-    "ts": 1702857600.123,          # Timestamp
-    "event": "node_success",       # Event type (same as kind)
-    "node_name": "llm_node",       # Node name
-    "node_id": "llm_node_abc123",  # Node instance ID
-    "trace_id": "trace_xyz",       # Trace ID
-    "latency_ms": 1523.45,         # Execution latency
-    "q_depth_in": 0,               # Input queue depth
-    "q_depth_out": 2,              # Output queue depth
-    "q_depth_total": 2,            # Combined queue depth
-    "outgoing": 3,                 # Number of downstream edges
-    "queue_maxsize": 1000,         # Queue capacity
-    "attempt": 1,                  # Retry attempt number
-    "trace_inflight": 5,           # Messages in-flight for trace
-    "trace_cancelled": False,      # Whether trace is cancelled
-    # Error-specific (when kind="node_error"):
-    "flow_error": {
-        "code": "TOOL_EXECUTION_FAILED",
-        "message": "API returned 500",
-        # Additional provider-specific fields may be included (exception type, stack summary, etc.)
-    }
-}
-```
+The `payload` dict contains event-specific fields. For the session pseudo-events it is the serialized record (task state, update, or steering event). Backends should store it as JSON and never interpret it beyond indexing.
 
 ### RemoteBinding
 
@@ -439,30 +382,6 @@ class SteeringEventType(str, Enum):
     APPROVE = "APPROVE"                 # Approve pending decision/patch
     REJECT = "REJECT"                   # Reject pending decision/patch
     USER_MESSAGE = "USER_MESSAGE"       # User sends message while task is working
-```
-
-### FlowEvent (Source Type)
-
-The runtime emits `FlowEvent` objects which are converted to `StoredEvent` via the factory method:
-
-```python
-@dataclass(frozen=True, slots=True)
-class FlowEvent:
-    event_type: str
-    ts: float
-    node_name: str | None
-    node_id: str | None
-    trace_id: str | None
-    attempt: int
-    latency_ms: float | None
-    queue_depth_in: int
-    queue_depth_out: int
-    outgoing_edges: int
-    queue_maxsize: int
-    trace_pending: int | None
-    trace_inflight: int
-    trace_cancelled: bool
-    extra: Mapping[str, Any]  # Extension fields
 ```
 
 ---
@@ -685,7 +604,7 @@ async def mark_binding_terminal(
 - Be idempotent; missing rows should be a no-op.
 - Remove/invalidate any active secondary index entry for that binding.
 
-**Current call-site note:** `mark_binding_terminal` is optional plumbing for terminal-state policy. The released automatic reuse path is `A2AAgentToolset`; `RemoteNode` only persists additive binding fields and does not perform automatic conversation lookup/reuse in this release.
+**Current call-site note:** `mark_binding_terminal` is optional plumbing for terminal-state policy. The released automatic reuse path is `A2AAgentToolset`.
 
 ### 7. `save_planner_state(token: str, payload: dict) -> None`
 
@@ -1310,23 +1229,23 @@ store = discover_artifact_store(state_store)  # Returns ArtifactStore or None
 
 ## Integration Points
 
-### 1. PenguiFlow Core Runtime
+### 1. A2A server (`A2AService`)
 
-**Location:** `penguiflow/core.py`
+**Location:** `penguiflow_a2a/core.py`
 
 ```python
-flow = PenguiFlow(
-    (node1, [node2, node3]),
-    state_store=your_store,  # Injected here
+service = A2AService(
+    planner,
+    agent_card=card,
+    config=A2AConfig(agent_url="https://agent.example.com"),
+    state_store=your_store,  # optional; defaults to the planner's state store
 )
 ```
 
 **Integration Behavior:**
-- `save_event()` called automatically on every `FlowEvent` emission
-- `save_remote_binding()` called when `RemoteNode` establishes A2A/remote connections
-- `load_history()` called via `flow.load_history(trace_id)`
-- `save_event()` / `save_remote_binding()` failures are logged and treated as **best-effort** (core runtime continues)
-- `load_history()` is an explicit caller action; errors may propagate to the caller (admin/observability tooling should handle exceptions)
+- With `config.agent_url` set, each A2A task calls `save_remote_binding(RemoteBinding(trace_id=task_id, context_id, task_id, agent_url))` before the planner runs.
+- Binding failures are not swallowed: an exception from `save_remote_binding` aborts that task's run before the planner starts. Keep `save_remote_binding` fast and reliable (and idempotent).
+- `load_history()` is an explicit caller action (e.g. `penguiflow-admin`); errors may propagate to the caller.
 
 ### 2. ReactPlanner
 
@@ -1411,22 +1330,19 @@ penguiflow-admin replay --state-store mypackage.stores:create_store trace_abc123
 
 ### Stateless Worker Pool (Recommended)
 
-For horizontal scaling, use a stateless worker pool pattern:
+For horizontal scaling, build a planner per job from a factory and share one durable store:
 
 ```python
 async def worker_loop(job_queue: JobQueue, state_store: StateStore):
     while True:
         job = await job_queue.dequeue()
-
-        # Fresh flow instance per job
-        flow = PenguiFlow(
-            build_graph(),
-            state_store=state_store,
-        )
-
+        planner = ReactPlanner(llm_client=client, catalog=tools, state_store=state_store)
         try:
-            result = await flow.run_once(job.input, trace_id=job.trace_id)
-            await job_queue.ack(job.id)
+            result = await planner.run(job.query, tool_context={"session_id": job.session_id, "trace_id": job.trace_id})
+            if isinstance(result, PlannerPause):
+                await job_queue.park(job.id, resume_token=result.resume_token)   # pause state is in the store
+            else:
+                await job_queue.ack(job.id, result=result.payload)
         except Exception as e:
             await job_queue.nack(job.id, error=str(e))
 ```
@@ -1435,38 +1351,11 @@ async def worker_loop(job_queue: JobQueue, state_store: StateStore):
 - Horizontal scalability (10+ workers)
 - Easy failure isolation
 - No shared state between jobs
-- Simple container orchestration
+- Paused runs resume on any worker
 
-### Long-Lived Flow Worker (Advanced)
+### Sessions-Backed Service (Advanced)
 
-For expensive initialization or shared resources:
-
-```python
-class FlowWorker:
-    def __init__(self, state_store: StateStore):
-        self._flow = PenguiFlow(
-            build_graph(),
-            state_store=state_store,
-        )
-        self._failure_count = 0
-        self._max_failures = 5
-
-    async def process(self, job: Job) -> Result:
-        try:
-            result = await self._flow.run_once(job.input, trace_id=job.trace_id)
-            self._failure_count = 0
-            return result
-        except Exception:
-            self._failure_count += 1
-            if self._failure_count >= self._max_failures:
-                await self._restart_flow()
-            raise
-
-    async def _restart_flow(self) -> None:
-        await self._flow.stop()
-        self._flow = PenguiFlow(build_graph(), state_store=self._state_store)
-        self._failure_count = 0
-```
+For live UIs, background tasks and steering, share a `SessionManager(state_store=...)`: sessions persist tasks, updates and steering through `save_task` / `save_update` / `save_steering` (or as `session.*` pseudo-events via `StateStoreSessionAdapter` when the store only implements the core protocol).
 
 ### Multi-Worker Consistency Model
 
@@ -1485,7 +1374,7 @@ All distributed work is associated via `trace_id`:
 
 ```python
 # Worker A: Process initial request
-result = await flow.run_once(input, trace_id="trace_abc123")
+result = await planner.run(query, tool_context={"trace_id": "trace_abc123", "session_id": "s1"})
 
 # Worker B: Resume after OAuth callback
 result = await planner.resume(token, user_input=oauth_token)
@@ -1996,17 +1885,17 @@ async def test_save_and_load_events(store):
     event = StoredEvent(
         trace_id="test-trace",
         ts=1702857600.0,
-        kind="node_success",
-        node_name="test_node",
-        node_id="test_node_123",
-        payload={"latency_ms": 100},
+        kind="session.task",
+        node_name=None,
+        node_id=None,
+        payload={"task_id": "t1", "status": "RUNNING"},
     )
     await store.save_event(event)
     history = await store.load_history("test-trace")
 
     assert len(history) == 1
     assert history[0].trace_id == "test-trace"
-    assert history[0].kind == "node_success"
+    assert history[0].kind == "session.task"
 
 # 2. Empty history for unknown trace
 async def test_load_history_unknown_trace(store):
@@ -2191,33 +2080,21 @@ async def test_steering_sanitized(store):
     assert events[0].source == "user"
 ```
 
-### Integration Test with PenguiFlow
+### Integration Test with the Planner
 
 ```python
-from penguiflow import PenguiFlow, Node, Context
+from penguiflow.planner import PlannerPause, ReactPlanner
 
-async def test_statestore_integration():
+async def test_statestore_pause_resume_across_planners():
     store = YourStateStore()
+    first = ReactPlanner(llm_client=scripted_client(), catalog=catalog_with_approval_tool, state_store=store)
+    paused = await first.run("needs approval", tool_context={"session_id": "s1"})
+    assert isinstance(paused, PlannerPause)
 
-    @Node()
-    async def echo(ctx: Context, msg: str) -> str:
-        return f"echo: {msg}"
-
-    flow = PenguiFlow(
-        (echo, []),
-        state_store=store,
-    )
-
-    async with flow.run() as (send, recv):
-        await send("hello", trace_id="int-test")
-        result = await recv()
-
-    history = await store.load_history("int-test")
-
-    # Should have at least node_start and node_success events
-    kinds = [e.kind for e in history]
-    assert "node_start" in kinds
-    assert "node_success" in kinds
+    # A fresh planner (as on another worker) resumes from the store
+    second = ReactPlanner(llm_client=scripted_client(), catalog=catalog_with_approval_tool, state_store=store)
+    result = await second.resume(paused.resume_token, user_input="approved", tool_context={"session_id": "s1"})
+    assert result.reason == "answer_complete"
 ```
 
 ---
@@ -2226,37 +2103,15 @@ async def test_statestore_integration():
 
 ### What Is Best-Effort vs. What Can Propagate
 
-PenguiFlow does **not** treat every StateStore call uniformly. In v2.11.x:
+PenguiFlow does **not** treat every StateStore call uniformly. Today:
 
-- **Core runtime audit-log calls** are best-effort:
-  - `PenguiFlow` wraps `save_event()` and `save_remote_binding()` in `try/except` and logs failures.
-- **Explicit read APIs** (like `flow.load_history(trace_id)`) may propagate storage errors to the caller.
+- **A2A server bindings** (`A2AService` → `save_remote_binding()`) are awaited inline; a failure aborts that task's run.
+- **Explicit read APIs** (like `load_history(trace_id)` from `penguiflow-admin`) may propagate storage errors to the caller.
 - **Session persistence calls** (tasks/updates/steering) may be awaited without a defensive wrapper (some are fire-and-forget via `asyncio.create_task`, others are awaited inline). A throwing StateStore can therefore break interactive features.
 - **Planner pause/resume** has an in-memory fallback for saving pause records, but resume still depends on `load_planner_state()` being correct.
 
 > **Gold standard rule:** For production-grade deployments, treat every StateStore method as **must not throw**.
 > Degrade with safe defaults (`[]`/`None`), apply timeouts, and log/telemetry rather than raising.
-
-### Example: Core Runtime Best-Effort Wrapper
-
-The core runtime wraps audit-log persistence:
-
-```python
-# From penguiflow/core.py
-try:
-    await self._state_store.save_event(stored_event)
-except Exception as exc:
-    logger.exception(
-        "state_store_save_failed",
-        extra={
-            "event": "state_store_save_failed",
-            "trace_id": stored_event.trace_id,
-            "kind": stored_event.kind,
-            "exception": repr(exc),
-        },
-    )
-    # Flow continues - event loss is acceptable
-```
 
 ### Recommended Error Handling in Your Implementation
 
@@ -2430,7 +2285,7 @@ Use this checklist to verify your implementation is complete:
 - [ ] Indexes on frequently queried columns
 - [ ] Steering payloads sanitized before storage
 - [ ] Unit tests passing
-- [ ] Integration test with PenguiFlow passing
+- [ ] Integration test with the planner (pause on one instance, resume on another) passing
 
 ### Distributed Deployment
 

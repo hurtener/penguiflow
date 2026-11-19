@@ -290,17 +290,18 @@ no_retry = RetryPolicy(
 
 ```python
 import logging
-from penguiflow import log_flow_events
+
+from penguiflow.planner import PlannerEvent, ReactPlanner
 
 logger = logging.getLogger("penguiflow.concurrency")
 
-def track_latency(event_type: str, latency_ms: float, event: Any) -> None:
-    if latency_ms > 1000:  # > 1 second
-        logger.warning(
-            f"Slow tool execution: {event.node_name} took {latency_ms:.0f}ms"
-        )
 
-middleware = log_flow_events(logger, latency_callback=track_latency)
+def track_slow_tools(event: PlannerEvent) -> None:
+    if event.event_type == "step_complete" and (event.latency_ms or 0) > 1000:
+        logger.warning("Slow tool execution: %s took %.0fms", event.node_name, event.latency_ms)
+
+
+planner = ReactPlanner(llm_client=..., catalog=..., event_callback=track_slow_tools)
 ```
 
 ## Backpressure Handling

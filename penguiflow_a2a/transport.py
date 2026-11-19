@@ -440,6 +440,9 @@ class A2AHttpTransport(RemoteTransport):
                         payload_value = _extract_artifact_payload(artifact)
                         last_chunk = bool(artifact_update.get("lastChunk"))
                         if isinstance(payload_value, str):
+                            if artifact_update.get("append") is False:
+                                # A non-append update replaces the text streamed so far.
+                                text_chunks.clear()
                             text_chunks.append(payload_value)
                             yield RemoteStreamEvent(
                                 text=payload_value,

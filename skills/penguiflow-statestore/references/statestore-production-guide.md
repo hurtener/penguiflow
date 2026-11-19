@@ -25,7 +25,7 @@ Penguiflow's `StateStore` protocol (`penguiflow/state/protocol.py`, import path 
 ```python
 class StateStore(Protocol):
     async def save_event(self, event: StoredEvent) -> None:
-        """Persist a flow event for replay/audit."""
+        """Persist a runtime event for replay/audit."""
         ...
 
     async def load_history(self, trace_id: str) -> Sequence[StoredEvent]:
@@ -121,7 +121,7 @@ CREATE TABLE oauth_tokens (
     PRIMARY KEY (user_id, provider)
 );
 
--- Remote bindings (for A2A / RemoteNode)
+-- Remote bindings (for A2A server tasks and A2AAgentToolset continuity)
 CREATE TABLE remote_bindings (
     id BIGSERIAL PRIMARY KEY,
     trace_id VARCHAR(128) NOT NULL,
@@ -177,7 +177,7 @@ class PostgresStateStore:
     # ─── Required Methods ────────────────────────────────────────────────────────
 
     async def save_event(self, event: StoredEvent) -> None:
-        """Persist a flow event."""
+        """Persist a runtime event."""
         trace_id = event.trace_id or "__global__"
         event_fp = hashlib.sha256(
             json.dumps(

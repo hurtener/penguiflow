@@ -7,22 +7,21 @@ PenguiFlow’s public surface is exported from `penguiflow.__init__`.
 Prefer importing from `penguiflow` (top-level) for stable APIs:
 
 ```python
-from penguiflow import PenguiFlow, Context, NodePolicy, ReactPlanner
+from penguiflow import ReactPlanner, build_catalog, tool
 ```
 
 ## Stability expectations
 
-- Public types and functions exported at top-level aim to be stable across 2.x.
+- Public types and functions exported at top-level aim to be stable within a major version.
 - Internal modules and RFC/proposal documents may change without notice.
 
 ## Key entry points
 
-- Runtime: `create()`, `PenguiFlow`, `Node`, `Context`, `NodePolicy`
-- Concurrency: `map_concurrent`, `join_k`, routers
-- Planner: `ReactPlanner`, `Trajectory`
+- Planner: `ReactPlanner`, `Trajectory`, `PlannerFinish`, `PlannerAction`
 - Skills: `SkillsConfig`, `SkillPackConfig`, `SkillProvider`, `SkillProviderFactory`, `SkillProposeRequest`
 - Sessions: `StreamingSession`, `SessionManager`
-- Tools: `tool`, `build_catalog`, `ToolLoadingMode`
+- Tools: `tool`, `build_catalog`, `Node`, `NodePolicy`, `ModelRegistry`, `ToolLoadingMode`
+- A2A: `penguiflow_a2a.A2AService` (serve a planner), `A2AAgentToolset` (call remote agents)
 
 ## Version source of truth
 

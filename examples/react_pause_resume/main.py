@@ -65,6 +65,8 @@ class StubPlannerLLM:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
         return self._payloads.pop(0)
 
@@ -77,6 +79,8 @@ class StubSummariser:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
         return json.dumps(
             {

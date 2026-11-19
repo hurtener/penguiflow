@@ -1,14 +1,9 @@
-# Messages & types
+# Messages
 
-The envelope and payload types that flow between nodes: messages, headers,
-working memory, and streaming/planner payload objects.
+The envelope used when forwarding work to remote agents (for example through
+the A2A client toolsets).
 
 ## `penguiflow.types`
 
 - `Message`
 - `Headers`
-- `WM`
-- `StreamChunk`
-- `FinalAnswer`
-- `Thought`
-- `PlanStep`

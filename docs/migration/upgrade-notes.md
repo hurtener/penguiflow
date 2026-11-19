@@ -4,7 +4,6 @@ This page is a curated place for **breaking changes**, **deprecations**, and **m
 
 ## Where to start
 
-- New adoption: `docs/migration/penguiflow-adoption.md`
 - Memory adoption: `docs/migration/MEMORY_ADOPTION.md`
 
 ## Policy

@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 
-from penguiflow import Message as FlowMessage
-from penguiflow import Node, NodePolicy, create
 from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+
+from .planner_doubles import echo_planner
 
 
 def _agent_card(*, extended: bool) -> AgentCard:
@@ -31,13 +31,9 @@ def _build_client(
     extended_card: AgentCard | None = None,
     auth_cb=None,
 ) -> TestClient:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
+    planner = echo_planner()
     service = A2AService(
-        flow,
+        planner,
         agent_card=_agent_card(extended=extended),
         config=A2AConfig(),
         extended_agent_card=extended_card,

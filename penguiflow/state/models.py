@@ -16,8 +16,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from penguiflow.metrics import FlowEvent
-
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -30,7 +28,7 @@ class StoredEvent:
     Attributes:
         trace_id: Trace id the event belongs to, if any.
         ts: Unix timestamp (seconds) when the event occurred.
-        kind: Event type/kind, mirrors `FlowEvent.event_type`.
+        kind: Event type/kind.
         node_name: Name of the node that emitted the event, if applicable.
         node_id: Id of the node instance that emitted the event, if applicable.
         payload: Event-specific payload data.
@@ -42,19 +40,6 @@ class StoredEvent:
     node_name: str | None
     node_id: str | None
     payload: Mapping[str, Any]
-
-    @classmethod
-    def from_flow_event(cls, event: FlowEvent) -> StoredEvent:
-        """Create a stored representation from a :class:`~penguiflow.metrics.FlowEvent`."""
-
-        return cls(
-            trace_id=event.trace_id,
-            ts=event.ts,
-            kind=event.event_type,
-            node_name=event.node_name,
-            node_id=event.node_id,
-            payload=event.to_payload(),
-        )
 
 
 @dataclass(slots=True)

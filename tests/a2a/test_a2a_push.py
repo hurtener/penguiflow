@@ -1,11 +1,8 @@
-import asyncio
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from penguiflow import Message as FlowMessage
-from penguiflow import Node, NodePolicy, create
 from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
 from penguiflow_a2a.models import (
     AgentCapabilities,
@@ -21,6 +18,8 @@ from penguiflow_a2a.models import (
     SendMessageRequest,
 )
 from penguiflow_a2a.push import is_safe_webhook_url
+
+from .planner_doubles import ScriptedPlanner, ScriptedRun, echo_planner, slow_planner
 
 
 class FakePushSender:
@@ -51,24 +50,15 @@ def _agent_card(*, push_notifications: bool) -> AgentCard:
 
 
 def _build_client(*, push_notifications: bool) -> TestClient:
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(push_notifications=push_notifications), config=A2AConfig())
+    planner = echo_planner()
+    service = A2AService(planner, agent_card=_agent_card(push_notifications=push_notifications), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _build_slow_client(*, push_notifications: bool, delay: float = 0.4) -> TestClient:
-    async def slow(message: FlowMessage, _ctx) -> str:
-        await asyncio.sleep(delay)
-        return f"slow:{message.payload}"
-
-    node = Node(slow, name="slow", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(push_notifications=push_notifications), config=A2AConfig())
+    planner = slow_planner(delay)
+    service = A2AService(planner, agent_card=_agent_card(push_notifications=push_notifications), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
 
@@ -148,15 +138,14 @@ def test_push_config_crud() -> None:
 
 @pytest.mark.asyncio
 async def test_push_delivery_receives_status_and_artifacts() -> None:
-    async def streamer(message: FlowMessage, ctx) -> str:
-        await ctx.emit_chunk(parent=message, text="hi", done=True)
+    async def streamer(run: ScriptedRun) -> str:
+        run.emit_chunk("hi", done=True)
         return "hi"
 
-    node = Node(streamer, name="streamer", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
+    planner = ScriptedPlanner(streamer)
     sender = FakePushSender()
     service = A2AService(
-        flow,
+        planner,
         agent_card=_agent_card(push_notifications=True),
         config=A2AConfig(),
         push_sender=sender,

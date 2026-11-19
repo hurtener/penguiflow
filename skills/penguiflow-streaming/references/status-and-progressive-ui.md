@@ -2,177 +2,120 @@
 
 ## The three-channel pattern
 
-Most production streaming UIs need three logical channels:
+Most production streaming UIs need three logical channels, and the planner already produces all three:
 
-1. **Status** — "searching…", "synthesizing…", "calling tool foo". Updates the UI's progress indicator.
-2. **Content** — the actual answer tokens.
-3. **Final** — the canonical result for `fetch()`, often a `FinalAnswer`.
+| Channel | Planner source |
+|---|---|
+| **Status** ("searching…", "calling tool foo") | `step_start`, `tool_call_start` / `tool_call_end` events (`extra["tool_name"]`) |
+| **Content** (answer tokens) | `llm_stream_chunk` with `extra["channel"] == "answer"`, and tool `stream_chunk`s with `meta={"channel": "answer"}` |
+| **Final** (canonical result) | the `PlannerFinish` returned by `planner.run()` (also a `finish` event) |
 
-Implement them in one of two ways:
-
-### Option A: one stream, typed by `meta`
-
-```python
-async def compose(msg, ctx):
-    await ctx.emit_chunk(parent=msg, text="searching…", meta={"kind": "status"}, to=chunk_sink)
-    results = await search(msg.payload.query)
-
-    await ctx.emit_chunk(parent=msg, text="synthesizing…", meta={"kind": "status"}, to=chunk_sink)
-    async for token in synthesize(results):
-        await ctx.emit_chunk(parent=msg, text=token, meta={"kind": "content"}, to=chunk_sink)
-    await ctx.emit_chunk(parent=msg, text="", done=True, to=chunk_sink)
-
-    await ctx.emit(msg.model_copy(update={"payload": FinalAnswer(text=...)}), to=final_node)
-```
-
-Pros: one consumer, simple wiring.
-Cons: consumer must inspect `meta` for every chunk.
-
-### Option B: distinct `stream_id`s
+Map them to your wire format in the bridge (see `sse-and-websocket.md`):
 
 ```python
-await ctx.emit_chunk(parent=msg, text="searching…", stream_id="status", to=status_sink)
-await ctx.emit_chunk(parent=msg, text=token,        stream_id="answer", to=answer_sink)
+def classify(event: PlannerEvent) -> tuple[str, str] | None:
+    extra = event.extra
+    if event.event_type == "llm_stream_chunk":
+        return ("content" if extra.get("channel") == "answer" else "thinking", extra.get("text", ""))
+    if event.event_type == "stream_chunk":
+        channel = (extra.get("meta") or {}).get("channel", "thinking")
+        return ("content" if channel == "answer" else "thinking", extra.get("text", ""))
+    if event.event_type == "tool_call_start":
+        return ("status", f"calling {extra.get('tool_name')}…")
+    return None
 ```
 
-Pros: clean separation; consumers filter by `stream_id`.
-Cons: more wiring; need to emit `done=True` to each stream.
-
-Pick Option A for chat UIs (single feed). Option B for multi-pane UIs ("thinking", "answer", "citations" panels).
+With sessions, the same split comes from `StateUpdate.update_type`: `RESULT` (content and final), `THINKING`, `TOOL_CALL`, `PROGRESS`, `STATUS_CHANGE`.
 
 ## Time-to-first-chunk (TTFC) tuning
 
-User-perceived latency is dominated by TTFC, not total response time. Optimizations:
+User-perceived latency is dominated by TTFC, not total response time.
 
 ### Emit status early
-The first chunk a user sees should be a status update, not the first content token. Status doesn't require the LLM to start — emit it immediately on tool entry:
+Send a status frame as soon as the request is accepted — before `planner.run()` makes its first LLM call — and on every `tool_call_start`.
 
-```python
-async def compose(msg, ctx):
-    await ctx.emit_chunk(parent=msg, text="thinking…", meta={"kind": "status"}, to=chunk_sink)
-    # ... do work
-```
+### Stream from slow tools
+A tool taking more than ~500 ms should stream progress with `ctx.emit_chunk(...)` (channel `"thinking"` for progress, `"answer"` for user-facing text) so the UI never looks frozen.
 
-### Pre-emit before slow tools
-Before any tool call >500ms, emit a status chunk so the UI doesn't appear frozen.
+### Enable final-answer streaming
+`stream_final_response=True` with a streaming-capable client lets the answer appear while it is generated instead of after the last step.
 
-### Minimize queue depth on the chunk edge
-Default `queue_maxsize=64` is fine for most chunk flows. Higher values delay backpressure signals; lower values cause stalls under burst.
+### Reuse LLM client connections
+Connection setup (TLS, auth) often dominates TTFC. Build clients once and share them across planner instances.
 
-### Use a fast LLM client connection
-LLM client connection setup (TLS handshake, auth) often dominates TTFC. Reuse connections; pre-warm clients.
+## Backpressure
 
-## Backpressure on chunk edges
+The planner's `event_callback` is synchronous and must not block, so backpressure lives in your bridge:
 
-Chunks are normal messages — they go through bounded `asyncio.Queue`s. If the sink is slower than the producer, the producer's `emit_chunk` awaits.
-
-This is a feature, not a bug:
-- Prevents memory blowup when a slow client drags the producer.
-- Forces explicit sizing.
-
-But if the sink is slow because of network latency to the client (which is normal for streaming), backpressure manifests as choppy delivery. Strategies:
-
-### Increase chunk-edge `queue_maxsize`
-For the edge from compose to chunk_sink:
-
-```python
-flow = create(
-    compose.to(chunk_sink, final),
-    chunk_sink.to(),
-    final.to(),
-    queue_maxsize=256,    # higher for chunk-heavy flows
-)
-```
-
-256-1024 is reasonable for chunk edges. Don't disable backpressure (`<=0`) — you'll OOM under pathological producers.
+- **Per-request queue** — an unbounded `asyncio.Queue` is fine for one chat turn; for very long runs, bound it and drop or coalesce `thinking` chunks when full (never drop the final event).
+- **Sessions** — each subscriber gets a bounded queue (`SessionLimits(update_queue_size=500)` by default). When full, non-critical updates are dropped; critical ones (`RESULT`, `ERROR`, `NOTIFICATION`, `STATUS_CHANGE`) evict the oldest item instead. Raise the limit for chunk-heavy UIs.
 
 ### Coalesce chunks
-If the producer is much faster than the network, coalesce small chunks into larger ones:
+If the producer is much faster than the network, coalesce small deltas before writing:
 
 ```python
-buffer = []
-async for token in stream:
-    buffer.append(token)
-    if len("".join(buffer)) >= 32:    # flush at 32 chars
-        await ctx.emit_chunk(parent=msg, text="".join(buffer), to=chunk_sink)
-        buffer = []
-if buffer:
-    await ctx.emit_chunk(parent=msg, text="".join(buffer), to=chunk_sink)
-await ctx.emit_chunk(parent=msg, text="", done=True, to=chunk_sink)
+buffer: list[str] = []
+
+def flush() -> str:
+    text = "".join(buffer)
+    buffer.clear()
+    return text
+
+# in the drain loop
+buffer.append(text)
+if sum(map(len, buffer)) >= 32:
+    yield sse("chunk", flush())
 ```
 
 Trade-off: TTFC suffers slightly; throughput improves.
 
-### Per-connection queue + sink decoupling
-The sink-node decoupling pattern (covered in `sse-and-websocket.md`) lets the flow keep running even when a single client drains slowly.
-
 ## Status taxonomy
 
-For consistent UX, settle on a status vocabulary:
+Settle on a status vocabulary so frontend and backend agree:
 
-| `meta["kind"]` | When |
+| Kind | When |
 |---|---|
-| `status` | Progress hints ("searching…", "synthesizing…") |
-| `content` | The actual answer |
-| `thinking` | Reasoning trace (if exposed to user) |
-| `tool_call` | "Calling foo with X" (often surfaced separately) |
-| `citation` | Source references |
+| `status` | Progress hints ("searching…", "calling tool foo") |
+| `content` | The answer |
+| `thinking` | Reasoning trace (if exposed to users) |
+| `tool_call` | Tool start/end details (often surfaced separately) |
+| `citation` | Sources (from the final payload's `sources`) |
 
-Document the vocabulary so frontend and backend agree. If you change it, version your stream protocol.
+If you change it, version your stream protocol.
 
 ## Cancellation and streaming
 
-When a client disconnects mid-stream:
-1. Detect disconnect in the sink (FastAPI raises `ClientDisconnect`, WebSocket gets a `WebSocketDisconnect`).
-2. Call `await flow.cancel(trace_id)` to stop the producer.
-3. Producer notices cancellation on the next cooperative checkpoint (await point) and stops.
+When a client disconnects or presses stop:
+1. Detect it in the handler (`asyncio.CancelledError` / `ClientDisconnect` for SSE, `WebSocketDisconnect` for WebSockets).
+2. Stop the run cooperatively: push `SteeringEvent(event_type=SteeringEventType.CANCEL, ...)` into the `SteeringInbox` you passed to `planner.run(steering=...)`, or call `session.cancel_task(task_id)` with sessions. Cancelling the run's `asyncio.Task` also works as a hard stop.
+3. The planner checks the inbox between steps and while tools run, then raises `SteeringCancelled`.
 
-Don't rely on the producer noticing instantly — keep awaitable boundaries in the producer body (yield to the loop between heavy operations).
-
-See [[penguiflow-core-flows]] `references/cancel-deadlines.md` for cancellation semantics.
+See [[penguiflow-hitl-pause-resume]] for steering and pause semantics.
 
 ## Error handling mid-stream
 
-If the producer raises mid-stream, the sink may have received partial chunks. Options:
+If the run fails mid-stream, the client may already have partial content.
+- `planner.run()` raises (e.g. LLM unavailable): catch it in the bridge and send a terminal `error` frame, then close.
+- The planner finishes without an answer: `PlannerFinish.reason` is `"no_path"` or `"budget_exhausted"` — send it in the `final` frame so the UI can show a graceful failure instead of the partial text.
+- Sessions publish an `ERROR` update and a `STATUS_CHANGE` with `status == "FAILED"`.
 
-### Option 1: emit an error chunk
-```python
-try:
-    async for token in stream:
-        await ctx.emit_chunk(parent=msg, text=token, to=chunk_sink)
-except Exception as exc:
-    await ctx.emit_chunk(
-        parent=msg,
-        text=f"error: {type(exc).__name__}",
-        done=True,
-        meta={"kind": "error", "code": exc.__class__.__name__},
-        to=chunk_sink,
-    )
-    raise   # let the runtime convert to FlowError as usual
-```
-
-The client sees a final chunk with `meta.kind == "error"` and can render appropriately.
-
-### Option 2: rely on `FlowError` + `emit_errors_to_rookery`
-The chunk stream may end without `done=True`; the caller's `fetch(trace_id=...)` returns a `FlowError` and the client renders the error from there.
-
-Pick Option 1 for chat UIs (smoother UX). Option 2 for back-office tools.
+Always end the stream with exactly one terminal frame (`final` or `error`); clients otherwise hang or reconnect forever.
 
 ## Observability for streams
 
 Track:
-- **TTFC** per trace (p50/p95/p99) — by route, by tenant, by user.
-- **Chunk rate** (chunks/sec) — bottleneck indicator.
-- **Stream duration** (start → `done`) — by route.
-- **Abandon rate** (streams without `done=True`) — disconnects, errors.
-- **Backpressure events** (`emit_chunk` await time) — capacity indicator.
+- **TTFC** per request (p50/p95/p99) — by route, by tenant.
+- **Chunk rate** — bottleneck indicator.
+- **Stream duration** (accept → terminal frame).
+- **Abandon rate** (streams without a terminal frame) — disconnects, errors.
+- **Dropped updates** (session subscriber overflow) — capacity indicator.
 
-Wire metrics in the chunk sink (it sees every chunk regardless of fan-out). Don't add metrics inside the producer — it'll measure your code, not the user experience.
+Measure in the bridge (it sees every frame the user sees), not inside tools. See [[penguiflow-observability]].
 
 ## Anti-patterns
 
-- **One chunk per token, naive** — fine for small LLMs but inefficient over WAN. Coalesce.
-- **`done=True` only sometimes** — clients will hang. Emit it always, even on error.
-- **Mixing trace ids** — chunks for trace A land in trace B's stream because the producer reused `trace_id`. Always derive `trace_id` from the inbound request.
-- **Sink calls await long external I/O** — backpressure across the whole flow. Buffer in the sink, ack quickly.
-- **Disabling backpressure** for chunk edges. Memory grows linearly with producer speed; one slow client takes down the worker.
+- **One frame per token over WAN** — coalesce.
+- **Terminal frame only sometimes** — clients hang. Send it on success, failure and cancel.
+- **One planner instance + one callback for all users** — tokens leak across requests. Use a planner per request or sessions.
+- **Blocking work in `event_callback`** — stalls the planner loop. Enqueue only.
+- **Appending across `action_seq` changes** — duplicated answers after repairs. Reset on a new `action_seq`.

@@ -1,113 +1,130 @@
 ---
 name: penguiflow-deployment
-description: Take a PenguiFlow agent from local dev to a production worker fleet — pick a deployment shape (embedded service, queue-backed worker pool, distributed), enforce envelope discipline (`Message` + `Headers.tenant` + `trace_id`), set runtime limits (`queue_maxsize`, `NodePolicy.timeout_s`/`max_retries`, `Message.deadline_s`), implement worker lifecycle (`flow.run(...)` → `await flow.stop()`), wire durability via `StateStore` capabilities, configure distributed hooks (`MessageBus`, `RemoteTransport`+`RemoteNode`, A2A bindings), and harden tool execution. Use when a user says "deploy to production", "worker integration", "multi-worker", "queue-backed", "distributed execution", "RemoteNode", "MessageBus", or asks how to size queues/timeouts/retries.
+description: Take a ReactPlanner agent from local dev to a production service or worker fleet — pick a deployment shape (embedded HTTP/WebSocket service, sessions-backed service, queue-backed worker pool, A2A specialist), build planners from a factory, set run limits (`max_iters`, `deadline_s`, `hop_budget`, `token_budget`, `llm_timeout_s`, `llm_max_retries`, `SessionLimits`, ToolNode `timeout_s`/`max_concurrency`), wire durability via `StateStore` capabilities (planner pause state, memory, tasks, bindings), expose or call agents over A2A, and shut down gracefully with steering cancellation. Use when a user says "deploy to production", "worker integration", "multi-worker", "queue-backed", "scale the agent", "A2A deployment", or asks how to size budgets/timeouts/concurrency.
 ---
 
 # PenguiFlow Deployment
 
 ## When to use
-- Moving from local dev to a long-lived production service.
-- Building a queue-backed job worker.
-- Sizing concurrency, queues, timeouts, retries.
-- Scaling to multiple workers / machines.
-- Wiring distributed primitives (`StateStore`, `MessageBus`, `RemoteTransport`).
+- Moving a planner agent from a script to a long-lived production service.
+- Building a queue-backed job worker that runs planner tasks.
+- Sizing budgets, timeouts and concurrency.
+- Scaling to multiple workers / machines (durable pause/resume, memory, bindings).
 
 ## When NOT to use
-- Local iteration → run flows in-process; see [[penguiflow-core-flows]].
+- Configuring planner features (tools, skills, guardrails, memory) → use [[penguiflow-reactplanner-config]].
 - Persistence semantics in depth → use [[penguiflow-statestore]].
-- A2A wire contract → use [[penguiflow-a2a-integration]] (this skill points at it for distributed agent calls).
+- A2A wire contract → use [[penguiflow-a2a-integration]].
 - Observability dashboards/alerts → use [[penguiflow-observability]].
-- Test harness → use [[penguiflow-testkit]].
+- Client streaming (SSE/WebSocket) → use [[penguiflow-streaming]].
 
 ## Hard boundaries
-This skill is the **production runbook**: shapes, sizing, lifecycle, distributed contracts. Persistence implementation lives in statestore. Observability dashboards live in observability. A2A bindings live in a2a-integration. Don't duplicate.
+This skill is the **production runbook**: shapes, sizing, lifecycle, durability, distributed contracts. Persistence implementation lives in statestore. Observability lives in observability. A2A bindings live in a2a-integration. Don't duplicate.
 
 ## Workflow
 
 ### 1) Pick a deployment shape
 | Shape | When | Trade-offs |
 |---|---|---|
-| Embedded in a service (FastAPI, gRPC) | Synchronous user-facing requests | Simplest; tied to service scaling |
-| Queue-backed worker pool | Async jobs, batch, fan-out | Scales horizontally; needs a queue |
-| Distributed (`MessageBus` + multi-worker) | High throughput across machines | Most complex; needs durable infra |
+| Embedded in an HTTP/WS service (FastAPI) | Synchronous user-facing chat | Simplest; tied to service scaling |
+| Sessions-backed service (`SessionManager` + `StreamingSession`) | Chat with background tasks, steering, reconnect/replay | More moving parts; needs a session state store for multi-worker |
+| Queue-backed worker pool | Async jobs, batch | Scales horizontally; needs a queue and durable state |
+| A2A specialist (`A2AService(planner, ...)`) | Other agents call this one | Standard protocol; one service per specialist |
 
-Start with embedded or queue-backed. Distributed only when you've hit horizontal scaling limits on a single process.
+Start embedded or sessions-backed. Add workers when a single process can't keep up.
 
-### 2) Adopt envelopes (`Message`)
-Production = envelopes:
+### 2) Build planners from a factory
 ```python
-msg = Message(payload=..., headers=Headers(tenant=...), deadline_s=...)
-await flow.emit(msg, trace_id=msg.trace_id)
-result = await flow.fetch(trace_id=msg.trace_id)
+def make_planner(*, event_callback=None) -> ReactPlanner:
+    return ReactPlanner(
+        llm_client=shared_llm_client,     # reuse connections across planners
+        catalog=catalog,
+        state_store=state_store,          # durable pause/resume + memory
+        max_iters=8,
+        deadline_s=120,
+        event_callback=event_callback,
+    )
 ```
-Required for per-trace cancel, deadlines, multi-tenant isolation, deterministic correlation in multi-trace systems. Payload-only is a dev convenience. See [[penguiflow-core-flows]] `references/messages-and-envelopes.md`.
+A planner instance holds per-run callbacks and session runtimes; a factory gives each request (or each session task, via `PlannerTaskPipeline(planner_factory=make_planner)`) a clean instance. Pass `tool_context={"session_id": ..., "tenant": ...}` on every `run()` — `session_id` keys per-conversation serialization and short-term memory.
 
-### 3) Set runtime limits deliberately
+### 3) Set run limits deliberately
 | Knob | Where | Default | Production start |
 |---|---|---|---|
-| `queue_maxsize` | `create(...)` | 64 | 64-256 depending on workload |
-| `NodePolicy.timeout_s` | every I/O node | unset | always set; tune to p99 + headroom |
-| `NodePolicy.max_retries` | per node | 0 | 1-3 for idempotent network ops; 0 for non-idempotent |
-| `NodePolicy.backoff_base`/`max_backoff` | per node | 0.5 / 30 | tune to dependency's rate-limits |
-| `Message.deadline_s` | envelope | None | set on user-initiated work |
+| `max_iters` | `ReactPlanner` | 8 | 6-12; raise only with evidence |
+| `deadline_s` | `ReactPlanner` | None | always set for user-facing work |
+| `hop_budget` / `token_budget` | `ReactPlanner` | None | set for cost control |
+| `llm_timeout_s` / `llm_max_retries` | `ReactPlanner` | 360 / 3 | 60-120 / 2-3 for chat |
+| `absolute_max_parallel` | `ReactPlanner` | 50 | lower to protect downstreams |
+| `SessionLimits(max_concurrent_tasks, max_task_runtime_s, update_queue_size, ...)` | `SessionManager` | 3 / 900 / 500 | per workload |
+| ToolNode `timeout_s` / `max_concurrency` | `ExternalToolConfig` | 30 / 10 | tune per remote tool |
 
-Never disable backpressure (`queue_maxsize <= 0`) unless you have your own flow control. Never run a network node without `timeout_s`.
+Local `@tool` functions have no runtime-enforced timeout — wrap slow I/O in `asyncio.timeout(...)` inside the tool. Sizing recipes in `references/sizing-and-limits.md`.
 
-### 4) Manage flow lifecycle in your worker
+### 4) Manage lifecycle in your worker
 ```python
-flow = create(...)
-flow.run(registry=registry)        # start workers
-try:
-    async for job in queue:
-        message = Message(payload=job.payload, headers=Headers(tenant=job.tenant), deadline_s=job.deadline)
-        result = await flow.fetch(trace_id=message.trace_id)   # or with run/emit pattern
-        await queue.mark_complete(job.id, result=result)
-finally:
-    await flow.stop()              # always, on shutdown
+async def handle(job):
+    planner = make_planner()
+    inbox = SteeringInbox()
+    running[job.id] = inbox                        # so shutdown/cancel can reach it
+    try:
+        result = await planner.run(job.query, tool_context={"session_id": job.session_id, "tenant": job.tenant}, steering=inbox)
+        if isinstance(result, PlannerPause):
+            await queue.park(job.id, resume_token=result.resume_token)   # resume later, possibly elsewhere
+        else:
+            await queue.complete(job.id, result=result.payload)
+    finally:
+        running.pop(job.id, None)
 ```
-Patterns: **stateless-per-job** (new flow per job, best isolation) vs **shared-flow** (one flow, many traces, lower overhead). See `references/worker-patterns.md`.
+Patterns (per-job planner vs shared planner with sessions, at-least-once delivery, dead letters) in `references/worker-patterns.md`.
 
 ### 5) Wire durability (when you need it)
-Attach a `StateStore` to `create(...)`. Every `FlowEvent` calls `save_event` (best-effort). Multi-worker pause/resume, memory persistence, A2A binding continuity — see [[penguiflow-statestore]] for required and optional capabilities.
+Pass one `StateStore` to the planner (and to `SessionManager(state_store=...)`). Capabilities are duck-typed:
+- `save_planner_state` / `load_planner_state` — resume a `PlannerPause` on any worker ([[penguiflow-hitl-pause-resume]]).
+- `save_memory_state` / `load_memory_state` — short-term memory across workers ([[penguiflow-memory]]).
+- `save_task` / `save_update` / `list_updates` — session tasks and replayable updates ([[penguiflow-background-tasks]]).
+- `save_remote_binding` / `find_binding` / `mark_binding_terminal` — A2A conversation continuity.
 
-### 6) Wire distributed primitives (when you need them)
-- **`StateStore`** — durable audit + binding storage. Mandatory for distributed pause/resume.
-- **`MessageBus`** — `publish(envelope: BusEnvelope)` lets you route edge traffic to out-of-process workers. Optional; needed when scaling beyond one process per graph.
-- **`RemoteTransport` + `RemoteNode`** — proxy a node to a remote service. Implements `send`/`stream`/`cancel`. Pair with `record_binding=True` and `StateStore.save_remote_binding` to enable cancellation across restarts.
-- **A2A bindings** — for agent-to-agent calls, use the dedicated skill. Install extras: `penguiflow-lite[a2a-server]`, `penguiflow-lite[a2a-client]`, `penguiflow-lite[a2a-grpc]`.
+Full contract in [[penguiflow-statestore]].
 
-See `references/distributed-primitives.md`.
+### 6) Distribute across agents (when you need it)
+- **Expose** a specialist: `A2AService(planner, agent_card=..., config=A2AConfig(agent_url=...))` + `install_a2a_http(app, service)` or the gRPC binding.
+- **Call** specialists: `A2AAgentToolset` / `A2ARouterToolset` tools in the manager's catalog.
+- **Custom transports**: implement `penguiflow.remote.RemoteTransport` (`send` / `stream` / `cancel`, optionally the task operations) and hand it to `A2AAgentToolset(transport=...)`.
+- Extras: `penguiflow-lite[a2a-server]`, `penguiflow-lite[a2a-client]`, `penguiflow-lite[a2a-grpc]`.
+
+See `references/distributed-primitives.md` and [[penguiflow-a2a-integration]].
 
 ### 7) Harden tool execution (planner + ToolNode)
 Tools are an untrusted boundary:
-- Set `max_concurrency` per `ExternalToolConfig`.
-- `tool_filter` allowlists.
+- Set `max_concurrency` and `timeout_s` per `ExternalToolConfig`; use `tool_filter` allowlists.
+- Restrict tools per request with `ToolPolicy` / `ToolVisibilityPolicy`.
 - Gate write/external tools behind HITL ([[penguiflow-hitl-pause-resume]]) or guardrails ([[penguiflow-guardrails]]).
-- Secrets in env/secret managers, never in `llm_context`.
+- Secrets in env/secret managers or `tool_context`, never in `llm_context`.
 
 See [[penguiflow-mcp-integration]].
 
 ### 8) Observe + alert
-Structured logging (`configure_logging(structured=True)`), `log_flow_events` middleware everywhere, metrics derived from `FlowEvent` with bounded cardinality. Alert on queue saturation, error/timeout rates, retry storms, `node_failed` accumulation. See [[penguiflow-observability]].
+`configure_logging(structured=True)`, a metrics `event_callback`, LLM tracing (`PENGUIFLOW_LLM_TRACING`). Alert on failure-reason share, tool error spikes, latency SLOs and cost. See [[penguiflow-observability]].
 
 ### 9) Graceful shutdown
-On `SIGTERM`: stop accepting new jobs → drain in-flight with a deadline → `flow.cancel(trace_id)` for over-deadline traces → `await flow.stop()` → exit. Most platforms give 30-60s before SIGKILL; tune the drain deadline to fit within that window.
+On `SIGTERM`: stop accepting new work → push `SteeringEventType.CANCEL` into the inboxes of runs that won't finish within the drain window (or `session.cancel_task(...)`; `await a2a_service.stop()` for A2A) → wait for in-flight runs up to the deadline → exit. Paused runs need nothing: their state is already in the `StateStore`. Most platforms give 30-60 s before SIGKILL.
 
 ## Troubleshooting (fast checks)
-- **Memory grows unbounded** — `queue_maxsize <= 0` somewhere; bound it.
-- **Random latency spikes** — no `timeout_s` on a network node; set it.
-- **Retry storms cascade across workers** — at-least-once delivery + non-idempotent nodes; add idempotency keys (use `trace_id`) or `max_retries=0`.
-- **Worker stalls on shutdown** — `flow.stop()` not called or in-flight tasks not cancelled; wire the graceful shutdown handler.
-- **Cross-tenant data in audit** — `Headers.tenant` missing; enforce at ingress.
-- **Remote tasks leak (can't cancel)** — `record_binding=False` or `StateStore.save_remote_binding` missing; enable durable bindings.
-- **Distributed pause/resume fails** — `StateStore` missing `save_planner_state`/`load_planner_state`; implement them.
-- **One bad job DoSes the worker** — no `max_concurrent_tasks` / no resource limits; cap concurrency at every layer.
-- **Logs flood from `node_start`** — sample or filter; high-throughput nodes generate one event per call.
+- **Runs never end / cost spikes** — no `deadline_s` / `hop_budget` / `token_budget`; set them.
+- **Random latency spikes** — remote tools without `timeout_s`, or `llm_timeout_s` left at 360 s.
+- **Tokens/events leak across users** — one planner instance shared with a per-request `event_callback`; use a factory or sessions.
+- **Resume fails on another worker** — `StateStore` lacks `save_planner_state` / `load_planner_state`, or the planner wasn't given the store.
+- **Memory resets between requests** — no `session_id` in `tool_context`, or memory isn't persisted to the store.
+- **Retry storms across workers** — at-least-once delivery + non-idempotent write tools; add idempotency keys or gate writes behind HITL.
+- **Worker hangs on shutdown** — runs not cancelled through steering; keep a registry of inboxes.
+- **One user DoSes the worker** — no `SessionLimits.max_concurrent_tasks` / per-tenant quotas.
 
 ## Worked examples
-- `examples/reliability_middleware/flow.py` and `examples/mlflow_metrics/flow.py` show production-shape observability wiring.
+- `examples/planner_enterprise_agent_v2/` — production-shaped planner agent (config, telemetry, streaming).
+- `examples/a2a_grpc_server/main.py` — a planner served as an A2A specialist.
+- `examples/react_pause_resume/main.py` — pause/resume flow to adapt for durable workers.
 
 ## References (load only as needed)
-- `references/worker-patterns.md` — stateless-per-job vs shared-flow, queue contracts (at-least-once, retry, dead-letter), per-job correlation, graceful shutdown.
-- `references/sizing-and-limits.md` — `queue_maxsize`, `timeout_s`, `max_retries`, `deadline_s` sizing recipes by workload type; sample SLOs.
-- `references/distributed-primitives.md` — `MessageBus`, `RemoteTransport`/`RemoteNode`, A2A handoff, recovery semantics, at-least-once + idempotency rules.
+- `references/worker-patterns.md` — per-job vs session-backed workers, queue contracts (at-least-once, retry, dead-letter), resume tokens, graceful shutdown.
+- `references/sizing-and-limits.md` — budgets, timeouts, retries, concurrency sizing by workload type; sample SLOs.
+- `references/distributed-primitives.md` — `StateStore` capabilities, `RemoteTransport`, A2A handoff, recovery semantics, idempotency rules.

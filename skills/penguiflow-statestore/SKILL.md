@@ -19,17 +19,17 @@ Hard boundaries vs siblings: the **application patterns** that consume these cap
 - `references/statestore-implementation-spec.md` — full contract (semantics, schemas, edge cases, checklist)
 - `references/statestore-production-guide.md` — production guide + Postgres example + OAuth pause/resume notes
 - `references/artifacts-and-resources.md` — `ArtifactStore` contract + planner/tool integration notes
-- `references/distributed-execution.md` — distributed hooks, A2A router continuity, `RemoteBinding`
+- `references/distributed-execution.md` — multi-worker persistence, A2A server/client continuity, `RemoteBinding` (maintained here, not synced)
 
 ## Code map (workspace)
 
 When you need exact behavior, open the code:
 - `penguiflow/state/protocol.py`, `penguiflow/state/models.py`, `penguiflow/state/in_memory.py`, `penguiflow/state/adapters.py`
 - `penguiflow/artifacts.py`
-- `penguiflow/core.py` (best-effort audit log + best-effort `save_remote_binding`)
+- `penguiflow/planner/pause_management.py` (planner pause/resume persistence), `penguiflow/planner/memory_integration.py` (memory persistence)
 - `penguiflow/sessions/session.py`, `penguiflow/sessions/persistence.py`, `penguiflow/sessions/registry.py`, `penguiflow/sessions/task_service.py`
 - `penguiflow/sessions/projections.py`
-- `penguiflow/remote.py`, `penguiflow_a2a/*` (remote execution + bindings)
+- `penguiflow/remote.py` (remote transport protocols), `penguiflow_a2a/core.py` (A2A server: per-task `save_remote_binding`), `penguiflow_a2a/planner_tools.py` (client: binding save/lookup)
 
 ## Workflow decision tree
 
@@ -65,4 +65,4 @@ When you need exact behavior, open the code:
 ## Helper scripts
 
 - Run `scripts/statestore_inspect.py` to print the StateStore/ArtifactStore surface and (optionally) capability-check a concrete backend object.
-- Run `scripts/sync_references_from_repo.py --repo <path>` to refresh bundled reference docs from a PenguiFlow repo checkout.
+- Run `scripts/sync_references_from_repo.py --repo <path>` to refresh the bundled spec, production guide and artifacts references from a PenguiFlow repo checkout.

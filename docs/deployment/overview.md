@@ -2,117 +2,77 @@
 
 ## What it is / when to use it
 
-This section explains how to run PenguiFlow as a **long-lived production system**:
+This section explains how to run PenguiFlow agents as a **long-lived production system**:
 
-- embedded inside a Python service (FastAPI, worker, CLI runner),
-- as a **job worker** behind a queue (stateless or long-lived flows),
-- optionally distributed (StateStore + MessageBus + RemoteTransport).
-
-Use this page to decide which deployment shape you want, and which operational “contracts” you must implement.
+- a `ReactPlanner` behind your own API, a job worker, or an A2A endpoint,
+- with durable state (pause/resume, memory, sessions) when you need it,
+- observable through planner events, LLM telemetry and structured logs.
 
 ## Non-goals / boundaries
 
-- These docs do not replace your org’s platform standards (Kubernetes, service mesh, secrets, CI/CD).
-- PenguiFlow does not ship a full “platform” (no built-in job queue, metrics exporter, or authz layer).
-- “Distributed execution” is opt-in; you can run a single-process deployment safely with the core runtime.
+- PenguiFlow does not ship a full "platform" (no built-in job queue, metrics exporter, or authz layer).
+- It does not prescribe a hosting model; the same planner runs in a web app, a worker, or behind A2A.
 
 ## Contract surface (choices you must make)
 
-### 1) Runtime style: payload-only vs envelopes
+### 1) Serving surface
 
-- **Payload-only** is fastest to start and works well for single-tenant pipelines.
-- **Envelopes** (`Message(payload=..., headers=Headers(...), trace_id=...)`) are the production-friendly default:
-  - per-trace cancellation and deadlines,
-  - deterministic correlation (`fetch(trace_id=...)`),
-  - streaming chunks with inherited metadata,
-  - multi-tenant isolation via `Headers.tenant`.
+- **Your own API**: call `await planner.run(query, tool_context=...)` per request.
+- **Sessions**: `SessionManager` / `StreamingSession` for multi-turn chats with background tasks and live updates (see **[Background tasks](../planner/background-tasks.md)**).
+- **A2A**: `penguiflow_a2a.A2AService(planner, ...)` mounted with `create_a2a_http_app` / `install_a2a_http`, or the gRPC binding. Other agents call it; your planner can call others with `A2AAgentToolset`.
 
-See **[Messages & envelopes](../core/messages-and-envelopes.md)**.
+### 2) Planner budgets
 
-### 2) Reliability knobs (per node)
+Set `max_iters`, token/cost budgets and deadlines explicitly; see **[Configuration](../planner/configuration.md)**.
 
-Every node has a `NodePolicy` that defines:
+### 3) Tool reliability and concurrency
 
-- timeouts (`timeout_s`),
-- retries (`max_retries`) and exponential backoff.
-
-See **[Errors, retries, timeouts](../core/errors-retries-timeouts.md)**.
-
-### 3) Backpressure + concurrency
-
-Edges are bounded queues (`queue_maxsize`) so the system applies backpressure instead of unbounded buffering.
-
-See **[Concurrency](../core/concurrency.md)**.
+Configure timeouts, retries and `max_concurrency` per external tool source in `ToolNode`; see **[Tools concurrency](../tools/concurrency-guide.md)** and **[Tools configuration](../tools/configuration.md)**.
 
 ### 4) Durability and audit (optional)
 
-In production you often need one (or both):
+A **StateStore** persists pause records (resume across processes), short-term memory, session/task state, planner events and A2A remote bindings. See **[State store](../tools/statestore.md)**.
 
-- **structured events** (`FlowEvent`) for debugging and metrics, and/or
-- a **StateStore** to persist `StoredEvent` (audit history, distributed pause/resume, replay-friendly event capture).
+### 5) Tool integrations
 
-See **[State store](../tools/statestore.md)** and **[Telemetry patterns](../observability/telemetry-patterns.md)**.
-
-### 5) Tool integrations (if using ToolNode / planner)
-
-If you use `ReactPlanner` and ToolNode integrations, deployment must include:
-
-- secret injection (env vars / secret manager),
-- tool allowlists / visibility policies,
-- safe concurrency limits per tool source.
-
-See **[Tools configuration](../tools/configuration.md)** and **[Production deployment](production-deployment.md)**.
+- ToolNode for MCP/UTCP/HTTP,
+- OAuth / HITL via pause/resume (see **[OAuth & HITL](../tools/oauth-hitl.md)**).
 
 ## Operational defaults (recommended)
 
-- Start with **one process** and a bounded queue (`queue_maxsize` > 0).
-- Prefer **envelopes** for any multi-tenant / request-correlated system.
-- Treat tool execution as untrusted:
-  - allowlist tools and gate sensitive actions with HITL,
-  - enforce timeouts on every external boundary.
-- Attach structured logging early:
-  - `configure_logging(structured=True)`,
-  - `middlewares=[log_flow_events(...)]` for consistent runtime events.
+- Always pass `tenant` and `session_id` in `tool_context`.
+- Use a durable `StateStore` in multi-process deployments so pause tokens and memory survive restarts.
+- Turn on structured logs: `configure_logging(structured=True)`, and attach an `event_callback`.
 
 ## Failure modes & recovery
 
-- **Requests get “mixed up”**: you are using unscoped `fetch()` with multiple concurrent traces. Fix: use unique `trace_id` per request and `fetch(trace_id=...)`.
-- **Workers “hang”**: no egress message reaches Rookery. Fix: ensure at least one egress node exists and emits/returns a final value.
-- **Memory growth**: unbounded edges (`queue_maxsize <= 0`) or large payloads in events. Fix: keep queues bounded; use artifacts/resources for large blobs.
-- **Retry storms**: retries amplify load on downstream dependencies. Fix: reduce retries, add timeouts, and implement idempotency on side-effecting nodes.
+- **Runs never finish**: budgets are too loose or a tool hangs; set tool timeouts and planner budgets.
+- **Resume fails after a restart / on another replica**: pause records live in memory; configure a shared `StateStore`.
+- **Duplicate side effects**: tools retried or re-run after resume; make them idempotent and mark `side_effects`.
 
 ## Observability
 
-PenguiFlow emits `FlowEvent` around node execution and control-plane behavior (timeouts, retries, cancellation, deadline skips).
-
-Operationally:
-
-- log FlowEvents (middleware) and ensure logs include `trace_id`,
-- extract metrics from FlowEvents (counters + histograms + queue-depth gauges),
-- persist events via `StateStore` if you need audit/replay.
-
-See **[Logging](../observability/logging.md)** and **[Metrics & alerts](../observability/metrics-and-alerts.md)**.
+See **[Observability overview](../observability/overview.md)**: planner events, LLM telemetry and task telemetry.
 
 ## Security / multi-tenancy notes
 
-- Always set `Headers.tenant` and keep tenant boundaries consistent across a trace.
-- Never store secrets in message payloads or `meta` if you persist events/logs.
-- Treat `trace_id` as an authorization surface (don’t allow cross-tenant fetch/cancel).
+- Keep secrets in `tool_context` (never `llm_context`) and out of logs.
+- Scope state store keys and memory by tenant/user/session.
+- Authenticate A2A endpoints at your app layer; the A2A binding does not ship authn/authz.
 
 ## Runnable examples
 
 ```bash
-uv run python examples/quickstart/flow.py
-uv run python examples/roadmap_status_updates/flow.py
+uv run python examples/react_minimal/main.py
+uv run python examples/a2a_grpc_server/main.py   # requires the a2a-grpc extra
 ```
 
 ## Troubleshooting checklist
 
-- Need job workers: start with **[Worker integration](worker-integration.md)**.
-- Need production hardening (limits, rollout, multi-tenant defaults): use **[Production deployment](production-deployment.md)**.
-- Need to understand runtime behavior: see **[Core runtime](../core/flows-and-nodes.md)**.
+- Need production hardening: see **[Production deployment](production-deployment.md)**.
+- Need a job-worker pattern: see **[Worker integration](worker-integration.md)**.
 
 ## Next steps
 
-- **[Worker integration](worker-integration.md)**
 - **[Production deployment](production-deployment.md)**
+- **[Worker integration](worker-integration.md)**

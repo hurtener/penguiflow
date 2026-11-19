@@ -92,7 +92,7 @@ CREATE TABLE oauth_tokens (
     PRIMARY KEY (user_id, provider)
 );
 
--- Remote bindings (for A2A / RemoteNode)
+-- Remote bindings (for A2A)
 CREATE TABLE remote_bindings (
     trace_id VARCHAR(128) NOT NULL,
     context_id VARCHAR(128),

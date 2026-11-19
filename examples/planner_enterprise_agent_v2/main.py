@@ -3,7 +3,7 @@
 This is the cornerstone implementation for production agent deployments,
 demonstrating:
 - ReactPlanner integration with auto-discovered nodes
-- Telemetry middleware for full error visibility
+- Planner event telemetry for full error visibility
 - Status update sinks for frontend integration
 - Streaming support for progressive UI updates
 - Environment-based configuration
@@ -26,7 +26,7 @@ from examples.planner_enterprise_agent_v2.nodes import (
     FinalAnswer,
     StatusUpdate,
     UserQuery,
-    analyze_documents_pipeline,  # Pattern A: Wrapped subflow
+    analyze_documents_pipeline,  # Pattern A: Pipeline tool
     answer_general_query,
     collect_error_logs,  # Pattern B: Individual node
     initialize_bug_workflow,  # Pattern B: Individual node
@@ -57,7 +57,7 @@ class EnterpriseAgentOrchestrator:
 
     This orchestrator demonstrates enterprise deployment patterns:
     - Injectable telemetry for testing and monitoring
-    - Middleware integration for error visibility
+    - Planner event callbacks for error visibility
     - Event callback for planner observability
     - Clean separation of concerns
     - Graceful degradation and error handling
@@ -107,9 +107,9 @@ class EnterpriseAgentOrchestrator:
 
         This demonstrates TWO patterns for organizing workflows:
 
-        Pattern A - Wrapped Subflow (Document Analysis):
+        Pattern A - Pipeline Tool (Document Analysis):
             The entire document workflow is wrapped as a single tool that
-            internally executes a 5-node subflow. The planner sees ONE tool:
+            internally runs 5 steps in order. The planner sees ONE tool:
             "analyze_documents_pipeline" that handles everything from parsing
             to final report generation.
 
@@ -136,7 +136,7 @@ class EnterpriseAgentOrchestrator:
         return [
             # Router (always individual)
             Node(triage_query, name="triage_query"),
-            # PATTERN A: Document workflow as wrapped subflow
+            # PATTERN A: Document workflow as a pipeline tool
             Node(analyze_documents_pipeline, name="analyze_documents"),
             # PATTERN B: Bug workflow as individual nodes
             Node(initialize_bug_workflow, name="init_bug"),
@@ -152,10 +152,10 @@ class EnterpriseAgentOrchestrator:
 
         Note the difference in registrations:
 
-        Pattern A (Wrapped Subflow):
+        Pattern A (Pipeline Tool):
             analyze_documents: RouteDecision → FinalAnswer
             The planner sees this as a single-step transformation.
-            Internally it executes 5 nodes, but externally it's one tool.
+            Internally it runs 5 steps, but externally it's one tool.
 
         Pattern B (Individual Nodes):
             init_bug: RouteDecision → BugState
@@ -175,9 +175,9 @@ class EnterpriseAgentOrchestrator:
         # Router
         registry.register("triage_query", UserQuery, RouteDecision)
 
-        # PATTERN A: Document workflow as wrapped subflow
+        # PATTERN A: Document workflow as a pipeline tool
         # Single registration: RouteDecision → FinalAnswer
-        # (Internal subflow nodes are NOT registered in planner catalog)
+        # (Internal pipeline steps are NOT registered in planner catalog)
         registry.register("analyze_documents", DocumentRouteDecision, FinalAnswer)
 
         # PATTERN B: Bug workflow as individual nodes

@@ -8,12 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:
     from penguiflow.artifacts import ArtifactStore, ScopedArtifacts
 
-try:
-    # Optional import to help tools that share signatures with flow Context
-    from penguiflow.core import Context as FlowContext
-except Exception:  # pragma: no cover - defensive import
-    FlowContext = object  # type: ignore[misc,assignment]
-
 PlannerPauseReason = Literal[
     "approval_required",
     "await_input",
@@ -138,5 +132,5 @@ class ToolContext(Protocol):
         """Emit a streaming artifact chunk (e.g., partial chart config)."""
 
 
-# Helper alias for tools that can accept either planner ToolContext or flow Context
-AnyContext = ToolContext | FlowContext
+# Backwards-compatible alias; tools only ever receive a planner ToolContext.
+AnyContext = ToolContext

@@ -8,10 +8,11 @@ Encoding: `encode_stream_response(event)` produces the SSE-formatted bytes (`dat
 
 What the server emits during a stream:
 - Initial task snapshot (state, ids).
-- Progressive chunks (mapped from `StreamChunk` in the underlying flow).
-- Final task snapshot with terminal state.
+- Progressive answer chunks (`artifactUpdate` on `output-0`), mapped from the planner's `llm_stream_chunk` answer-channel events — only when the planner has `stream_final_response=True`.
+- The final answer artifact, which replaces the streamed chunks (`append=false`, `lastChunk=true`).
+- A final `statusUpdate` (`final: true`) with the terminal state — or `input-required` when the planner paused.
 
-Client side: any SSE-aware HTTP client works. The `A2AHttpTransport.stream_message(...)` returns an async iterator over events.
+Client side: any SSE-aware HTTP client works. `A2AHttpTransport.stream(request)` returns an async iterator of `RemoteStreamEvent`s; an `append=false` artifact update replaces the text streamed so far.
 
 ### When to use SSE vs task mode
 - **SSE** — caller stays connected and consumes chunks immediately. Best for chat-style UX.
@@ -72,7 +73,7 @@ from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service
 
 server = grpc.aio.server()
 port = server.add_insecure_port("127.0.0.1:50051")
-service = A2AService(flow, agent_card=card, config=config)
+service = A2AService(planner, agent_card=card, config=config)
 add_a2a_grpc_service(server, service)
 
 await service.start()
@@ -112,7 +113,7 @@ The `a2a-version` metadata header is required to negotiate protocol version on e
 
 ### Runnable example
 
-`examples/a2a_grpc_server/flow.py` builds a flow, exposes it over gRPC, sends a `SendMessage` request, and prints the resulting task state. Run with `uv run python examples/a2a_grpc_server/flow.py`.
+`examples/a2a_grpc_server/main.py` builds a `ReactPlanner` (offline scripted LLM + one tool), serves it over gRPC, sends a `SendMessage` request, and prints the task state and answer. Run with `uv run python examples/a2a_grpc_server/main.py`.
 
 ### Optional import guard
 

@@ -136,7 +136,7 @@ foreground continues
 
 `tasks.cancel(task_id)`:
 - PENDING → mark CANCELLED, don't execute.
-- RUNNING → cancel the in-flight `asyncio.Task` (cooperative; same caveats as [[penguiflow-core-flows]] cancellation).
+- RUNNING → cancel the in-flight `asyncio.Task` (cooperative: the work stops at its next `await`; see [[penguiflow-hitl-pause-resume]] for steering-based cancellation).
 - COMPLETED/FAILED — no-op.
 
 For subprocess executors, cancellation sends SIGTERM/SIGKILL. Implement gracefully.

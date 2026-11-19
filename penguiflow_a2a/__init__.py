@@ -1,7 +1,7 @@
-"""Optional A2A adapters for PenguiFlow."""
+"""A2A server and client adapters for ReactPlanner agents."""
 
 from .bindings.http import create_a2a_http_app, create_a2a_http_router, install_a2a_http
-from .config import A2AConfig, PayloadMode
+from .config import A2AConfig
 from .core import A2AService
 from .planner_tools import A2AAgentToolset, RemoteEventSink
 from .registry import (
@@ -17,25 +17,10 @@ from .registry import (
     fetch_agent_card,
     load_agent_registry_config,
 )
-from .server import (
-    A2AAgentCard,
-    A2AMessagePayload,
-    A2AServerAdapter,
-    A2ASkill,
-    A2ATaskCancelRequest,
-    create_a2a_app,
-)
 from .transport import A2AHttpTransport
 
 __all__ = [
-    "A2AAgentCard",
-    "A2ASkill",
-    "A2AMessagePayload",
-    "A2ATaskCancelRequest",
-    "A2AServerAdapter",
-    "create_a2a_app",
     "A2AConfig",
-    "PayloadMode",
     "A2AService",
     "create_a2a_http_app",
     "create_a2a_http_router",

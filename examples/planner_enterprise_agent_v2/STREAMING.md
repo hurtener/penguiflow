@@ -6,13 +6,13 @@ The enterprise agent example now supports **real-time status streaming** via the
 
 ```bash
 # Run with real-time status updates
-uv run python examples/planner_enterprise_agent/main.py --stream
+uv run python examples/planner_enterprise_agent_v2/main.py --stream
 
 # Stream a custom query
-uv run python examples/planner_enterprise_agent/main.py --stream --query "Analyze deployment logs"
+uv run python examples/planner_enterprise_agent_v2/main.py --stream --query "Analyze deployment logs"
 
 # Run without streaming (default)
-uv run python examples/planner_enterprise_agent/main.py
+uv run python examples/planner_enterprise_agent_v2/main.py
 ```
 
 ## What It Does
@@ -28,7 +28,7 @@ Query 1: Analyze the latest deployment logs
   │ 🤔 [THINKING] Determining workflow path
   │ ✅ [OK] [Step 1] ▶️  running Parsing repository sources
   │ ✅ [OK] [Step 1] ✓ ok Done!
-  │ ✅ [OK] [Step 2] ▶️  running Launching metadata subflow
+  │ ✅ [OK] [Step 2] ▶️  running Extracting metadata
   │ ✅ [OK] [Step 2] ✓ ok Done!
   │ ✅ [OK] [Step 3] ▶️  running Summarizing findings
   │ ✅ [OK] [Step 3] ✓ ok Done!
@@ -44,7 +44,7 @@ Answer: Analyzed 4 documents. Total size: 5900KB...
 
 ## How It Works
 
-The streaming implementation mirrors the pattern from `examples/roadmap_status_updates_subflows/`:
+The streaming implementation works like this:
 
 1. **Status Publisher**: Nodes call `_publish_status()` to emit `StatusUpdate` events
 2. **STATUS_BUFFER**: Updates are collected in a global buffer keyed by `trace_id`
@@ -142,22 +142,6 @@ class StatusUpdate(BaseModel):
 - ✓ `ok` - Step completed successfully
 - ✗ `error` - Step failed
 
-## Comparison with roadmap_status_updates_subflows
-
-| Feature | enterprise_agent | roadmap_status_updates |
-|---------|------------------|------------------------|
-| **Pattern** | ReactPlanner orchestration | PenguiFlow DAG |
-| **Status Sink** | Terminal (via --stream) | status_collector node |
-| **Streaming** | Background monitor | Fan-out to sink node |
-| **Use Case** | LLM-driven agent workflows | Deterministic pipelines |
-
-Both examples demonstrate the same core pattern:
-1. Nodes emit `StatusUpdate` events
-2. Updates are collected in buffers
-3. Clients consume updates in real-time
-4. Suitable for production WebSocket/SSE
-
 ## See Also
 
-- [examples/roadmap_status_updates_subflows/](../roadmap_status_updates_subflows/) - PenguiFlow DAG with status streaming
-- [examples/planner_enterprise_agent/README.md](./README.md) - Enterprise agent overview
+- [examples/planner_enterprise_agent_v2/README.md](./README.md) - Enterprise agent overview

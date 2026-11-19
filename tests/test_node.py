@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel
 
-from penguiflow import ModelRegistry, Node, NodePolicy
-from penguiflow.node import Node as NodeClass
+from penguiflow import Node, NodePolicy
 
 
 def test_node_with_sync_function_raises_error() -> None:
@@ -58,39 +56,3 @@ def test_node_policy_invalid_validate_option() -> None:
     NodePolicy(validate="in")
     NodePolicy(validate="out")
     NodePolicy(validate="none")
-
-
-@pytest.mark.asyncio
-async def test_node_validation_failure_with_registry() -> None:
-    """Node should fail validation when input doesn't match registered model."""
-
-    class InputModel(BaseModel):
-        value: int
-
-    class OutputModel(BaseModel):
-        result: str
-
-    async def processor(msg: InputModel, _ctx) -> OutputModel:
-        return OutputModel(result=str(msg.value))
-
-    node = NodeClass(
-        processor,
-        name="processor",
-        policy=NodePolicy(validate="both")
-    )
-
-    registry = ModelRegistry()
-    registry.register("processor", InputModel, OutputModel)
-
-    # Should fail validation with wrong input type
-    from penguiflow.core import Context, Endpoint
-    ctx = Context(Endpoint("test"))
-
-    with pytest.raises((ValueError, TypeError)):  # Will raise validation error
-        await node.invoke("not_an_int", ctx, registry=registry)
-
-    # Should succeed with correct input
-    valid_input = InputModel(value=42)
-    result = await node.invoke(valid_input, ctx, registry=registry)
-    assert isinstance(result, OutputModel)
-    assert result.result == "42"

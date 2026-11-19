@@ -1,11 +1,11 @@
 # Remote execution
 
-Types for invoking remote nodes and tracking remote task lifecycles, including
-streaming events, pagination, and terminal-state constants.
+Protocols and types for calling remote agents and tracking remote task
+lifecycles, including streaming events, pagination, and terminal-state
+constants. `penguiflow_a2a.A2AHttpTransport` implements them for A2A.
 
 ## `penguiflow.remote`
 
-- `RemoteNode`
 - `RemoteTransport`
 - `RemoteCallRequest`
 - `RemoteCallResult`

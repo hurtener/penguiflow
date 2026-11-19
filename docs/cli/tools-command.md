@@ -69,7 +69,7 @@ pip install "penguiflow-lite[planner]"
 - The CLI prints discovered tool counts and (optionally) tool names.
 - For full tool execution observability, use:
   - planner trajectory logging, and
-  - runtime `FlowEvent` capture.
+  - planner `event_callback` (`PlannerEvent`) capture.
 
 ## Security / multi-tenancy notes
 

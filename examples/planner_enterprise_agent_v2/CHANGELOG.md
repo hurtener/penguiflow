@@ -1,5 +1,12 @@
 # Enterprise Agent V2 - Changelog
 
+## Unreleased
+
+### Changed
+- The document analysis tool (`analyze_documents_pipeline`) now runs its five steps as a plain async function (`run_document_analysis_pipeline`) instead of a wrapped sub-flow.
+- `AgentTelemetry` records `PlannerEvent`s only. The flow-event middleware (`record_flow_event`) and the `flow_node_*` metrics were removed.
+- Workflow tools raise a local `WorkflowError` instead of `FlowError`.
+
 ## [V2.0.0] - Enhanced Edition
 
 ### 🌟 FLAGSHIP FEATURE

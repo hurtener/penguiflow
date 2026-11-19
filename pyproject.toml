@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "penguiflow-lite"
-version = "5.0.0"
+version = "6.0.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 requires-python = ">=3.11"
 license = "MIT"
@@ -149,7 +149,6 @@ dev = [
 line-length = 120
 target-version = "py311"
 extend-exclude = [
-    "ooflow.py",
     "penguiflow_a2a/grpc/a2a_pb2.py",
     "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
 ]

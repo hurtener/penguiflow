@@ -2,161 +2,108 @@
 
 ## What it is / when to use it
 
-PenguiFlow ships structured runtime events (`FlowEvent`), but it does not ship a metrics exporter. This page shows:
+PenguiFlow emits structured planner events (`PlannerEvent`) and LLM telemetry (`LLMEvent`), but it does not ship a metrics exporter. This page shows:
 
 - which metrics are worth emitting in production,
-- how to derive them from `FlowEvent`,
-- what dashboards and alerts to build for “on-call ready” operations.
+- how to derive them from planner events,
+- what dashboards and alerts to build for "on-call ready" operations.
 
-Use it when you are deploying a worker/service fleet and want predictable detection for saturation, timeouts, and error storms.
-
-Start with **[Observability overview](overview.md)** if you need the full telemetry model across runtime, planner, LLM, and task/session layers.
+Start with **[Observability overview](overview.md)** if you need the full telemetry model across planner, LLM, and task/session layers.
 
 ## Non-goals / boundaries
 
 - This page does not require Prometheus/Datadog/etc. (the patterns apply to any backend).
 - It does not define your SLOs; it provides signals you can map to SLOs.
-- It is runtime-focused; planner-specific metrics belong in planner observability docs.
+- Provider-level latency, tokens and cost come from LLM telemetry hooks; see **[Native LLM layer](../planner/native-llm.md)**.
 
 ## Contract surface (what you can measure)
 
-### `FlowEvent.metric_samples()` + `FlowEvent.tag_values()`
+From `PlannerEvent`:
 
-`FlowEvent` provides:
-
-- numeric samples: queue depths, latency (when present), attempt counts, trace inflight/pending counts,
-- tags: event type, node identifiers, and safe string extras.
+- tool latency: `step_complete` / `tool_call_end` carry `node_name` and `latency_ms`,
+- outcomes: `finish` carries `extra["reason"]` (`answer_complete`, `no_path`, `budget_exhausted`) and `extra["cost"]`,
+- quality signals: `planner_args_invalid`, `planner_repair_attempt`, `finish_repair_failure`, `guardrail_retry`.
 
 ### Cardinality rules (critical)
 
-- **Never** tag metrics by `trace_id` (unbounded cardinality).
+- **Never** tag metrics by `trace_id` or `session_id` (unbounded cardinality).
 - Be cautious tagging by `tenant` unless tenant count is bounded and expected.
-- Prefer tagging by:
-  - `event_type`,
-  - `node_name` (bounded set),
-  - `env` / `service` (your platform labels).
+- Prefer tagging by `event_type`, `node_name` (bounded tool set), finish `reason`, and your `env` / `service` labels.
 
 ## Operational defaults (recommended metric set)
 
 ### Counters
 
-- node lifecycle totals:
-  - `node_success_total`, `node_error_total`, `node_timeout_total`, `node_retry_total`, `node_failed_total`
-- control-plane totals:
-  - `trace_cancel_start_total`, `trace_cancel_finish_total`, `deadline_skip_total`
+- `planner_runs_total` by finish reason,
+- `planner_tool_calls_total` by `node_name`,
+- `planner_repairs_total` (args invalid, repair attempts, finish repair failures).
 
 ### Histograms
 
-- node latency (ms), by `node_name` and outcome (`success` / `error` / `timeout`).
+- tool latency (ms) by `node_name`,
+- steps per run (`trajectory_step` at `finish`).
 
 ### Gauges
 
-- queue depth:
-  - `queue_depth_in`, `queue_depth_out`, `queue_depth_total`
-- optional:
-  - `trace_inflight` (careful: only meaningful for envelope/trace-scoped systems)
+- in-flight runs (increment on your request start, decrement on finish), and background tasks if you use sessions.
 
 ## Failure modes & recovery
 
-- **Everything looks “green” but users complain**: you don’t have saturation signals. Fix: add queue depth + node latency histograms.
-- **Metrics backend melts**: you tagged by `trace_id` or unbounded extras. Fix: reduce labels; move correlation to logs.
-- **You can’t explain retries**: you only measure errors. Fix: measure retries and retry delays (`node_retry`).
+- Prefer tenant-aggregated metrics only when the tenant set is small and contractually safe.
+- A rising `budget_exhausted` or `no_path` rate usually means tool descriptions or budgets need attention, not infrastructure.
 
 ## Observability (dashboards and alerts)
 
 ### Dashboards (recommended)
 
-1. **System overview**
-   - throughput (jobs/s or requests/s)
-   - error/timeout rates
-   - p50/p95/p99 node latency (top N nodes)
-2. **Saturation**
-   - queue depth over time (total + by edge if you expose it)
-   - trace inflight counts (if applicable)
-3. **Reliability**
-   - retries over time
-   - `node_failed` counts (terminal failures)
-4. **Control plane**
-   - cancellations and deadline skips (rate + spikes)
+- finish reasons over time,
+- p50/p95 tool latency by tool,
+- repair/validation failure rate,
+- LLM latency and cost (from LLM telemetry).
 
 ### Alerts (starter set)
 
-- **Saturation**: queue depth stays above threshold for N minutes.
-- **Timeout regression**: `node_timeout_total` rate exceeds baseline.
-- **Error regression**: `node_error_total` or `node_failed_total` rate exceeds baseline.
-- **Retry storm**: `node_retry_total / node_success_total` ratio spikes.
-- **Deadline misconfiguration**: `deadline_skip_total` spikes after a deploy.
-- **Cancellation spike**: `trace_cancel_start_total` spikes (could be user-driven or systemic).
+- `no_path` + `budget_exhausted` share above your baseline,
+- p95 latency for a critical tool above its timeout budget,
+- sustained spike in `planner_args_invalid`.
 
 ## Security / multi-tenancy notes
 
-- Metrics often have broader internal visibility than logs; keep labels low-sensitivity.
-- Avoid emitting raw payload-derived labels (PII).
-- Prefer tenant-aggregated metrics only when the tenant set is small and contractually safe.
+- Keep metric labels free of user content (queries, tool args, answers).
 
-## Runnable example: deriving Prometheus metrics from `FlowEvent`
+## Runnable example: deriving Prometheus metrics from `PlannerEvent`
 
-This example uses `prometheus_client` (optional dependency) to expose counters/histograms based on runtime events.
+This example uses `prometheus_client` (optional dependency).
 
 ```python
 from __future__ import annotations
 
-import asyncio
+from prometheus_client import Counter, Histogram, start_http_server
 
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from penguiflow.planner import PlannerEvent, ReactPlanner
 
-from penguiflow import FlowEvent, Node, NodePolicy, create
-
-
-NODE_EVENTS = Counter(
-    "penguiflow_node_events_total",
-    "Runtime node events",
-    labelnames=("event_type", "node_name"),
-)
-NODE_LATENCY_MS = Histogram(
-    "penguiflow_node_latency_ms",
-    "Runtime node latency (ms)",
-    labelnames=("event_type", "node_name"),
+RUNS = Counter("penguiflow_planner_runs_total", "Planner runs", labelnames=("reason",))
+TOOL_LATENCY_MS = Histogram(
+    "penguiflow_tool_latency_ms",
+    "Tool latency (ms)",
+    labelnames=("node_name",),
     buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
 )
-QUEUE_DEPTH = Gauge(
-    "penguiflow_queue_depth_total",
-    "Combined incoming+outgoing queue depth",
-    labelnames=("node_name",),
-)
 
 
-async def metrics_middleware(event: FlowEvent) -> None:
-    node = event.node_name or "unknown"
-    NODE_EVENTS.labels(event.event_type, node).inc()
-    QUEUE_DEPTH.labels(node).set(float(event.queue_depth))
-    if event.latency_ms is not None:
-        NODE_LATENCY_MS.labels(event.event_type, node).observe(float(event.latency_ms))
+def metrics_callback(event: PlannerEvent) -> None:
+    if event.event_type == "finish":
+        RUNS.labels(str(event.extra.get("reason", "unknown"))).inc()
+    elif event.event_type == "step_complete" and event.latency_ms is not None:
+        TOOL_LATENCY_MS.labels(event.node_name or "unknown").observe(float(event.latency_ms))
 
 
-async def nop(msg, _ctx):
-    return msg
-
-
-async def main() -> None:
-    start_http_server(8000)
-
-    node = Node(nop, name="nop", policy=NodePolicy(timeout_s=5, max_retries=0))
-    flow = create(node.to(), middlewares=[metrics_middleware])
-    flow.run()
-
-    await flow.emit({"hello": "world"})
-    _ = await flow.fetch()
-    await flow.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+start_http_server(8000)
+planner = ReactPlanner(llm_client=..., catalog=..., event_callback=metrics_callback)
 ```
 
 ## Troubleshooting checklist
 
-- **Wrong telemetry surface**: this page is runtime-metrics focused. For planner, LLM, or task/session telemetry, start at **[Observability overview](overview.md)**.
-- **No metrics**: ensure your middleware is attached to the flow and your exporter is running.
-- **Too many time series**: remove labels (never add `trace_id`).
-- **Latency numbers look wrong**: ensure you only observe latency when `event.latency_ms` is present.
+- **No metrics**: ensure the callback is passed as `event_callback` and your exporter is running.
+- **Too many time series**: remove labels (never add `trace_id` or `session_id`).
+- **Latency numbers look wrong**: only observe latency when `event.latency_ms` is present.

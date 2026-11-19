@@ -102,7 +102,7 @@ Anything in a skill enters `llm_context`. **No secrets, no PII, no tenant-privat
 - **Skills bloat prompts** — lower `max_tokens` and `top_k`; enable `summarize=True`.
 
 ## Worked example
-- `examples/planner_enterprise_agent/` and `examples/planner_enterprise_agent_v2/` use skill packs in their planner setup; inspect their `skills/` subdirectory for canonical pack layouts.
+- No bundled example ships a skill pack; `tests/test_skills_pack_loader.py` and `tests/test_skills_runtime_provider.py` show canonical pack layouts and runtime-provider wiring.
 
 ## References (load only as needed)
 - `references/pack-formats.md` — every supported format with full schemas, applicability fields, validation rules.

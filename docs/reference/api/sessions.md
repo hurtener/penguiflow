@@ -10,6 +10,7 @@ running background and recurring work.
 - `StreamingSession`
 - `TaskResult`
 - `TaskRuntime`
+- `PendingContextPatch`
 
 ## `penguiflow.sessions.transport`
 
@@ -25,6 +26,7 @@ running background and recurring work.
 
 ## `penguiflow.sessions.models`
 
+- `ContextPatch`
 - `TaskContextSnapshot`
 - `TaskStatus`
 - `TaskType`

@@ -3,12 +3,12 @@ import pytest
 from google.rpc import error_details_pb2
 from grpc_status import rpc_status
 
-from penguiflow import Message as FlowMessage
-from penguiflow import Node, NodePolicy, create
 from penguiflow_a2a import A2AConfig, A2AService
 from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service
 from penguiflow_a2a.grpc import a2a_pb2, a2a_pb2_grpc
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+
+from .planner_doubles import echo_planner
 
 
 def _agent_card() -> AgentCard:
@@ -31,12 +31,8 @@ def _agent_card() -> AgentCard:
 
 
 async def _start_grpc_service():
-    async def echo(message: FlowMessage, _ctx) -> str:
-        return f"echo:{message.payload}"
-
-    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
-    flow = create(node.to(), emit_errors_to_rookery=True)
-    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    planner = echo_planner()
+    service = A2AService(planner, agent_card=_agent_card(), config=A2AConfig())
     server = grpc.aio.server()
     add_a2a_grpc_service(server, service)
     port = server.add_insecure_port("127.0.0.1:0")

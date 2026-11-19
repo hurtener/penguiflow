@@ -111,7 +111,7 @@ RetrySpec(
     corrective_message: str = "",
 )
 ```
-Use for fixable LLM mistakes (schema violation, unsafe phrasing). Don't use for transient errors — those are runtime retries (see [[penguiflow-core-flows]] `references/errors-retries.md`).
+Use for fixable LLM mistakes (schema violation, unsafe phrasing). Don't use for transient errors — those are LLM/tool retries (`llm_max_retries`, ToolNode `retry_policy`; see [[penguiflow-reactplanner-config]]).
 
 ### `PauseSpec`
 ```python
