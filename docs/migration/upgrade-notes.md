@@ -9,5 +9,5 @@ This page is a curated place for **breaking changes**, **deprecations**, and **m
 
 ## Policy
 
-See `VERSIONING.md` for deprecation timelines and stability guarantees.
+PenguiFlow follows semantic versioning: removals and incompatible changes ship only in a major release.
 

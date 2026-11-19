@@ -258,16 +258,7 @@ arrives without a structured payload, the same bounded repair turn recovers it.
   `final_response_model` and `final_response_retries`, so structured output is consistent
   across forked runs.
 
-## Verifying locally against a real model
-
-A manual end-to-end harness lives at `scripts/live_structured_final_test.py`. With a
-populated `.env` it exercises the happy path, the default-off parity case, and a strict
-schema (validation/repair) against a live endpoint:
-
-```bash
-LLM_MODEL_LIVE=databricks/databricks-claude-sonnet-4-5 \
-  uv run python scripts/live_structured_final_test.py
-```
+## Tests
 
 The deterministic unit tests (stubbed client, all branches incl. repair and degradation)
 are in `tests/test_react_structured_final.py`:

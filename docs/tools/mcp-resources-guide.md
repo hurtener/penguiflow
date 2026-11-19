@@ -2,8 +2,8 @@
 
 This guide covers MCP resources support in PenguiFlow, including resource listing, reading, caching, and generated tools.
 
-!!! note
-    Canonical page: **[MCP resources](mcp-resources.md)**.
+> [!NOTE]
+> Canonical page: **[MCP resources](mcp-resources.md)**.
 
 ## Overview
 

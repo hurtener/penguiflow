@@ -398,8 +398,8 @@ register_rich_output_extension(
 )
 ```
 
-!!! note
-    For production-grade wrappers/builders, mirror the existing rich-output pattern: canonical payload builder, artifact registration, optional visible emission, dedupe plumbing, prompt exposure, and tests.
+> [!NOTE]
+> For production-grade wrappers/builders, mirror the existing rich-output pattern: canonical payload builder, artifact registration, optional visible emission, dedupe plumbing, prompt exposure, and tests.
 
 ## Troubleshooting checklist
 

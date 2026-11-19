@@ -2,10 +2,10 @@
 
 This guide explains Penguiflow's three-level concurrency model and how to tune it for production workloads.
 
-!!! note
-    Canonical pages:
-    - **[Planner parallelism](../planner/parallel-and-joins.md)**
-    - **[Tools configuration](configuration.md)** (ToolNode `max_concurrency`)
+> [!NOTE]
+> Canonical pages:
+> - **[Planner parallelism](../planner/parallel-and-joins.md)**
+> - **[Tools configuration](configuration.md)** (ToolNode `max_concurrency`)
 
 ## Overview
 
@@ -350,4 +350,3 @@ result = await planner.run(
 
 - [StateStore Implementation Guide](./statestore-guide.md)
 - [ToolNode Configuration Guide](./configuration-guide.md)
-- [TOOLNODE_V2_PLAN.md](../proposals/TOOLNODE_V2_PLAN.md) - Full design specification

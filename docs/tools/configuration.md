@@ -53,8 +53,8 @@ Behavior:
 
 This is intentional: missing credentials should fail at startup/connect time, not later during agent execution.
 
-!!! note
-    Implementation detail: substitution uses a regex replace (`re.sub`) over `${...}` patterns, so multiple variables per string are supported.
+> [!NOTE]
+> Implementation detail: substitution uses a regex replace (`re.sub`) over `${...}` patterns, so multiple variables per string are supported.
 
 ### Auth modes (what they do)
 

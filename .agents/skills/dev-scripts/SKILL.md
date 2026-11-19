@@ -7,12 +7,10 @@ description: Use when adding, rewriting or moving a development script in this r
 
 Write a Python dev tool that lives outside the package as a named command of the dev-only uv workspace member `penguiflow-scripts` in `scripts/`. `uv run <name>` then works from anywhere in the repo, `uv sync` installs it, and it stays out of the published `penguiflow-lite` wheel. Never add it to the root project's `[project.scripts]`: that ships it to every user of the package.
 
-The scripts already in `scripts/` (`check_md_links.py`, `live_databricks_test.py`, `live_structured_final_test.py`) predate this rule and run by path. Move one into the workspace member when you next rewrite or move it, and update everything that calls it.
-
 ## Rules
 
 - Give every dev script a `main()` and register it in `scripts/pyproject.toml` under `[project.scripts]`.
-- Run it as `uv run <name>` in docs and CI. Never by path (`python scripts/check_md_links.py`, `uv run scripts/check_md_links.py`).
+- Run it as `uv run <name>` in docs and CI. Never by path (`python scripts/<name>.py`, `uv run scripts/<name>.py`).
 - A shell dev script rewritten in Python becomes a workspace command too.
 - Never use `sys.path.insert(...)` or `sys.path.append(...)` to import `penguiflow` or a sibling script. Both are installed in the environment, so imports work without it.
 - Add the member to `[dependency-groups] dev` only. Never to `[project.optional-dependencies]`: those are published extras.
@@ -20,7 +18,7 @@ The scripts already in `scripts/` (`check_md_links.py`, `live_databricks_test.py
 
 ## Setup (first script only)
 
-Put the tool in `scripts/src/penguiflow_scripts/check_md_links.py`, next to an empty `__init__.py`, and give `scripts/` its own `pyproject.toml`. Copy the `[build-system]` table from the root `pyproject.toml`:
+Put the tool in `scripts/src/penguiflow_scripts/<module>.py`, next to an empty `__init__.py`, and give `scripts/` its own `pyproject.toml`. Copy the `[build-system]` table from the root `pyproject.toml`:
 
 ```toml
 # scripts/pyproject.toml
@@ -30,7 +28,7 @@ version = "0.0.0"
 requires-python = ">=3.11"
 
 [project.scripts]
-check-md-links = "penguiflow_scripts.check_md_links:main"
+<command> = "penguiflow_scripts.<module>:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -58,4 +56,4 @@ penguiflow-scripts = { workspace = true }
 files = ["penguiflow", "penguiflow_a2a", "scripts/src"]
 ```
 
-Then run `uv sync` and `uv run check-md-links`. Each later script is one module in `scripts/src/penguiflow_scripts/` plus one line in `[project.scripts]`.
+Then run `uv sync` and `uv run <command>`. Each later script is one module in `scripts/src/penguiflow_scripts/` plus one line in `[project.scripts]`.

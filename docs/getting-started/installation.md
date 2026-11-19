@@ -33,7 +33,6 @@ PenguiFlow is modular. Install only what you need:
 - A2A server bindings: `penguiflow-lite[a2a-server]`, gRPC add-on: `penguiflow-lite[a2a-grpc]`
 - A2A client: `penguiflow-lite[a2a-client]`
 - Native LLM SDKs (for the native LLM layer tests/integrations): `penguiflow-lite[llm]`
-- Docs (contributors): `penguiflow-lite[docs]` (MkDocs Material + mkdocstrings)
 
 Example:
 
@@ -44,13 +43,12 @@ pip install "penguiflow-lite[planner,a2a-server]"
 ## Contract surface (what changes when you add extras)
 
 - `penguiflow-lite[planner]` adds LiteLLM + FastMCP + UTCP and enables `ReactPlanner` + ToolNode integrations.
-- `penguiflow-lite[docs]` adds MkDocs tooling (contributors).
 - A2A extras add server/client bindings.
 
 ## Operational defaults
 
 - For library usage: start with base install, then add `planner` when you adopt `ReactPlanner` or ToolNode.
-- For contributors: `uv pip install -e ".[dev,docs]"`.
+- For contributors: `uv pip install -e ".[dev]"`.
 
 ## Failure modes & recovery
 
@@ -96,7 +94,7 @@ python -c "import penguiflow; print(penguiflow.__version__)"
 git clone git@github.com:hurtener/penguiflow.git
 cd penguiflow
 uv venv
-uv pip install -e ".[dev,docs]"
+uv pip install -e ".[dev]"
 ```
 
 ## Verify

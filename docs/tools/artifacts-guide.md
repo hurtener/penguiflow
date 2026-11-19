@@ -2,10 +2,10 @@
 
 This guide covers how PenguiFlow handles binary content, large text, and UI components through its multi-layer artifact system.
 
-!!! note
-    Canonical pages:
-    - **[Artifacts & resources](artifacts-and-resources.md)**
-    - **[MCP resources](mcp-resources.md)**
+> [!NOTE]
+> Canonical pages:
+> - **[Artifacts & resources](artifacts-and-resources.md)**
+> - **[MCP resources](mcp-resources.md)**
 
 ## Overview
 

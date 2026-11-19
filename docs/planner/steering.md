@@ -59,8 +59,8 @@ Session-backed runtimes may also use:
 - `PAUSE` / `RESUME`: flow-control to pause/resume task processing
 - `PRIORITIZE`: reprioritize a background task
 
-!!! warning
-    Steering payloads are LLM-visible once injected. Do not include secrets.
+> [!WARNING]
+> Steering payloads are LLM-visible once injected. Do not include secrets.
 
 ## Operational defaults (recommended)
 

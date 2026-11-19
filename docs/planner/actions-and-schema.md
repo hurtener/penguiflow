@@ -85,9 +85,9 @@ See **[Background tasks](background-tasks.md)** for the runtime wiring and safet
 - If **any branch fails**, the join is **skipped** with reason `branch_failures`.
 - If the join tool is executed and it fails validation or raises, the join is recorded as an error in the parallel observation.
 
-!!! warning
-    Implicit join injection (auto-filling `results`, `expect`, etc. when `inject` is missing) exists for backward compatibility but is deprecated.
-    Prefer explicit `inject` mapping.
+> [!WARNING]
+> Implicit join injection (auto-filling `results`, `expect`, etc. when `inject` is missing) exists for backward compatibility but is deprecated.
+> Prefer explicit `inject` mapping.
 
 ## Final answer (`next_node="final_response"`)
 

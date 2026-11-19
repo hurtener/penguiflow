@@ -69,9 +69,9 @@ If you pass `state_store=...` to `ReactPlanner(...)`, pause records are stored:
 
 See `penguiflow.state.protocol.SupportsPlannerState`.
 
-!!! note
-    A failing state store does not prevent pausing: the pause is already recorded in memory.
-    Save/load errors are logged and then ignored (pause still returns).
+> [!NOTE]
+> A failing state store does not prevent pausing: the pause is already recorded in memory.
+> Save/load errors are logged and then ignored (pause still returns).
 
 ## Operational defaults
 
@@ -138,9 +138,9 @@ See **[Planner observability](observability.md)**.
 
 ## Runnable example: approval-gated tool (pattern)
 
-!!! warning
-    `ctx.pause(...)` interrupts execution by raising an internal signal. The tool does not “resume mid-function”.
-    After you call `planner.resume(...)`, the planner continues from the saved trajectory and the LLM chooses what to do next.
+> [!WARNING]
+> `ctx.pause(...)` interrupts execution by raising an internal signal. The tool does not “resume mid-function”.
+> After you call `planner.resume(...)`, the planner continues from the saved trajectory and the LLM chooses what to do next.
 
 This pattern gates a write tool by reading an approval flag from `tool_context` (which you can change between pause and resume).
 

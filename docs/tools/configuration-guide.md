@@ -2,12 +2,12 @@
 
 This guide covers environment variable handling, tool namespacing, collision detection, and configuration best practices for ToolNode v2.
 
-!!! note
-    Canonical pages:
-    - **[Tools configuration](configuration.md)**
-    - **[OAuth & HITL](oauth-hitl.md)**
-    - **[Artifacts & resources](artifacts-and-resources.md)**
-    - **[MCP resources](mcp-resources.md)**
+> [!NOTE]
+> Canonical pages:
+> - **[Tools configuration](configuration.md)**
+> - **[OAuth & HITL](oauth-hitl.md)**
+> - **[Artifacts & resources](artifacts-and-resources.md)**
+> - **[MCP resources](mcp-resources.md)**
 
 ## Environment Variable Substitution
 
@@ -605,4 +605,3 @@ async def setup():
 
 - [StateStore Implementation Guide](./statestore-guide.md)
 - [Concurrency Configuration Guide](./concurrency-guide.md)
-- [TOOLNODE_V2_PLAN.md](../proposals/TOOLNODE_V2_PLAN.md) - Full design specification

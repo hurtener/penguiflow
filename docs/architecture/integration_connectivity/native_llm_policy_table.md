@@ -119,9 +119,9 @@ If planner behavior is impacted, also cover:
 - `tests/test_react_planner.py`
 - `tests/test_planner_streaming_extractors.py`
 
-## CI expectations
+## Required checks
 
-All policy changes must keep the standard CI green:
+All policy changes must keep these checks green:
 
 - `uv run ruff check penguiflow penguiflow_a2a tests`
 - `uv run mypy`
@@ -129,7 +129,7 @@ All policy changes must keep the standard CI green:
 
 ## Live E2E policy validation (manual only)
 
-Live provider matrix checks are intentionally not part of CI.
+Live provider matrix checks are intentionally not part of the test suite.
 
 For NIM/OpenRouter live validation:
 

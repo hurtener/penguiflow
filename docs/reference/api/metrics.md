@@ -3,26 +3,22 @@
 Observability primitives: the structured flow event, the pluggable middleware
 hook, and helpers for formatting events and configuring logging.
 
-::: penguiflow.metrics
-    options:
-      members:
-        - FlowEvent
+## `penguiflow.metrics`
 
-::: penguiflow.middlewares
-    options:
-      members:
-        - Middleware
-        - log_flow_events
-        - LatencyCallback
+- `FlowEvent`
 
-::: penguiflow.debug
-    options:
-      members:
-        - format_flow_event
+## `penguiflow.middlewares`
 
-::: penguiflow.logging
-    options:
-      members:
-        - configure_logging
-        - ExtraFormatter
-        - StructuredFormatter
+- `Middleware`
+- `log_flow_events`
+- `LatencyCallback`
+
+## `penguiflow.debug`
+
+- `format_flow_event`
+
+## `penguiflow.logging`
+
+- `configure_logging`
+- `ExtraFormatter`
+- `StructuredFormatter`

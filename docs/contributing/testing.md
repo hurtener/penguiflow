@@ -7,34 +7,23 @@ This page documents the contributor testing workflow for PenguiFlow:
 - unit tests
 - lint and types
 - coverage requirements
-- docs checks (strict MkDocs + link hygiene)
 
-Use it before opening a PR and when debugging CI failures.
+Use it before opening a PR and when a check fails.
 
 ## Non-goals / boundaries
 
 - This page does not define product-level QA or benchmarking.
-- It does not cover integration tests requiring real network access or external credentials (avoid those in CI).
+- It does not cover integration tests requiring real network access or external credentials (keep those out of the test suite).
 
 ## Contract surface
 
-### CI matrix and enforced checks
+### Required checks
 
-CI runs on:
-
-- Python: 3.11, 3.12, 3.13
-- OS: Ubuntu
-
-Checks enforced before merge:
+Run these locally on Python 3.11+ before opening a PR:
 
 - `ruff` (lint)
 - `mypy` (types)
-- `pytest` with coverage threshold
-- docs gates:
-  - `mkdocs build --strict`
-  - `python scripts/check_md_links.py`
-
-See `.github/workflows/ci.yml`.
+- `pytest` with the coverage threshold (`fail_under` in `pyproject.toml`)
 
 ## Operational defaults (recommended local commands)
 
@@ -51,24 +40,16 @@ uv run ruff check .
 uv run mypy
 ```
 
-### Coverage (CI-equivalent)
+### Coverage
 
 ```bash
 uv run pytest --cov=penguiflow --cov-report=term --cov-report=xml --cov-fail-under=84.5
-```
-
-### Docs gates
-
-```bash
-uv run python scripts/check_md_links.py
-uv run mkdocs build --strict
 ```
 
 ## Failure modes & recovery
 
 - **Flaky tests**: isolate the failing test, remove timing assumptions, and ensure no external network calls.
 - **Coverage regression**: add at least one negative/error-path test for new behavior (policy target is ≥85%).
-- **Docs build fails under `--strict`**: fix broken links or missing pages; avoid linking from curated docs to excluded/internal docs.
 
 ## Observability
 
@@ -77,12 +58,12 @@ uv run mkdocs build --strict
 
 ## Security / multi-tenancy notes
 
-- Never run tests that require real API keys in CI.
+- Never add tests that require real API keys; the suite must pass offline.
 - Avoid recording real tool payloads in golden snapshots; keep fixtures synthetic and redacted.
 
 ## Troubleshooting checklist
 
-- If CI fails but local passes:
+- If a check passes for one contributor but fails for another:
   - verify Python version,
-  - run the exact CI commands above,
-  - confirm you installed the same dependency groups (`.[dev]`, `.[docs]` when needed).
+  - run the exact commands above,
+  - confirm you installed the same dependency groups (`.[dev]`).

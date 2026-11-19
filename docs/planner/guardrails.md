@@ -69,8 +69,8 @@ Guardrail gateway config controls enforcement:
 - `GatewayConfig(mode="shadow")`: evaluate and log decisions, but do not block execution
 - `GatewayConfig(mode="enforce")`: apply STOP/PAUSE/RETRY/REDACT behavior
 
-!!! tip
-    Start in `shadow` mode in production to measure rule hit rates, then roll to `enforce`.
+> [!TIP]
+> Start in `shadow` mode in production to measure rule hit rates, then roll to `enforce`.
 
 ### Sync vs async rules (latency control)
 

@@ -135,8 +135,8 @@ They require an active planner run because the `artifact_ref` comes from the in-
 | `ui_confirm(...)` | Pauses for yes/no confirmation |
 | `ui_select_option(...)` | Pauses for a structured selection |
 
-!!! warning
-    Interactive tools pause the planner and require a resume UX. See **[Pause/resume (HITL)](pause-resume-hitl.md)**.
+> [!WARNING]
+> Interactive tools pause the planner and require a resume UX. See **[Pause/resume (HITL)](pause-resume-hitl.md)**.
 
 ### Builder vs renderer workflow
 
@@ -459,8 +459,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-!!! note
-    In a real run, the model would consume the builder results and use the returned `artifact_ref`s instead of hard-coding `artifact_0` / `artifact_1`.
+> [!NOTE]
+> In a real run, the model would consume the builder results and use the returned `artifact_ref`s instead of hard-coding `artifact_0` / `artifact_1`.
 
 ## Troubleshooting checklist
 

@@ -16,8 +16,8 @@ STM is intentionally designed to be:
 - **fail-closed** (memory becomes effectively disabled when it cannot be scoped safely)
 - **bounded** (token budgets with overflow policies)
 
-!!! note
-    STM is **off by default** and designed to be safe-by-default for multi-tenant environments.
+> [!NOTE]
+> STM is **off by default** and designed to be safe-by-default for multi-tenant environments.
 
 ## Non-goals / boundaries
 
@@ -63,8 +63,8 @@ If you use `DefaultShortTermMemory` (the built-in implementation), it can persis
 
 See `penguiflow.state.protocol.SupportsMemoryState`.
 
-!!! note
-    These same methods are also used by the durable tool KV facade (`ctx.kv`) under a reserved keyspace prefix `kv:v1:`. If your StateStore implements STM persistence, it should accept arbitrary composite keys (not just `tenant:user:session`).
+> [!NOTE]
+> These same methods are also used by the durable tool KV facade (`ctx.kv`) under a reserved keyspace prefix `kv:v1:`. If your StateStore implements STM persistence, it should accept arbitrary composite keys (not just `tenant:user:session`).
 
 ## What STM stores
 
@@ -159,9 +159,9 @@ async def on_health_changed(old: MemoryHealth, new: MemoryHealth) -> None:
 - `truncate_summary` shrinks the rolling summary first.
 - `error` raises `MemoryBudgetExceeded` (useful for hard-bound environments).
 
-!!! warning
-    Do not do long blocking I/O in hooks (e.g., synchronous DB writes). If you need durability, prefer a `StateStore`
-    that supports memory hydration/persistence and keep hooks for lightweight side effects.
+> [!WARNING]
+> Do not do long blocking I/O in hooks (e.g., synchronous DB writes). If you need durability, prefer a `StateStore`
+> that supports memory hydration/persistence and keep hooks for lightweight side effects.
 
 ## Failure modes & recovery
 

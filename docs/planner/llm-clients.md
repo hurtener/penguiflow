@@ -77,10 +77,10 @@ Where:
 - `response_format` is a best-effort schema hint (commonly `json_schema`); clients may ignore it if unsupported
 - `stream=True` means the client should call `on_stream_chunk(text, done)` as chunks arrive
 
-!!! note
-    Planner “streaming” is two different things:
-    - tool streaming (`ctx.emit_chunk`, `ctx.emit_artifact`) which is not tied to the LLM transport, and
-    - LLM streaming (`stream_final_response=True`) where the LLM’s final answer can be streamed via `on_stream_chunk`.
+> [!NOTE]
+> Planner “streaming” is two different things:
+> - tool streaming (`ctx.emit_chunk`, `ctx.emit_artifact`) which is not tied to the LLM transport, and
+> - LLM streaming (`stream_final_response=True`) where the LLM’s final answer can be streamed via `on_stream_chunk`.
 
 ### JSON schema mode
 

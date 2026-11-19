@@ -112,9 +112,9 @@ for spec in github.get_tools():
     print(spec.name)
 ```
 
-!!! note
-    Presets are for local development and often use `npx -y ...` (Node.js required).
-    For production, prefer running MCP servers as separate services and connecting via URL.
+> [!NOTE]
+> Presets are for local development and often use `npx -y ...` (Node.js required).
+> For production, prefer running MCP servers as separate services and connecting via URL.
 
 ## Configuration highlights (what matters operationally)
 

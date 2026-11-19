@@ -61,8 +61,8 @@ See **[Pause/resume (HITL)](../planner/pause-resume-hitl.md)** for the planner-l
 - Treat `user_id` as an identity key and ensure it is tenant-scoped in multi-tenant systems.
 - Use HTTPS for callback endpoints and validate OAuth `state` values.
 
-!!! note
-    `OAuthManager` expires pending OAuth `state` after ~10 minutes. If your UX requires longer, implement your own auth manager.
+> [!NOTE]
+> `OAuthManager` expires pending OAuth `state` after ~10 minutes. If your UX requires longer, implement your own auth manager.
 
 ## Failure modes & recovery
 

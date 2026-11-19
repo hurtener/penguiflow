@@ -11,7 +11,7 @@ The repo is one project, `penguiflow-lite`, published to PyPI. Its version is `v
 
 ## Rules
 
-1. After changing the package, bump its version before you finish. Skip changes that touch only `docs/`, `tests/`, `benchmarks/`, `skills/`, `scripts/`, `.agents/` or `AGENTS.md`. `examples/` ships in the wheel, so it counts.
+1. After changing the package, bump its version before you finish. Skip changes that touch only `docs/`, `tests/`, `skills/`, `scripts/`, `.agents/` or `AGENTS.md`. `examples/` ships in the wheel, so it counts.
 2. Pick the level from the change:
    - `major`: a breaking change. A public name exported from `penguiflow` or `penguiflow_a2a` is removed or renamed, a signature or behavior changes incompatibly, a CLI command or flag or an optional extra is removed, or `requires-python` is raised.
    - `minor`: a compatible new feature, such as a new public API, a new optional parameter, a new CLI command, a new optional extra or a new dependency.

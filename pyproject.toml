@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "penguiflow-lite"
-version = "4.0.0"
+version = "5.0.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 requires-python = ">=3.11"
 license = "MIT"
@@ -49,11 +49,6 @@ dev = [
     # pydantic-ai transport tests
     "pydantic-ai-slim[openai,openrouter]>=1.107.0,<2",
     "genai-prices>=0.0.66,<1",
-]
-docs = [
-    "mkdocs>=1.6",
-    "mkdocs-material>=9.6,<9.7",
-    "mkdocstrings[python]>=0.25",
 ]
 a2a-server = [
     "fastapi>=0.118",

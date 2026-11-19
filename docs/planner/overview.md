@@ -15,8 +15,8 @@ Use it when you want an LLM-driven workflow that is:
 - **operationally observable** (structured `PlannerEvent` stream),
 - **composable** (tools come from the same Node + catalog system).
 
-!!! tip
-    Planner features require installing `penguiflow-lite[planner]`.
+> [!TIP]
+> Planner features require installing `penguiflow-lite[planner]`.
 
 ## Non-goals / boundaries
 
@@ -24,10 +24,10 @@ Use it when you want an LLM-driven workflow that is:
 - It does **not** provide durable session storage by default. Durability is via an optional `StateStore`.
 - It is **not thread-safe** and must not be used concurrently from multiple tasks on the same instance.
 
-!!! warning
-    `ReactPlanner` has mutable per-run state. It provides an internal *per-session dispatch* hotfix:
-    if you supply a `session_id` (in `tool_context` or `MemoryKey`) calls are serialized per session.
-    If you do not provide a session id, calls are serialized globally on a fallback lock.
+> [!WARNING]
+> `ReactPlanner` has mutable per-run state. It provides an internal *per-session dispatch* hotfix:
+> if you supply a `session_id` (in `tool_context` or `MemoryKey`) calls are serialized per session.
+> If you do not provide a session id, calls are serialized globally on a fallback lock.
 
 ## Contract surface
 

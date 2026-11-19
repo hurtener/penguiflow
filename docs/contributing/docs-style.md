@@ -6,11 +6,9 @@ This page defines the quality bar and structure for PenguiFlow documentation.
 
 PenguiFlow docs are organized into tiers so “quality” is measurable:
 
-- **Tier A (Curated / MkDocs nav)**: enterprise-grade internal docs. These pages must be decision-ready and operational.
+- **Tier A (Curated)**: the user-facing pages linked from `docs/index.md`. These pages must be decision-ready and operational.
 - **Tier B (Canonical internal guides)**: long-form references used to extract and curate Tier A. Must remain accurate and maintainable.
-- **Tier C (Draft notes)**: RFCs/proposals. Useful for contributors; may be incomplete and are not part of the curated site.
-
-The curated site intentionally does **not** include all repository docs.
+- **Tier C (Draft notes)**: RFCs/proposals. Useful for contributors; may be incomplete and are not linked from `docs/index.md`.
 
 ## Required structure for Tier A pages
 
@@ -64,11 +62,11 @@ flowchart LR
 
 ### Admonitions
 
-Use MkDocs Material admonitions to signal risk:
+Use GitHub alerts to signal risk:
 
-- `!!! note` for important behavior
-- `!!! tip` for best practices
-- `!!! warning` for foot-guns
+- `> [!NOTE]` for important behavior
+- `> [!TIP]` for best practices
+- `> [!WARNING]` for foot-guns
 
 ## Content ownership
 

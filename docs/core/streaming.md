@@ -34,8 +34,8 @@ Key behaviors:
 - `seq` is monotonically increasing per `stream_id` (unless you supply it explicitly)
 - `done=True` ends the stream and resets internal sequence tracking
 
-!!! note
-    `emit_chunk` requires a `parent` `Message` so chunks inherit `trace_id`, routing headers, deadlines, and metadata.
+> [!NOTE]
+> `emit_chunk` requires a `parent` `Message` so chunks inherit `trace_id`, routing headers, deadlines, and metadata.
 
 ### Recommended envelope style
 

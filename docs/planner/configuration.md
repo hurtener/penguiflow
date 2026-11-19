@@ -40,9 +40,9 @@ Use it when you need:
 - `tool_visibility`: dynamic per-call tool filtering (multi-tenant allowlists)
 - `steering`: runtime control plane (`SteeringInbox`)
 
-!!! warning
-    Treat `llm_context` and `tool_context` as a security boundary:
-    secrets and privileged objects belong in `tool_context` only.
+> [!WARNING]
+> Treat `llm_context` and `tool_context` as a security boundary:
+> secrets and privileged objects belong in `tool_context` only.
 
 ### Required `tool_context` keys (common patterns)
 

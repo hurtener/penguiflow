@@ -14,14 +14,14 @@ PenguiFlow is an **async-first orchestration library** for building:
 
 ## What’s in scope for these docs
 
-This site is the curated, user-facing documentation.
+These pages are the curated, user-facing documentation.
 
 The repository also contains:
 
 - RFCs and proposals under `docs/RFC/` and `docs/proposals/` (implementation notes)
 - deeper architecture notes under `docs/architecture/`
 
-Those are valuable for contributors, but they are not part of the curated navigation and may assume internal context.
+Those are valuable for contributors, but they are not part of the curated docs and may assume internal context.
 
 ## Docs map
 

@@ -330,8 +330,8 @@ planner = ReactPlanner(
 )
 ```
 
-!!! note
-    For tenant- or persona-specific renderer behavior, prefer `skills_provider` or `skills_provider_factory` instead of a single shared pack.
+> [!NOTE]
+> For tenant- or persona-specific renderer behavior, prefer `skills_provider` or `skills_provider_factory` instead of a single shared pack.
 
 ## Troubleshooting checklist
 

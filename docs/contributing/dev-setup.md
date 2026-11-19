@@ -6,7 +6,6 @@ This page is the contributor runbook for setting up a working PenguiFlow develop
 
 - editable installs with `uv`
 - running lint/typecheck/tests
-- building docs locally (MkDocs)
 
 Use it when you are contributing code or docs to this repository.
 
@@ -26,7 +25,6 @@ Use it when you are contributing code or docs to this repository.
 ### Dependency groups
 
 - `dev`: ruff, mypy, pytest, etc.
-- `docs`: mkdocs + mkdocstrings
 
 In this repo, `uv` uses dependency groups from `pyproject.toml`.
 
@@ -39,14 +37,7 @@ uv venv
 uv pip install -e ".[dev]"
 ```
 
-### 2) Docs development
-
-```bash
-uv pip install -e ".[dev,docs]"
-uv run mkdocs serve
-```
-
-### 3) Quick local checks
+### 2) Quick local checks
 
 ```bash
 uv run ruff check .
@@ -61,12 +52,9 @@ uv run pytest
 
 ## Observability
 
-The repo CI defines the “truth” for passing checks:
+**[Testing](testing.md)** lists the checks a change must pass:
 
-- docs strict build + link checking
 - lint (ruff), types (mypy), tests (pytest + coverage threshold)
-
-See `.github/workflows/ci.yml`.
 
 ## Security / multi-tenancy notes
 
@@ -75,7 +63,7 @@ See `.github/workflows/ci.yml`.
 
 ## Troubleshooting checklist
 
-- If a command fails locally but passes CI, confirm:
+- If a command fails for you but passes for another contributor, confirm:
   - the same Python version,
   - the same dependency groups installed,
   - the same working directory (repo root).

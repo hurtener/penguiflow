@@ -8,6 +8,9 @@ covered by the library's backward-compatibility guarantees.
 Symbols are grouped by area below. Internal modules and private helpers are
 intentionally omitted — only the curated public surface appears here.
 
+Each page lists the public names per module; their docstrings in the source are
+the detailed reference.
+
 - [Flow runtime](flow.md) — `PenguiFlow`, `Context`, nodes, registry, pattern helpers
 - [Messages & types](messages.md) — `Message`, `Headers`, `WM`, `StreamChunk`, and related types
 - [Errors](errors.md) — `FlowError`, `FlowErrorCode`, `CycleError`

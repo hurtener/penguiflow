@@ -60,8 +60,8 @@ These tools require:
 - `tool_context["task_service"]`: an object implementing the `TaskService` protocol
 - `tool_context["session_id"]`: the active session id (string)
 
-!!! warning
-    Expose tasks.* tools only to the **foreground** agent. Subagents must not be able to spawn/manage additional tasks unless you explicitly intend recursive agents.
+> [!WARNING]
+> Expose tasks.* tools only to the **foreground** agent. Subagents must not be able to spawn/manage additional tasks unless you explicitly intend recursive agents.
 
 ### LLM action opcodes: `task.subagent` and `task.tool`
 
@@ -222,8 +222,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-!!! note
-    Real production setups typically use `penguiflow.sessions` (StreamingSession + SessionManager) or a custom `TaskService` backed by your queue/database.
+> [!NOTE]
+> Real production setups typically use `penguiflow.sessions` (StreamingSession + SessionManager) or a custom `TaskService` backed by your queue/database.
 
 ## Troubleshooting checklist
 

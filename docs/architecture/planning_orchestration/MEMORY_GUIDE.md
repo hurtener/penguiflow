@@ -303,7 +303,7 @@ If those methods are missing, persistence is intentionally skipped.
 - Adoption and migration guide: `docs/migration/MEMORY_ADOPTION.md`
 - API reference: `docs/api/short-term-memory.md`
 - Memory deep dive and API details: `docs/proposals/RFC_SHORT_TERM_MEMORY.md`
-- Planner integration patterns: `REACT_PLANNER_INTEGRATION_GUIDE.md`
+- Planner integration patterns: `docs/planner/overview.md`
 - Runnable examples:
   - `examples/memory_basic/flow.py`
   - `examples/memory_truncation/flow.py`

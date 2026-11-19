@@ -2,10 +2,10 @@
 
 This guide explains how to implement a production-ready `StateStore` for PenguiFlow, enabling distributed pause/resume flows (OAuth/HITL) and durable audit/replay.
 
-!!! note
-    Canonical pages:
-    - **[State store](statestore.md)**
-    - **[OAuth & HITL](oauth-hitl.md)**
+> [!NOTE]
+> Canonical pages:
+> - **[State store](statestore.md)**
+> - **[OAuth & HITL](oauth-hitl.md)**
 
 ## Overview
 
@@ -496,4 +496,3 @@ For production deployments with multiple workers:
 
 - [Concurrency Configuration Guide](./concurrency-guide.md)
 - [ToolNode Configuration Guide](./configuration-guide.md)
-- [TOOLNODE_V2_PLAN.md](../proposals/TOOLNODE_V2_PLAN.md) - Full design specification
