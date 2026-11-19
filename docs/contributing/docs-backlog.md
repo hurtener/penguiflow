@@ -28,11 +28,11 @@ It exists to make the “enterprise depth” work measurable:
 
 Counts (current):
 
-- Tier A: 59
-- Tier B: 12
-- Tier C: 60
+- Tier A: 55
+- Tier B: 11
+- Tier C: 50
 - Shims: 5
-- Total: 136
+- Total: 121
 
 | File | Tier | Area | Outcome | Status | Target phase |
 |---|:---:|---|---|---|---:|
@@ -40,12 +40,9 @@ Counts (current):
 | `docs/LLM_LOGGING.md` | B | misc | split | extract | 4 |
 | `docs/MEMORY_GUIDE.md` | shim | misc | deprecate | shim | 1 |
 | `docs/MIGRATION_V24.md` | shim | misc | deprecate | shim | 6 |
-| `docs/PLAYGROUND_BACKEND_CONTRACTS.md` | B | misc | split | extract | 4 |
 | `docs/PROPOSED_PLANNER_PROMPT.md` | C | misc | keep | draft | 6 |
 | `docs/RFC/Done/PLAN_CHAT_STEERING_UX.md` | C | RFC | keep | draft | 6 |
 | `docs/RFC/Done/RFC_AGENT_BACKGROUND_TASKS.md` | C | RFC | keep | draft | 6 |
-| `docs/RFC/Done/RFC_AGUI_COMPONENTS.md` | C | RFC | keep | draft | 6 |
-| `docs/RFC/Done/RFC_AGUI_INTEGRATION.md` | C | RFC | keep | draft | 6 |
 | `docs/RFC/Done/RFC_AUTO_EXECUTION.md` | C | RFC | keep | draft | 6 |
 | `docs/RFC/Done/RFC_BIDIRECTIONAL_PROTOCOL.md` | C | RFC | keep | draft | 6 |
 | `docs/RFC/Done/RFC_LLM_ERROR_RECOVERY.md` | C | RFC | keep | draft | 6 |
@@ -63,13 +60,6 @@ Counts (current):
 | `docs/RFC/ToDo/RFC_STATESTORE_STANDARD_FOLLOWUPS.md` | C | RFC | keep | draft | 6 |
 | `docs/RFC/ToDo/RICH_OUTPUT_WRAPPER_TOOLS.md` | C | RFC | keep | draft | 6 |
 | `docs/RFC_SCHEDULED_TASKS.md` | C | misc | keep | draft | 6 |
-| `docs/agui/README.md` | C | agui | keep | draft | 6 |
-| `docs/agui/flow-artifacts-resources.md` | C | agui | keep | draft | 6 |
-| `docs/agui/flow-context-mapping.md` | C | agui | keep | draft | 6 |
-| `docs/agui/flow-end-to-end.md` | C | agui | keep | draft | 6 |
-| `docs/agui/flow-event-mapping.md` | C | agui | keep | draft | 6 |
-| `docs/agui/flow-pause.md` | C | agui | keep | draft | 6 |
-| `docs/agui/flow-tool-calls.md` | C | agui | keep | draft | 6 |
 | `docs/api/short-term-memory.md` | shim | api | deprecate | shim | 1 |
 | `docs/architecture/core_runtime/runtime_infrastructure.md` | C | architecture | keep | draft | 6 |
 | `docs/architecture/infrastructure/distributed_execution.md` | C | architecture | keep | draft | 6 |
@@ -88,10 +78,6 @@ Counts (current):
 | `docs/architecture/session_management/background_tasks_steering_system.md` | C | architecture | keep | draft | 6 |
 | `docs/architecture/session_management/session_management.md` | C | architecture | keep | draft | 6 |
 | `docs/architecture/system_architecture_overview.md` | B | architecture | keep | extract | 6 |
-| `docs/cli/dev-command.md` | A | cli | keep | canonical | 5 |
-| `docs/cli/generate-command.md` | A | cli | keep | canonical | 5 |
-| `docs/cli/init-command.md` | A | cli | keep | canonical | 5 |
-| `docs/cli/new-command.md` | A | cli | keep | canonical | 5 |
 | `docs/cli/overview.md` | A | cli | keep | canonical | 5 |
 | `docs/cli/tools-command.md` | A | cli | keep | canonical | 5 |
 | `docs/contributing/dev-setup.md` | A | contributing | keep | canonical | 5 |
@@ -117,7 +103,6 @@ Counts (current):
 | `docs/getting-started/installation.md` | A | getting-started | keep | canonical | 3 |
 | `docs/getting-started/quickstart.md` | A | getting-started | keep | canonical | 3 |
 | `docs/guardrails/INTEGRATIONS.md` | C | guardrails | keep | draft | 6 |
-| `docs/howto/uv-spec-workflow.md` | C | howto | keep | draft | 6 |
 | `docs/implementation/RFC_NATIVE_LLM_LAYER/STATUS.md` | C | implementation | keep | draft | 6 |
 | `docs/index.md` | A | misc | keep | canonical | 0 |
 | `docs/investigations/BACKGROUND_TASKS_FOLLOWUPS.md` | C | investigations | keep | draft | 6 |

@@ -89,7 +89,7 @@ Rich output (charts, tables, forms, interactive HITL components) is owned by [[p
 ### 7a) Streaming final responses (optional, v2.6+)
 - Set `stream_final_response=True` on `ReactPlanner` to stream the synthesized final answer to clients.
 - The underlying `JSONLLMClient` protocol accepts `stream` and `on_stream_chunk` parameters; the planner wires these through automatically when streaming is enabled.
-- Frontends should consume the stream via AG-UI `TEXT_MESSAGE_CONTENT` events — see the `penguiflow-agui-events` skill for the reducer contract.
+- Frontends consume the stream as `llm_stream_chunk` planner events (with `extra["channel"] == "answer"`) delivered through your `event_callback`; see [[penguiflow-streaming]] for shipping them over SSE/WebSocket.
 - Hard rule: streaming is a final-response affordance; intermediate planner steps remain non-streamed JSON.
 
 ### 8) Expose the agent over A2A without a standalone server
@@ -110,7 +110,7 @@ If the same planner serves both human UI traffic and downstream A2A callers, mak
 - Add matching prompt or `llm_context` guidance so the planner returns fully materialized text or JSON instead of relying on rendered components the downstream agent cannot see.
 
 Use this pattern when:
-- an agent is mounted in Playground and also exposed through A2A
+- an agent serves a UI client and is also exposed through A2A
 - a background-task agent delegates to another PenguiFlow agent over A2A
 - rich output is valuable for humans but lossy for machine-to-machine callers
 

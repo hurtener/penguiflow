@@ -56,7 +56,7 @@ Operational rule:
 | Surface | Event type / API | Emission point | Correlation key | Persistence path | Intended consumer |
 |---|---|---|---|---|---|
 | Runtime flow execution | `FlowEvent` | Core runtime around node execution, retries, cancellation, queueing | `trace_id` | logs via middleware; optional app-owned event persistence | operators, service owners, incident response |
-| Planner/tool orchestration | `PlannerEvent` via `event_callback` | `ReactPlanner` steps, tool calls, pauses, finish reasons, stream chunks | `trace_id` | app-owned callback sink; optional `StateStore.save_planner_event(...)` | agent developers, Playground/UI, replay/debug tooling |
+| Planner/tool orchestration | `PlannerEvent` via `event_callback` | `ReactPlanner` steps, tool calls, pauses, finish reasons, stream chunks | `trace_id` | app-owned callback sink; optional `StateStore.save_planner_event(...)` | agent developers, UI clients, replay/debug tooling |
 | Native LLM layer | `LLMEvent` via `TelemetryHooks` | provider request start/end, retries, streaming, usage, errors | `trace_id` when supplied | callback-driven only; examples for MLflow/Prometheus | platform teams, LLM cost/latency monitoring |
 | Session/background-task layer | `TaskTelemetryEvent` via `TaskTelemetrySink` | task spawn, completion, failure, cancellation, task groups | `session_id`, `task_id`, optional `trace_id` | sink-defined; built-in logging sink or custom sink | agent platform teams, async task operators |
 
@@ -195,7 +195,6 @@ This is the closest thing to a "wire the whole system" reference pattern that ex
 You can see these patterns in:
 
 - `examples/planner_enterprise_agent_v2/telemetry.py`
-- generated orchestrator templates under `penguiflow/templates/new/*/src/__package_name__/orchestrator.py.jinja`
 
 Minimal combined example:
 

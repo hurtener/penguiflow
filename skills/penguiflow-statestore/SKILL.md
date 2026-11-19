@@ -1,6 +1,6 @@
 ---
 name: penguiflow-statestore
-description: "Deep expertise for PenguiFlow persistence: implement or review a `StateStore` backend (required + optional duck-typed capabilities), enforce correct contracts (idempotency, ordering, cursors, cancellation), wire A2A router continuity via conversation bindings, sessions/tasks/updates/steering and background-task orchestration, integrate `ArtifactStore`, support distributed execution (`RemoteBinding`), and build UIs/clients around the Playground HTTP+SSE contract. Use when building/debugging StateStore or ArtifactStore implementations; designing database schemas; investigating missing/duplicated/out-of-order events; integrating A2A manager/specialist continuity, OAuth/HITL pause-resume; persisting trajectories/planner events; or implementing frontends that consume `/chat`, `/session/stream`, `/tasks`, `/events`, `/trajectory`, and `/artifacts`."
+description: "Deep expertise for PenguiFlow persistence: implement or review a `StateStore` backend (required + optional duck-typed capabilities), enforce correct contracts (idempotency, ordering, cursors, cancellation), wire A2A router continuity via conversation bindings, sessions/tasks/updates/steering and background-task orchestration, integrate `ArtifactStore`, support distributed execution (`RemoteBinding`), and back UI clients that need task updates, replay views and artifacts. Use when building/debugging StateStore or ArtifactStore implementations; designing database schemas; investigating missing/duplicated/out-of-order events; integrating A2A manager/specialist continuity, OAuth/HITL pause-resume; persisting trajectories/planner events; or deciding which store capabilities a frontend served by your HTTP layer depends on."
 ---
 
 # PenguiFlow StateStore
@@ -20,7 +20,6 @@ Hard boundaries vs siblings: the **application patterns** that consume these cap
 - `references/statestore-production-guide.md` — production guide + Postgres example + OAuth pause/resume notes
 - `references/artifacts-and-resources.md` — `ArtifactStore` contract + planner/tool integration notes
 - `references/distributed-execution.md` — distributed hooks, A2A router continuity, `RemoteBinding`
-- `references/playground-frontend-api.md` — Playground HTTP + SSE contract (frontend-facing)
 
 ## Code map (workspace)
 
@@ -29,7 +28,7 @@ When you need exact behavior, open the code:
 - `penguiflow/artifacts.py`
 - `penguiflow/core.py` (best-effort audit log + best-effort `save_remote_binding`)
 - `penguiflow/sessions/session.py`, `penguiflow/sessions/persistence.py`, `penguiflow/sessions/registry.py`, `penguiflow/sessions/task_service.py`
-- `penguiflow/cli/playground.py`, `penguiflow/cli/playground_sse.py`, `penguiflow/sessions/projections.py`
+- `penguiflow/sessions/projections.py`
 - `penguiflow/remote.py`, `penguiflow_a2a/*` (remote execution + bindings)
 
 ## Workflow decision tree
@@ -57,11 +56,11 @@ When you need exact behavior, open the code:
 
 ### Build a frontend / UI client
 
-- Use the Playground server as the reference contract (`references/playground-frontend-api.md`).
+- PenguiFlow doesn't ship a UI-facing HTTP server; expose sessions, replay and artifacts through your own HTTP layer.
 - Ensure your deployment supports the store capabilities required for:
-  - task state + updates (`/session/stream`, `/tasks`)
-  - replay views (`/events`, `/trajectory`)
-  - artifacts (`/artifacts/*`)
+  - task state + updates (`list_tasks`, `list_updates`)
+  - replay views (`load_history`, `list_planner_events`, `get_trajectory`)
+  - artifacts (`artifact_store`)
 
 ## Helper scripts
 

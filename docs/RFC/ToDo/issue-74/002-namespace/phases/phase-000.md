@@ -131,7 +131,7 @@ Add `namespace: str | None = None` as a first-class field on the `ArtifactRef` P
 - The field is fully backward-compatible: existing code that omits `namespace` continues to work, and existing serialized JSON without the field deserializes with `None`.
 - `InMemoryArtifactStore.put_text()` delegates to `put_bytes()`, so no separate change is needed there.
 - No changes are needed to protocol method signatures -- `put_bytes`/`put_text` already accept a `namespace` parameter.
-- No changes are needed to `ScopedArtifacts`, `_EventEmittingArtifactStoreProxy`, `ArtifactRegistry`, `ToolNode`, playground API endpoints, `payload_builders.py`, `sessions/tool_jobs.py`, or `state/in_memory.py` (PlaygroundArtifactStore). These all either delegate to the stores updated here or use `ref.model_dump()` which will automatically include the new field.
+- No changes are needed to `ScopedArtifacts`, `_EventEmittingArtifactStoreProxy`, `ArtifactRegistry`, `ToolNode`, `payload_builders.py`, `sessions/tool_jobs.py`, or `state/in_memory.py` (SessionArtifactStore). These all either delegate to the stores updated here or use `ref.model_dump()` which will automatically include the new field.
 
 ## Verification Commands
 ```bash
@@ -182,7 +182,7 @@ print('All checks passed.')
 ### Assumptions
 - The `namespace` field is purely additive metadata with no validation constraints (no regex pattern, no enum restriction). This matches the `str | None = None` type annotation specified in the plan.
 - Existing serialized `ArtifactRef` JSON that lacks the `namespace` key will deserialize correctly with `None` as the default -- this is standard Pydantic v2 behavior and was confirmed by the verification script.
-- No other files in the codebase construct `ArtifactRef` instances directly (other than the three sites updated here). The plan explicitly states that `ScopedArtifacts`, `_EventEmittingArtifactStoreProxy`, `ArtifactRegistry`, `ToolNode`, playground endpoints, `payload_builders.py`, `sessions/tool_jobs.py`, and `state/in_memory.py` all delegate to the stores updated here or use `ref.model_dump()`.
+- No other files in the codebase construct `ArtifactRef` instances directly (other than the three sites updated here). The plan explicitly states that `ScopedArtifacts`, `_EventEmittingArtifactStoreProxy`, `ArtifactRegistry`, `ToolNode`, `payload_builders.py`, `sessions/tool_jobs.py`, and `state/in_memory.py` all delegate to the stores updated here or use `ref.model_dump()`.
 
 ### Deviations from Plan
 None.

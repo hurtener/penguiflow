@@ -10,9 +10,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-test_generation/
 dist/
-!penguiflow/cli/playground_ui/dist/
 downloads/
 eggs/
 .eggs/
@@ -161,7 +159,6 @@ __marimo__/
 
 /COMMIT_MSG.md
 PROMPT.md
-.serena/memories/agui_adapter_integration.md
 docs/tools/a2a-agent-tools.md
 docs/.DS_Store
 

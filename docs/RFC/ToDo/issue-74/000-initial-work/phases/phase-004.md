@@ -164,7 +164,6 @@ from penguiflow.artifacts import ArtifactScope, ArtifactStore, NoOpArtifactStore
 - `_PlannerContext` wraps `self._artifact_proxy` (the event-emitting proxy), so artifact events still fire for both `ctx._artifacts` and `ctx.artifacts.upload()` calls.
 - `ToolJobContext` wraps `self._artifacts_store` (the raw store or `NoOpArtifactStore`).
 - The `kv` property in both contexts continues to use the raw store (not the facade). `SessionKVFacade` expects `ArtifactStore`, not `ScopedArtifacts`.
-- `MinimalCtx` in `playground.py` does NOT need an `artifacts` property -- see Phase 005 implementation notes.
 
 ## Verification Commands
 ```bash

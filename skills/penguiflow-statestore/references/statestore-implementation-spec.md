@@ -250,7 +250,7 @@ Important: `kind` values are an **open set**. StateStore backends MUST accept no
 
 4) **Planner/tool streaming events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
 
-> **Callout (important):** If you want to persist tool/LLM streaming events for the Playground UI or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
+> **Callout (important):** If you want to persist tool/LLM streaming events for a UI client or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
 
 #### Payload Structure
 
@@ -917,7 +917,7 @@ async def list_steering(
 
 **Purpose:** Persist planner trajectories for replay, debugging, and UI inspection.
 
-**Location (integration):** `penguiflow/cli/playground.py`
+**Location (integration):** `penguiflow/planner/react_runtime.py`
 
 **Contracts:**
 - `get_trajectory()` MUST return `None` when not found or when session_id does not match.
@@ -1654,8 +1654,6 @@ PenguiFlow provides compatibility adapters to bridge legacy method names during 
 |------------|-------------------|---------|
 | `save_update()` | `save_task_update()` | Task service |
 | `list_updates()` | `list_task_updates()` | Task service |
-| `save_planner_event()` | `save_event(trace_id, event)` | Playground |
-| `list_planner_events()` | `get_events()` | Playground |
 
 ### Using Compatibility Functions
 

@@ -1,6 +1,6 @@
 ---
 name: penguiflow-reflection-loop
-description: Explain, configure, and troubleshoot the ReactPlanner reflection loop: how post-answer critique, revision, and clarification work; how to wire `ReflectionConfig` and optional `reflection_llm`; how env/spec-driven scaffolds expose the knobs; and how to verify behavior through planner events, metadata, and cost counters. Use when a user asks about "reflection loop", "self-critique", "reflection_critique", "quality_threshold", "max_revisions", or wants to compare reflection-enabled vs reflection-disabled runs.
+description: Explain, configure, and troubleshoot the ReactPlanner reflection loop: how post-answer critique, revision, and clarification work; how to wire `ReflectionConfig` and optional `reflection_llm`; how env-driven app config exposes the knobs; and how to verify behavior through planner events, metadata, and cost counters. Use when a user asks about "reflection loop", "self-critique", "reflection_critique", "quality_threshold", "max_revisions", or wants to compare reflection-enabled vs reflection-disabled runs.
 ---
 
 # PenguiFlow Reflection Loop
@@ -9,13 +9,13 @@ description: Explain, configure, and troubleshoot the ReactPlanner reflection lo
 
 - Explaining how ReactPlanner's built-in answer-quality loop works.
 - Wiring reflection into a manual `ReactPlanner(...)` construction.
-- Retrofitting reflection into scaffolded `config.py` and `planner.py` files.
+- Retrofitting reflection into an app's env-driven `config.py` and `planner.py` files.
 - Debugging whether a run passed critique, requested a revision, or fell back to clarification.
 
 ## When NOT to use
 
 - General planner configuration outside reflection: use [[penguiflow-reactplanner-config]].
-- AG-UI event wiring and frontend reducer behavior: use [[penguiflow-agui-events]].
+- Frontend event wiring and reducer behavior: owned by your UI client; see [[penguiflow-streaming]] for delivery helpers.
 - Generic eval frameworks or offline benchmarking pipelines not tied to `ReactPlanner`.
 
 ## Hard boundaries

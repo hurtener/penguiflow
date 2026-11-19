@@ -1,6 +1,6 @@
 """Reference in-memory StateStore implementation.
 
-This implementation is intended for development, testing, and the Playground.
+This implementation is intended for development and testing.
 It implements all optional capabilities used by PenguiFlow subsystems.
 """
 
@@ -56,11 +56,11 @@ def _clone_trajectory(trajectory: Trajectory) -> Trajectory:
     return Trajectory.from_serialised(trajectory.serialise())
 
 
-class PlaygroundArtifactStore:
-    """Session-aware artifact store for the Playground.
+class SessionArtifactStore:
+    """Session-aware in-memory artifact store.
 
     Wraps :class:`~penguiflow.artifacts.InMemoryArtifactStore` with session-scoped
-    isolation and exposes access-control helpers for the HTTP layer.
+    isolation: each session gets its own inner store.
     """
 
     def __init__(
@@ -149,16 +149,6 @@ class PlaygroundArtifactStore:
             if store is None:
                 return None
         return await store.get_ref(artifact_id)
-
-    async def get_with_session_check(self, artifact_id: str, session_id: str) -> bytes | None:
-        async with self._lock:
-            stored_session = self._artifact_index.get(artifact_id)
-            if stored_session is None or stored_session != session_id:
-                return None
-            store = self._stores.get(session_id)
-            if store is None:
-                return None
-        return await store.get(artifact_id)
 
     async def delete(self, artifact_id: str) -> bool:
         async with self._lock:
@@ -249,7 +239,7 @@ class InMemoryStateStore:
 
         self._planner_events: dict[str, list[PlannerEvent]] = defaultdict(list)
 
-        self._artifact_store = PlaygroundArtifactStore(retention=artifact_retention)
+        self._artifact_store = SessionArtifactStore(retention=artifact_retention)
 
         self._lock = asyncio.Lock()
 
@@ -522,10 +512,6 @@ class InMemoryStateStore:
         async with self._lock:
             return list(self._planner_events.get(trace_id, []))
 
-    # Legacy alias for older Playground internals/tests.
-    async def get_events(self, trace_id: str) -> list[PlannerEvent]:
-        return await self.list_planner_events(trace_id)
-
     # ---------------------------------------------------------------------
     # Optional - Artifacts
     # ---------------------------------------------------------------------
@@ -568,4 +554,4 @@ class InMemoryStateStore:
             self._event_fingerprints.pop(trace_id, None)
 
 
-__all__ = ["InMemoryStateStore", "PlaygroundArtifactStore"]
+__all__ = ["InMemoryStateStore", "SessionArtifactStore"]

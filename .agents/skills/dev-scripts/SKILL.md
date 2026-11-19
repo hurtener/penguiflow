@@ -7,13 +7,13 @@ description: Use when adding, rewriting or moving a development script in this r
 
 Write a Python dev tool that lives outside the package as a named command of the dev-only uv workspace member `penguiflow-scripts` in `scripts/`. `uv run <name>` then works from anywhere in the repo, `uv sync` installs it, and it stays out of the published `penguiflow-lite` wheel. Never add it to the root project's `[project.scripts]`: that ships it to every user of the package.
 
-The scripts already in `scripts/` (`check_md_links.py`, `live_databricks_test.py`, `build_playground_ui.sh`, …) predate this rule and run by path. Move one into the workspace member when you next rewrite or move it, and update everything that calls it.
+The scripts already in `scripts/` (`check_md_links.py`, `live_databricks_test.py`, `live_structured_final_test.py`) predate this rule and run by path. Move one into the workspace member when you next rewrite or move it, and update everything that calls it.
 
 ## Rules
 
 - Give every dev script a `main()` and register it in `scripts/pyproject.toml` under `[project.scripts]`.
 - Run it as `uv run <name>` in docs and CI. Never by path (`python scripts/check_md_links.py`, `uv run scripts/check_md_links.py`).
-- A shell dev script rewritten in Python (`scripts/build_playground_ui.sh` replaced by Python) becomes a workspace command too.
+- A shell dev script rewritten in Python becomes a workspace command too.
 - Never use `sys.path.insert(...)` or `sys.path.append(...)` to import `penguiflow` or a sibling script. Both are installed in the environment, so imports work without it.
 - Add the member to `[dependency-groups] dev` only. Never to `[project.optional-dependencies]`: those are published extras.
 - Add `scripts/src` to `files` in the root `[tool.mypy]`, so `uv run mypy` checks it.

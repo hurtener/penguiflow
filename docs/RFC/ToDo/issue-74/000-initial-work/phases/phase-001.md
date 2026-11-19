@@ -9,8 +9,7 @@ Begin the atomic rename of the `artifacts` property to `_artifacts` across the p
 3. Rename `artifacts` property to `_artifacts` in `ToolJobContext` and rename internal attribute
 4. Migrate all 9 `ctx.artifacts` call sites in `penguiflow/tools/node.py`
 5. Migrate 1 `ctx.artifacts` call site in `penguiflow/sessions/tool_jobs.py`
-6. Rename in `MinimalCtx` in `penguiflow/cli/playground.py`
-7. Rename in `DummyContext` in `tests/test_rich_output_nodes.py` and migrate call site
+6. Rename in `DummyContext` in `tests/test_rich_output_nodes.py` and migrate call site
 
 ## Detailed Steps
 
@@ -95,16 +94,7 @@ After (kv):
 ### Step 5: Migrate call site in `penguiflow/sessions/tool_jobs.py`
 - Line 275: `artifact_store=ctx.artifacts,` -> `artifact_store=ctx._artifacts,`
 
-### Step 6: Rename in `MinimalCtx` -- `penguiflow/cli/playground.py`
-- Rename `self._artifacts` attribute (line 2124) to `self._artifacts_store`:
-  - Before: `self._artifacts = artifacts`
-  - After: `self._artifacts_store = artifacts`
-- Rename `artifacts` property (line 2127) to `_artifacts`, returning `self._artifacts_store`:
-  - Before: `def artifacts(self) -> Any: return self._artifacts`
-  - After: `def _artifacts(self) -> Any: return self._artifacts_store`
-- **CRITICAL:** Without this change, playground resource reads will break at runtime because `read_resource` (node.py line 1615) accesses `ctx._artifacts`.
-
-### Step 7: Rename in `DummyContext` -- `tests/test_rich_output_nodes.py`
+### Step 6: Rename in `DummyContext` -- `tests/test_rich_output_nodes.py`
 - Rename `self._artifacts` attribute (line 26) to `self._artifacts_store`:
   - Before: `self._artifacts = InMemoryArtifactStore()`
   - After: `self._artifacts_store = InMemoryArtifactStore()`
@@ -113,7 +103,7 @@ After (kv):
   - After: `def _artifacts(self): return self._artifacts_store`
 - Rename call site on line 193: `ctx.artifacts.put_text(` -> `ctx._artifacts.put_text(`
 
-### Step 8: Rename in `DummyContext` -- `tests/test_task_tools.py`
+### Step 7: Rename in `DummyContext` -- `tests/test_task_tools.py`
 - Rename `artifacts` property (line 27) to `_artifacts`:
   - Before: `def artifacts(self): raise RuntimeError("not_used")`
   - After: `def _artifacts(self): raise RuntimeError("not_used")`
@@ -172,19 +162,6 @@ After (kv):
 ```
 
 ```python
-# Target file: penguiflow/cli/playground.py
-# In MinimalCtx.__init__ (line 2124):
-#   self._artifacts = artifacts
-# to:
-#   self._artifacts_store = artifacts
-
-# Replace the artifacts property (lines 2126-2128) with:
-            @property
-            def _artifacts(self) -> Any:
-                return self._artifacts_store
-```
-
-```python
 # Target file: tests/test_rich_output_nodes.py
 # In DummyContext.__init__ (line 26):
 #   self._artifacts = InMemoryArtifactStore()
@@ -216,7 +193,6 @@ After (kv):
 - [ ] `ToolJobContext` uses `self._artifacts_store` internally, exposes `_artifacts` property
 - [ ] All 9 call sites in `penguiflow/tools/node.py` use `ctx._artifacts`
 - [ ] Line 275 in `penguiflow/sessions/tool_jobs.py` uses `ctx._artifacts`
-- [ ] `MinimalCtx` in `penguiflow/cli/playground.py` uses `self._artifacts_store` and `_artifacts` property
 - [ ] `DummyContext` in `tests/test_rich_output_nodes.py` uses `self._artifacts_store` and `_artifacts` property; call site on line 193 uses `ctx._artifacts`
 - [ ] `DummyContext` in `tests/test_task_tools.py` has `_artifacts` property
 - [ ] **Do NOT run verification yet** -- Phase 002 must be completed first (remaining test fixtures)
@@ -248,7 +224,6 @@ uv run pytest tests/ -x -q
 - **`penguiflow/planner/planner_context.py`**: Renamed `artifacts` property to `_artifacts` in `_PlannerContext`. Replaced the multi-line docstring with the simplified internal-use docstring. Changed `kv` property to pass `self._artifact_proxy` directly instead of going through `self.artifacts`.
 - **`penguiflow/sessions/tool_jobs.py`**: Renamed internal attribute `self._artifacts` to `self._artifacts_store` in `ToolJobContext.__init__`. Renamed `artifacts` property to `_artifacts`, returning `self._artifacts_store`. Updated the `ctx.artifacts` call site on line 275 to `ctx._artifacts`. Left the `kv` property's `artifacts=self._artifacts` unchanged as it now resolves to the new `_artifacts` property correctly.
 - **`penguiflow/tools/node.py`**: Replaced all 9 occurrences of `ctx.artifacts.` and `ctx.artifacts,` with `ctx._artifacts.` and `ctx._artifacts,` using replace-all.
-- **`penguiflow/cli/playground.py`**: In `MinimalCtx`, renamed `self._artifacts` to `self._artifacts_store` and renamed `artifacts` property to `_artifacts`.
 - **`tests/test_rich_output_nodes.py`**: In `DummyContext`, renamed `self._artifacts` to `self._artifacts_store`, renamed `artifacts` property to `_artifacts`, and updated the `ctx.artifacts.put_text(` call site to `ctx._artifacts.put_text(`.
 - **`tests/test_task_tools.py`**: In `DummyContext`, renamed `artifacts` property to `_artifacts`.
 
@@ -267,13 +242,11 @@ None.
 ### Potential Risks & Reviewer Attention Points
 - **Incomplete rename**: Until Phase 002 is applied, running the test suite will fail because several test fixture classes still use the old `artifacts` property name. This is expected and documented in the plan.
 - **Property shadowing in ToolJobContext**: The `kv` property references `self._artifacts` which now resolves as a property call rather than a direct attribute access. This is functionally correct but subtly different -- if someone adds `__slots__` to `ToolJobContext` in the future, they would need to be aware that `_artifacts` is a property, not a slot.
-- **MinimalCtx scope**: `MinimalCtx` is a local class inside a function in `playground.py`. Its `_artifacts` property has the leading underscore convention consistent with the protocol, but since it is a tiny inline class it does not implement the full `ToolContext` protocol -- it only provides what `read_resource` needs.
 
 ### Files Modified
 - `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/context.py`
 - `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/planner_context.py`
 - `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/sessions/tool_jobs.py`
 - `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/tools/node.py`
-- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground.py`
 - `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_rich_output_nodes.py`
 - `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_task_tools.py`

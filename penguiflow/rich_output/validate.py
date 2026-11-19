@@ -173,47 +173,8 @@ def _iter_accordion_items(items: Any) -> Iterable[tuple[str, Mapping[str, Any]]]
             yield name, props
 
 
-def validate_interaction_result(component: str, result: Any) -> None:
-    """Validate interactive component result payloads."""
-
-    if component == "confirm":
-        if isinstance(result, Mapping):
-            value = result.get("confirmed")
-            if isinstance(value, bool):
-                return
-        if isinstance(result, bool):
-            return
-        raise RichOutputValidationError("Confirm result must be boolean.", code="invalid_result")
-
-    if component == "select_option":
-        if isinstance(result, Mapping):
-            if result.get("cancelled") is True or result.get("_cancelled") is True:
-                return
-            value = result.get("selection")
-            if isinstance(value, list) and all(isinstance(item, str) for item in value):
-                return
-            if isinstance(value, str):
-                return
-        if isinstance(result, list) and all(isinstance(item, str) for item in result):
-            return
-        if isinstance(result, str):
-            return
-        raise RichOutputValidationError(
-            "Select option result must be string or list of strings.",
-            code="invalid_result",
-        )
-
-    if component == "form":
-        if result is None:
-            return
-        if isinstance(result, Mapping):
-            return
-        raise RichOutputValidationError("Form result must be an object.", code="invalid_result")
-
-
 __all__ = [
     "RichOutputValidationError",
     "ValidationLimits",
     "validate_component_payload",
-    "validate_interaction_result",
 ]

@@ -15,11 +15,11 @@ description: Write concise PenguiFlow unit tests with `penguiflow.testkit` — d
 ## When NOT to use
 - Integration testing distributed systems (use real workers and a real broker).
 - Mocking external services (use stubs and dependency injection inside node bodies).
-- End-to-end tests against `penguiflow dev` (run the actual playground).
+- End-to-end tests through your app's HTTP layer (run the actual service).
 - Planner-level behavior (use the planner's own test helpers; testkit is runtime-only).
 
 ## Hard boundaries
-This skill covers the **runtime** test harness. It doesn't test planners, AG-UI events, or A2A endpoints. For those, see the corresponding skill — they each ship their own test patterns.
+This skill covers the **runtime** test harness. It doesn't test planners, UI event streams, or A2A endpoints. For those, see the corresponding skill — they each ship their own test patterns.
 
 ## Workflow
 

@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "penguiflow-lite"
-version = "3.11.4"
+version = "4.0.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 requires-python = ">=3.11"
 license = "MIT"
@@ -16,7 +16,6 @@ dependencies = [
     "click>=8.1",
     "pyyaml>=6.0",
     "fastapi>=0.118",
-    "uvicorn>=0.32",
     "databricks-mcp>=0.6.0",
     "mcp>=1.26,<2",
 ]
@@ -30,13 +29,10 @@ dev = [
     "coverage[toml]>=7.0",
     "hypothesis>=6.103",
     "ruff>=0.2",
-    "ag-ui-protocol>=0.0.42",
     "jsonschema>=4.23",
     "fastapi>=0.118",
     "httpx>=0.27",
-    "jinja2>=3.1",
     "pyyaml>=6.0",
-    "uvicorn>=0.32",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
     "markitdown>=0.1.5",
@@ -58,12 +54,6 @@ docs = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.6,<9.7",
     "mkdocstrings[python]>=0.25",
-]
-cli = [
-    "ag-ui-protocol>=0.0.42",
-    "jinja2>=3.1",
-    "fastapi>=0.118",
-    "uvicorn>=0.32",
 ]
 a2a-server = [
     "fastapi>=0.118",
@@ -120,23 +110,8 @@ penguiflow = "penguiflow.cli.main:app"
 [tool.uv.build-backend]
 module-name = ["penguiflow", "penguiflow_a2a", "examples"]
 module-root = ""
-# uv_build ships every file under a module. Of the playground UI, only the
-# built bundle in dist/ belongs in the package; the rest is frontend source,
-# tooling and test output. Root-level files there all have an extension, so
-# "*.*" drops them without catching dist/.
 source-exclude = [
     ".DS_Store",
-    "/penguiflow/cli/playground_ui/*.*",
-    "/penguiflow/cli/playground_ui/.gitignore",
-    "/penguiflow/cli/playground_ui/.vscode",
-    "/penguiflow/cli/playground_ui/node_modules",
-    "/penguiflow/cli/playground_ui/playwright-report",
-    "/penguiflow/cli/playground_ui/public",
-    "/penguiflow/cli/playground_ui/scripts",
-    "/penguiflow/cli/playground_ui/src",
-    "/penguiflow/cli/playground_ui/test-results",
-    "/penguiflow/cli/playground_ui/tests",
-    "/penguiflow/templates/new/*/.vscode",
 ]
 
 [tool.uv]
@@ -153,11 +128,9 @@ dev = [
     "coverage[toml]>=7.0",
     "hypothesis>=6.103",
     "ruff>=0.2",
-    "ag-ui-protocol>=0.0.42",
     "jsonschema>=4.23",
     "fastapi>=0.118",
     "httpx>=0.27",
-    "jinja2>=3.1",
     "pyyaml>=6.0",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
@@ -184,7 +157,6 @@ extend-exclude = [
     "ooflow.py",
     "penguiflow_a2a/grpc/a2a_pb2.py",
     "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
-    "test_generation",
 ]
 
 [tool.ruff.lint]
@@ -216,7 +188,6 @@ follow_imports_for_stubs = true
 addopts = "-q"
 asyncio_mode = "auto"
 testpaths = ["tests"]
-norecursedirs = ["test_generation"]
 
 [tool.coverage.run]
 source = ["penguiflow"]

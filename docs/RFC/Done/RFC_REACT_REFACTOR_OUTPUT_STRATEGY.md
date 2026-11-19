@@ -151,7 +151,7 @@ The goal is to extract “leaf” subsystems first (stateless, narrow dependenci
 
 **Why:** Useful to test payload formatting and clamping in isolation, and reduces `_run_loop()` size/concern mixing.
 
-**Risk:** ⚠️ Medium (payload shape stability matters for downstream / Playground)
+**Risk:** ⚠️ Medium (payload shape stability matters for downstream consumers and UI clients)
 
 ##### 6. `pause_management.py` (100–200 LOC)
 

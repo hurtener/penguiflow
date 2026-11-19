@@ -1,6 +1,6 @@
 ---
 name: penguiflow-streaming
-description: Stream partial output (LLM tokens, progressive synthesis, status updates) from a PenguiFlow flow — emit `StreamChunk` messages via `ctx.emit_chunk(parent=msg, text=..., done=..., to=sink)` from a "compose" node, route them to a dedicated sink node, and ship them to clients via SSE (`format_sse_event`), WebSocket (`chunk_to_ws_json`), or programmatic iteration (`stream_flow`/`emit_stream_events`). Use when a user says "stream tokens", "SSE streaming", "WebSocket streaming", "progressive output", "StreamChunk", or asks how to stream partials without the higher-level AG-UI protocol.
+description: Stream partial output (LLM tokens, progressive synthesis, status updates) from a PenguiFlow flow — emit `StreamChunk` messages via `ctx.emit_chunk(parent=msg, text=..., done=..., to=sink)` from a "compose" node, route them to a dedicated sink node, and ship them to clients via SSE (`format_sse_event`), WebSocket (`chunk_to_ws_json`), or programmatic iteration (`stream_flow`/`emit_stream_events`). Use when a user says "stream tokens", "SSE streaming", "WebSocket streaming", "progressive output", "StreamChunk", or asks how to stream partials to a client.
 ---
 
 # PenguiFlow Streaming (Protocol-Agnostic)
@@ -8,16 +8,15 @@ description: Stream partial output (LLM tokens, progressive synthesis, status up
 ## When to use
 - Streaming raw tokens or progressive synthesis from a flow.
 - Building an SSE or WebSocket bridge from a flow's stream sink to a client.
-- Needing chunk ordering and `done`-flag semantics without committing to the AG-UI protocol.
+- Needing chunk ordering and `done`-flag semantics without committing to a specific UI event protocol.
 - Streaming status updates ("downloading…", "synthesizing…") alongside content.
 
 ## When NOT to use
-- AG-UI protocol events (TEXT_MESSAGE_START/CONTENT/END, tool-call lifecycle) → use [[penguiflow-agui-events]].
 - ReactPlanner final-response streaming knob (`stream_final_response`) and `JSONLLMClient.stream`/`on_stream_chunk` LLM-protocol callbacks → see [[penguiflow-reactplanner-config]] step 7a.
 - Persisting chunks for replay → use [[penguiflow-statestore]] event persistence.
 
 ## Hard boundaries
-This skill is the **runtime chunk layer**: `StreamChunk`, `emit_chunk`, sink nodes, and the protocol-agnostic SSE/WebSocket helpers PenguiFlow ships. AG-UI events (a higher-level UI event contract) and planner-internal streaming knobs are sibling skills.
+This skill is the **runtime chunk layer**: `StreamChunk`, `emit_chunk`, sink nodes, and the protocol-agnostic SSE/WebSocket helpers PenguiFlow ships. Higher-level UI event contracts are your app's choice; planner-internal streaming knobs are a sibling skill.
 
 ## Workflow
 

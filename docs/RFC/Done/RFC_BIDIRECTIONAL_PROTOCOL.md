@@ -26,7 +26,7 @@ This RFC defines primitives that enable immediate value through text-based steer
 
 ### 2.1 Market Position
 
-The AI agent landscape is rapidly evolving toward real-time, collaborative interfaces. OpenAI's Realtime API, Google's ADK with BIDI streaming, and emerging protocols like AG-UI all signal a market shift from batch processing to continuous interaction. Penguiflow must evolve to remain competitive and capture emerging use cases.
+The AI agent landscape is rapidly evolving toward real-time, collaborative interfaces. OpenAI's Realtime API, Google's ADK with BIDI streaming, and emerging agent-to-UI streaming protocols all signal a market shift from batch processing to continuous interaction. Penguiflow must evolve to remain competitive and capture emerging use cases.
 
 ### 2.2 The Problem with Current Agent Paradigms
 
@@ -44,7 +44,7 @@ Current orchestration patterns suffer from fundamental limitations that reduce e
 
 This RFC is not proposing a parallel universe. Penguiflow already has strong foundations that should be *extended*, not replaced:
 
-- **Outbound streaming already exists** (Playground SSE + AG-UI adapters) through `PlannerEvent` emission during `ReactPlanner` runs. This RFC formalizes and generalizes that event stream into a task-addressable, bidirectional session protocol.
+- **Outbound streaming already exists** through `PlannerEvent` emission during `ReactPlanner` runs. This RFC formalizes and generalizes that event stream into a task-addressable, bidirectional session protocol.
 - **HITL already exists** via `pause`/`resume` semantics. This RFC makes “APPROVE/REJECT” a first-class steering vocabulary, but the *default implementation* should reuse pause/resume tokens (idempotent, audit-friendly) rather than inventing a second approval channel.
 - **Cancellation already exists at the runtime level** (trace cancellation, remote task cancellation). This RFC clarifies cancellation semantics at the *task/session* layer and defines how they compose with tool cancellation.
 
@@ -52,7 +52,7 @@ The design goal is: add an optional “coordination layer” that can sit above 
 
 ### 2.4 Terminology & Identifiers
 
-To avoid ambiguity across CLI/Playground/Canvas and future transports:
+To avoid ambiguity across CLI/Canvas and future transports:
 
 - **session_id**: A UI/user session. Multi-tenant isolation boundary for task registry and event streams.
 - **task_id**: A logical unit of work within a session (foreground run or background job).
@@ -341,7 +341,7 @@ The architecture centers on a **StreamingSession** that manages bidirectional co
 
 Penguiflow already emits planner execution telemetry via `PlannerEvent`. The recommended implementation is:
 
-- **Internal**: continue emitting `PlannerEvent` (planner-native, stable, used by Playground and AG-UI mapping).
+- **Internal**: continue emitting `PlannerEvent` (planner-native, stable, consumed by UI clients).
 - **Session Protocol**: `StateUpdate` is a task-addressable wrapper/projection that can be generated from `PlannerEvent` plus task registry events.
 
 This keeps the planner core clean and makes the session layer responsible for:
@@ -711,8 +711,7 @@ class StreamingSession:
 
 1. REDIRECT steering with goal modification
 2. CHECKPOINT semantics (agent can request approval)
-3. AG-UI protocol adapter for standardized frontend communication
-4. Steering event logging and replay for debugging
+3. Steering event logging and replay for debugging
 
 ### 7.4 Phase 4: Background Tasks
 
@@ -814,9 +813,7 @@ Background tasks create their own memory branch at spawn time. When complete, re
 
 This is the Deep Research pattern: long work happens off to the side; a compact, attributable digest returns to the main agent when ready.
 
-### 8.3 AG-UI Protocol
-
-StateUpdate maps cleanly to AG-UI event types. A thin adapter layer translates between Penguiflow's internal types and the AG-UI wire protocol, enabling standardized frontend communication.
+### 8.3 Frontend Transport
 
 **Important transport note:** SSE is outbound-only. For true bidirectional steering, Penguiflow should support either:
 
@@ -827,16 +824,9 @@ StateUpdate maps cleanly to AG-UI event types. A thin adapter layer translates b
 
 Tool calls emit TOOL_CALL updates before execution. This enables pre-execution steering: "Don't call that API, use the cached data instead." Tools also respect task cancellation, terminating cleanly when a CANCEL event is received.
 
-### 8.5 Playground as Reference Implementation (Concrete)
+### 8.5 Reference HTTP Wiring (Concrete)
 
-Penguiflow’s Playground is a good “first home” for validating this RFC because it already has:
-
-- outbound event streaming (SSE)
-- pause/resume endpoints (HITL)
-- AG-UI compatibility layer
-- artifact endpoints
-
-Recommended minimal bidirectional wiring:
+Recommended minimal bidirectional wiring for your HTTP layer:
 
 - **Outbound:** continue using SSE for updates (`StateUpdate` or `PlannerEvent` projection).
 - **Inbound:** add an HTTP endpoint to post `SteeringEvent`:

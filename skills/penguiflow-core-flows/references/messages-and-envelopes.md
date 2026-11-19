@@ -96,7 +96,7 @@ async def compose(msg: Message, ctx) -> None:
     await ctx.emit(msg.model_copy(update={"payload": FinalAnswer(text="hello world")}), to=final_node)
 ```
 
-Chunks inherit `trace_id` from `parent`. See [[penguiflow-streaming]] for the protocol-agnostic streaming layer and [[penguiflow-agui-events]] for AG-UI mapping.
+Chunks inherit `trace_id` from `parent`. See [[penguiflow-streaming]] for the protocol-agnostic streaming layer.
 
 ## Common pitfalls
 

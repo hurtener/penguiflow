@@ -102,7 +102,6 @@ The toolset auto-persists a `RemoteBinding` per `(agent_url, skill, tenant, user
 
 ## Worked examples
 - `examples/a2a_grpc_server/flow.py` — minimal end-to-end gRPC server + client.
-- For HTTP server/router patterns, the canonical template wiring lives under `penguiflow/templates/new/<template>/src/<package>/a2a.py.jinja` (visible via `penguiflow new <template> --with-a2a --dry-run`).
 
 ## References (load only as needed)
 - `references/server-binding.md` — `A2AService`, `A2AConfig`, `A2AAgentCard`, REST + JSON-RPC route map, three binding modes.

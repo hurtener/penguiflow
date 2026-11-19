@@ -1,4 +1,0 @@
-interface:
-  display_name: "PenguiFlow AG-UI Events"
-  short_description: "Integrate PenguiFlow AG-UI events end-to-end"
-  default_prompt: "Help me integrate PenguiFlow + AG-UI (frontend + backend). Map PenguiFlow PlannerEvents to AG-UI events, define the custom event catalog, and provide a robust frontend reducer/state machine (messages, tool calls, artifacts, pause/resume) plus persistence/replay guidance."

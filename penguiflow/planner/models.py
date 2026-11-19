@@ -652,8 +652,6 @@ class BackgroundTasksConfig(BaseModel):
     This is the single source of truth for background task settings, consumed by:
     - ReactPlanner (prompt guidance, tool validation)
     - SessionManager/TaskService (runtime enforcement)
-    - Spec generation engine (agent.yaml generation)
-    - Template engine (scaffolding new agents)
 
     Downstream teams configure these values in their agent's Config class,
     which builds this model before passing to ReactPlanner.

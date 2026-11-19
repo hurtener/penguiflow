@@ -10,7 +10,7 @@
 
 ## Summary
 
-Expand the existing `StateStore` protocol to become the single source of truth for all persistence in PenguiFlow. This consolidates four separate store protocols (`StateStore`, `SessionStateStore`, `PlaygroundStateStore`, `ArtifactStore`) into one unified interface with optional duck-typed methods.
+Expand the existing `StateStore` protocol to become the single source of truth for all persistence in PenguiFlow. This consolidates three separate store protocols (`StateStore`, `SessionStateStore`, `ArtifactStore`) into one unified interface with optional duck-typed methods.
 
 ---
 
@@ -18,20 +18,19 @@ Expand the existing `StateStore` protocol to become the single source of truth f
 
 ### Current State (Fragmented)
 
-PenguiFlow currently has **four separate persistence protocols**:
+PenguiFlow currently has **three separate persistence protocols**:
 
 | Protocol | Location | Purpose | Documented? |
 |----------|----------|---------|-------------|
 | `StateStore` | `penguiflow/state/` | Events, bindings, planner state, memory | Yes |
 | `SessionStateStore` | `penguiflow/sessions/persistence.py` | Tasks, updates, steering | No |
-| `PlaygroundStateStore` | `penguiflow/cli/playground_state.py` | Trajectories, planner events, artifacts | No |
 | `ArtifactStore` | `penguiflow/artifacts.py` | Binary blob storage | Partial |
 
 ### Problems
 
 1. **Downstream confusion**: Teams must implement multiple protocols for full functionality
 2. **No unified documentation**: Only `StateStore` has implementation spec
-3. **Playground creates stores separately**: No coordination between task state and conversation state
+3. **Hosts create stores separately**: No coordination between task state and conversation state
 4. **Production deployment unclear**: Which stores are required? How do they connect?
 5. **Testing complexity**: Multiple stores to mock and wire together
 
@@ -80,7 +79,7 @@ All optional methods are detected at runtime via `hasattr()` / `getattr()`.
 
 **Hardening note:** “silently skipped” is fine for dev defaults, but in production it can hide misconfiguration. The recommended approach is:
 
-- **Feature-gated validation at component startup**: if `SessionManager` / Playground / planner is configured to persist a feature, validate the required optional methods exist and fail fast with a clear error.
+- **Feature-gated validation at component startup**: if `SessionManager` / planner is configured to persist a feature, validate the required optional methods exist and fail fast with a clear error.
 - **Warn-on-use when optional capability is missing**: if a feature *tries* to persist and the store lacks methods, log a single warning (rate-limited) including the missing method names and the impacted feature.
 
 #### Planner State (OAuth/HITL Resume)
@@ -214,12 +213,7 @@ async def list_planner_events(self, trace_id: str) -> list[PlannerEvent]:
     ...
 ```
 
-**Naming collision note:** the unified protocol already uses `save_event()` for runtime `StoredEvent` (core audit log). This is why planner/tool events use `save_planner_event()` / `list_planner_events()` instead of reusing `save_event()` (the Playground protocol currently uses `save_event()` for planner events; it will need an adapter during migration).
-
-**Compatibility aliases (recommended during migration):**
-
-- Accept `save_event(trace_id, event)` (Playground-style) as an alias of `save_planner_event(trace_id, event)`.
-- Accept `get_events(trace_id)` as an alias of `list_planner_events(trace_id)`.
+**Naming collision note:** the unified protocol already uses `save_event()` for runtime `StoredEvent` (core audit log). This is why planner/tool events use `save_planner_event()` / `list_planner_events()` instead of reusing `save_event()`.
 
 #### Artifacts (Binary Storage)
 
@@ -304,11 +298,6 @@ penguiflow/
 ├── sessions/
 │   ├── persistence.py                  # DEPRECATED - points to state/
 │   ├── session.py                      # SessionManager (updated to use StateStore)
-│   └── ...
-│
-├── cli/
-│   ├── playground_state.py             # DEPRECATED - points to state/
-│   ├── playground.py                   # Updated to use single StateStore
 │   └── ...
 ```
 
@@ -688,19 +677,15 @@ __all__ = ["InMemoryStateStore"]
 3. Update imports throughout codebase
 4. Add re-exports for backward compatibility
 
-### Phase 3: Update Playground (Breaking for Playground Internals)
+### Phase 3: Update SessionManager (Non-Breaking)
 
-1. Update `playground.py` to create single `InMemoryStateStore`
-2. Remove separate `InMemorySessionStateStore` creation
-3. Pass unified store to `SessionManager`, `AgentWrapper`
-4. Update `SessionManager` to use `StateStore` duck-typed methods
+1. Update `SessionManager` to use `StateStore` duck-typed methods
 
 ### Phase 4: Deprecate Old Protocols
 
 1. Mark `SessionStateStore` as deprecated
-2. Mark `PlaygroundStateStore` as deprecated
-3. Add deprecation warnings on import
-4. Update documentation
+2. Add deprecation warnings on import
+3. Update documentation
 
 ### Phase 5: Update Spec
 
@@ -719,8 +704,6 @@ __all__ = ["InMemoryStateStore"]
 | Existing `StateStore` implementations | **No change** - only required methods enforced |
 | Code importing from `penguiflow.state` | **No change** - import path preserved (module becomes package) |
 | Code using `SessionStateStore` | **Deprecation warning** - continues to work |
-| Code using `PlaygroundStateStore` | **Deprecation warning** - continues to work |
-| Playground internals | **Breaking** - updated to use unified store |
 
 ---
 
@@ -771,9 +754,6 @@ async def test_artifact_store_property(store): ...
 ### Integration Tests
 
 ```python
-# Test playground with unified store
-async def test_playground_unified_store(): ...
-
 # Test SessionManager with StateStore
 async def test_session_manager_with_statestore(): ...
 

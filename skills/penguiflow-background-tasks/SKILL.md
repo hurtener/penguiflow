@@ -108,7 +108,6 @@ Enforce `max_concurrent_tasks`, `max_tasks_per_session` — alert on hit. Track 
 - **Group apply merges nothing** — `tasks.seal_group(group=...)` must run before `tasks.apply_group(...)`.
 
 ## Worked example
-- Template wiring: `penguiflow new <template> --with-background-tasks --dry-run` shows the generated `task_service.py` skeleton and planner hook-up.
 - Integration tests under `tests/test_background_tasks*.py` exercise the `tasks.*` surface end-to-end.
 
 ## References (load only as needed)

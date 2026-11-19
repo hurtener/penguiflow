@@ -10,6 +10,8 @@ This change promotes `namespace` to a first-class field on `ArtifactRef` so that
 
 Add `namespace: str | None = None` to `ArtifactRef`. Fully backward-compatible — existing code that omits it continues to work, and existing serialized JSON without the field deserializes with `None`.
 
+Phases: `phase-000` (Layers 1–2), `phase-001` (Python tests, Layer 4), `phase-003` (docs, Layer 5). There is no `phase-002`: it covered a UI client that is no longer part of the library.
+
 ---
 
 ## Layer 1 — Python model
@@ -30,29 +32,13 @@ All places that construct an `ArtifactRef(...)` must pass `namespace=namespace`.
 
 `InMemoryArtifactStore.put_text()` delegates to `put_bytes()`, so it is covered.
 
-## Layer 3 — Frontend TypeScript types
-
-Changing the TS source files requires a `vite build` to regenerate the `dist/` assets, which are checked into git.
-
-| File | Change |
-|---|---|
-| `penguiflow/cli/playground_ui/src/lib/types/artifacts.ts` | Add `namespace: string \| null` to `ArtifactRef` interface, placed **after `sha256` and before `source`** (mirrors Python field ordering). Do **not** add it to `ArtifactStoredEvent` — namespace is derived from `source`. |
-| `penguiflow/cli/playground_ui/src/lib/stores/domain/artifacts.svelte.ts` | In `addArtifact()` (~line 53), derive namespace inline: `namespace: typeof event.source?.namespace === 'string' ? event.source.namespace : null`. Do **not** import `getString` from `session-stream.ts` — it is a file-private helper and not exported. |
-| `penguiflow/cli/playground_ui/src/lib/services/session-stream.ts` | In `toArtifactRef()` (~line 298), derive namespace using the existing `getString()` helper (line 228): `namespace: getString(stored.source?.namespace) ?? null`. No changes needed in `toArtifactStoredEvent()` (~line 275) since namespace stays inside `source`. |
-
-After source changes, run from `penguiflow/cli/playground_ui/`:
-```bash
-npm run build
-```
-Commit the regenerated `dist/` files.
-
-## Layer 4 — SSE event emission (no changes)
+## Layer 3 — SSE event emission (no changes)
 
 **File:** `penguiflow/planner/artifact_handling.py` (~line 121–134)
 
-No changes needed. The `_emit_artifact_stored_event` method already sends `"source": {"namespace": ...}` inside the `extra` dict. The frontend extracts namespace from `source.namespace` (see Layer 3).
+No changes needed. The `_emit_artifact_stored_event` method already sends `"source": {"namespace": ...}` inside the `extra` dict. A UI client can read the namespace from `source.namespace`.
 
-## Layer 5 — Tests
+## Layer 4 — Tests
 
 | File | What to update |
 |---|---|
@@ -63,10 +49,8 @@ No changes needed. The `_emit_artifact_stored_event` method already sends `"sour
 | `tests/test_artifacts.py` | `test_put_bytes_with_namespace_and_scope` — assert returned ref has namespace |
 | `tests/test_artifacts.py` | `test_put_text_with_namespace_and_scope` — assert returned ref has namespace |
 | `tests/test_artifacts.py` | `test_upload_passes_namespace` — assert `ref.namespace == "my_tool"` |
-| `penguiflow/cli/playground_ui/tests/unit/stores/artifacts.test.ts` | (1) In `'stores correct artifact properties'` test (~line 44), add assertion `expect(artifact?.namespace).toBeNull()` since the mock event's `source` has no `namespace` key. (2) Add **one new test** in the `addArtifact` describe block that creates a mock event with `source: { tool: 'test_tool', namespace: 'my_ns' }` and asserts the resulting ref has `namespace === 'my_ns'`. |
-| `penguiflow/cli/playground_ui/tests/unit/components/sidebar-right/ArtifactsCard.test.ts` | **No changes needed.** This file asserts on DOM elements, not `ArtifactRef` shape. Mock events are `ArtifactStoredEvent` which don't have a top-level `namespace` field. |
 
-## Layer 6 — Documentation
+## Layer 5 — Documentation
 
 | File | Change |
 |---|---|
@@ -79,9 +63,8 @@ No changes needed. The `_emit_artifact_stored_event` method already sends `"sour
 - **`_EventEmittingArtifactStoreProxy`** — delegates to underlying store, returns its ref.
 - **`ArtifactRegistry`** — reads fields from ref; won't break, could optionally start using `ref.namespace`.
 - **`ToolNode` artifact extraction** (`tools/node.py`) — calls `ref.model_dump()`, so namespace is included automatically.
-- **Playground API endpoints** (`cli/playground.py`) — `get_artifact_meta` returns `ref.model_dump()`, namespace flows through.
 - **`payload_builders.py`** / **`sessions/tool_jobs.py`** — callers of `put_text`/`put_bytes`; they already pass namespace, the returned ref will now carry it.
-- **`state/in_memory.py` (`PlaygroundArtifactStore`)** — delegates to `InMemoryArtifactStore`, returns its refs.
+- **`state/in_memory.py` (`SessionArtifactStore`)** — delegates to `InMemoryArtifactStore`, returns its refs.
 
 ## Verification
 
@@ -96,12 +79,4 @@ No changes needed. The `_emit_artifact_stored_event` method already sends `"sour
 3. **Lint + type check:**
    ```bash
    uv run ruff check . && uv run mypy
-   ```
-4. **Frontend tests:**
-   ```bash
-   cd penguiflow/cli/playground_ui && npm test
-   ```
-5. **Frontend build (regenerate dist/):**
-   ```bash
-   cd penguiflow/cli/playground_ui && npm run build
    ```

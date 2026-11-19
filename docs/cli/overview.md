@@ -2,16 +2,12 @@
 
 ## What it is / when to use it
 
-PenguiFlow ships a CLI to bootstrap agent projects, run the playground, and validate ToolNode presets:
+PenguiFlow ships two small CLIs for validating ToolNode presets and inspecting trace history:
 
-- `penguiflow new` scaffolds a project from templates
-- `penguiflow dev` runs the playground (backend + UI) for a project
-- `penguiflow init` generates VS Code helpers (`.vscode/*`)
-- `penguiflow generate` generates an agent workspace from a YAML spec
-- `penguiflow apply` safely reconciles an existing generated project with a YAML spec
-- `penguiflow tools` lists/connects ToolNode presets and can discover tool names
+- `penguiflow tools` lists/connects ToolNode presets and can discover tool names (see **[`penguiflow tools`](tools-command.md)**)
+- `penguiflow-admin` prints or replays stored trace history from a configured `StateStore`
 
-Use the CLI when you want a repeatable “scaffold → run → iterate” loop and you want to avoid bespoke glue code on day 1.
+Use them when you want a quick connectivity or history check without writing bespoke glue code.
 
 ## Non-goals / boundaries
 
@@ -21,57 +17,36 @@ Use the CLI when you want a repeatable “scaffold → run → iterate” loop a
 
 ## Contract surface
 
-- Installed command: `penguiflow` (see `penguiflow --help`)
+- Installed commands: `penguiflow` (see `penguiflow --help`) and `penguiflow-admin` (see `penguiflow-admin --help`)
 - Required extras:
-  - `penguiflow new` / `penguiflow generate` / `penguiflow apply` require `jinja2` (install `penguiflow-lite[cli]` or `penguiflow-lite[dev]`)
   - `penguiflow tools` discovery requires `penguiflow-lite[planner]`
+- `penguiflow-admin` subcommands:
+  - `history <trace_id> --state-store module:callable [--tail N]` prints stored events as JSON lines
+  - `replay <trace_id> --state-store module:callable [--tail N] [--delay S]` replays events with an optional delay
 
 ## Operational defaults (recommended workflows)
 
-### Workflow A: scaffold a project, then run playground
-
-```bash
-uv run penguiflow new my-agent --template react
-cd my-agent
-uv sync
-uv run penguiflow dev --project-root .
-```
-
-### Workflow B: spec-first generation (declarative)
-
-```bash
-uv run penguiflow generate --init my-agent
-cd my-agent
-# edit my-agent.yaml
-uv run penguiflow generate --spec my-agent.yaml
-uv run penguiflow dev --project-root .
-```
-
-After implementing tools or customizing planner/orchestrator code, use `penguiflow apply` for further spec changes:
-
-```bash
-# edit agent.yaml, for example add a new tools: entry
-uv run penguiflow apply --spec agent.yaml --check --diff
-uv run penguiflow apply --spec agent.yaml
-```
-
-### Workflow C: validate ToolNode connectivity
+### Workflow A: validate ToolNode connectivity
 
 ```bash
 uv run penguiflow tools list
 uv run penguiflow tools connect github --discover
 ```
 
+### Workflow B: inspect trace history
+
+```bash
+uv run penguiflow-admin history --state-store mypackage.stores:create_store trace_abc123
+uv run penguiflow-admin replay --state-store mypackage.stores:create_store trace_abc123 --delay 0.1
+```
+
 ## Failure modes & recovery
 
-- **`penguiflow new` fails with “Jinja2 is required”**: install `penguiflow-lite[cli]` (or `jinja2`).
-- **`penguiflow dev` fails with missing UI assets** (repo checkout): build UI assets under `penguiflow/cli/playground_ui`.
 - **`penguiflow tools` fails with “penguiflow-lite[planner] is required”**: install `penguiflow-lite[planner]`.
-- **Environment mismatch in playground**: the playground runs in *penguiflow’s* Python environment, not the agent project’s venv (see **[`penguiflow dev`](dev-command.md)**).
+- **`penguiflow-admin` cannot load the store**: `--state-store` must be an import path (`module:callable`) to a factory returning a `StateStore`, importable from the active venv.
 
 ## Observability
 
-- `penguiflow dev` runs a local server; use standard logs and `/health` for basic checks.
 - Runtime/Planner observability is described in:
   - **[Logging](../observability/logging.md)**
   - **[Telemetry patterns](../observability/telemetry-patterns.md)**
@@ -79,7 +54,7 @@ uv run penguiflow tools connect github --discover
 ## Security / multi-tenancy notes
 
 - Don’t commit `.env` files; treat them as secrets.
-- Keep tool auth in environment variables and secret managers, not in generated code.
+- Keep tool auth in environment variables and secret managers, not in committed code.
 
 ## Troubleshooting checklist
 

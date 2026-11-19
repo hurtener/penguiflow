@@ -8,7 +8,7 @@ This page is the contributor runbook for setting up a working PenguiFlow develop
 - running lint/typecheck/tests
 - building docs locally (MkDocs)
 
-Use it when you are contributing code, docs, or templates to this repository.
+Use it when you are contributing code or docs to this repository.
 
 ## Non-goals / boundaries
 
@@ -58,7 +58,6 @@ uv run pytest
 
 - **Wrong Python**: ensure your venv uses Python 3.11+ (`python --version` inside the venv).
 - **Import errors for optional features**: install the right extras (e.g. `penguiflow-lite[planner]` for ToolNode).
-- **UI assets missing for playground** (repo checkout): build under `penguiflow/cli/playground_ui` (`npm install && npm run build`), or run the CI helper script.
 
 ## Observability
 

@@ -7,7 +7,6 @@ This module tests:
 - Malformed base64 content handling
 - Decode failures (corrupted data)
 - Oversized payload rejection
-- Session access control violations
 - MCP server errors during resource operations
 - TTL expiration and LRU eviction
 """
@@ -23,7 +22,6 @@ import pytest
 
 from penguiflow.artifacts import (
     ArtifactRetentionConfig,
-    ArtifactScope,
     InMemoryArtifactStore,
     NoOpArtifactStore,
 )
@@ -370,58 +368,6 @@ class TestLRUEviction:
 
         assert await store.exists(ref1.id) is False  # Evicted
         assert await store.exists(ref2.id) is True
-
-
-# ─── Session Access Control Tests ─────────────────────────────────────────────
-
-
-class TestSessionAccessControl:
-    """Tests for session-based access control."""
-
-    @pytest.mark.asyncio
-    async def test_session_isolation(self) -> None:
-        """Artifacts should be isolated by session."""
-        from penguiflow.cli.playground_state import PlaygroundArtifactStore
-
-        store = PlaygroundArtifactStore()
-
-        scope1 = ArtifactScope(session_id="session1")
-        scope2 = ArtifactScope(session_id="session2")
-
-        ref1 = await store.put_bytes(b"secret1", scope=scope1)
-        ref2 = await store.put_bytes(b"secret2", scope=scope2)
-
-        # Session 1 can access its own artifact
-        data = await store.get_with_session_check(ref1.id, "session1")
-        assert data == b"secret1"
-
-        # Session 1 cannot access session 2's artifact
-        data = await store.get_with_session_check(ref2.id, "session1")
-        assert data is None
-
-    @pytest.mark.asyncio
-    async def test_access_denied_wrong_session(self) -> None:
-        """Access should be denied for wrong session."""
-        from penguiflow.cli.playground_state import PlaygroundArtifactStore
-
-        store = PlaygroundArtifactStore()
-
-        scope = ArtifactScope(session_id="session1")
-        ref = await store.put_bytes(b"secret", scope=scope)
-
-        # Wrong session should get None
-        data = await store.get_with_session_check(ref.id, "wrong_session")
-        assert data is None
-
-    @pytest.mark.asyncio
-    async def test_access_nonexistent_artifact(self) -> None:
-        """Access to nonexistent artifact should return None."""
-        from penguiflow.cli.playground_state import PlaygroundArtifactStore
-
-        store = PlaygroundArtifactStore()
-
-        data = await store.get_with_session_check("nonexistent", "session1")
-        assert data is None
 
 
 # ─── Binary Detection Edge Cases ─────────────────────────────────────────────

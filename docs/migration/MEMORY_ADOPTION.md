@@ -1,6 +1,6 @@
 # Memory Adoption Guide (Short-Term Memory)
 
-This guide helps you adopt PenguiFlow’s built-in short-term memory (STM) for `ReactPlanner`, and (optionally) migrate away from the template “memory service” stubs (`MemoryClient`, `memory_iceberg`) when they are not needed.
+This guide helps you adopt PenguiFlow’s built-in short-term memory (STM) for `ReactPlanner`, and (optionally) decide how it coexists with an external memory service.
 
 STM is **opt-in**, **async-first**, and **safe-by-default** for multi-tenant systems.
 
@@ -48,25 +48,6 @@ In your planner construction:
 - Create a `ShortTermMemoryConfig`
 - Pass it as `short_term_memory=...` when creating `ReactPlanner`
 
-If you’re using YAML spec generation, configure:
-
-```yaml
-planner:
-  short_term_memory:
-    enabled: true
-    strategy: rolling_summary
-    budget:
-      full_zone_turns: 5
-      summary_max_tokens: 1000
-      total_max_tokens: 10000
-      overflow_policy: truncate_oldest
-    isolation:
-      tenant_key: tenant_id
-      user_key: user_id
-      session_key: session_id
-      require_explicit_key: true
-```
-
 ### 3) Pass a session key safely (required by default)
 
 STM is **fail-closed** by default: if no key can be resolved, STM behaves as disabled for that call.
@@ -76,8 +57,6 @@ Recommended: pass identifiers via `tool_context`:
 - `tenant_id`
 - `user_id`
 - `session_id`
-
-If you’re using the Playground, use the **Setup** tab to set `tenant_id`, `user_id`, and `session_id`.
 
 ---
 
@@ -116,17 +95,15 @@ The planner will call memory’s duck-typed `persist/hydrate` if present.
 
 ---
 
-## Migration: “Memory Iceberg” Templates → Built-in STM
+## STM and an External Memory Service
 
-The project templates include a `MemoryClient` stub and `memory_iceberg` config intended for an external memory service.
-
-If you do **not** run a memory service:
+If your app wires a client for an external memory service but you do **not** run that service:
 
 ### Option 1 (recommended): Keep retrieval memory off, use only STM
 
-1. Set `agent.flags.memory: false` in your spec (or remove the `MemoryClient` wiring in code).
-2. Remove `planner.memory_prompt` usage that is tied to the external service.
-3. Enable built-in STM via `planner.short_term_memory`.
+1. Remove the external memory client wiring in code.
+2. Remove prompt instructions that are tied to the external service.
+3. Enable built-in STM via `short_term_memory=...` on `ReactPlanner`.
 
 This yields a clean separation:
 

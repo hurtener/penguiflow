@@ -29,7 +29,7 @@ ReactPlanner currently operates in a stateless manner per invocation. While the 
 - Maintain context across multiple `run()` calls
 - Summarize older context to fit within token budgets
 
-The iceberg memory server templates (`templates/new/*/memory.py.jinja`) provide a company-specific integration point, but downstream teams need a generic, opt-in solution that works out of the box.
+Company-specific memory server integrations exist, but downstream teams need a generic, opt-in solution that works out of the box.
 
 ### LangGraph Comparison
 
@@ -1320,19 +1320,14 @@ planner = ReactPlanner(
 - [x] `examples/memory_callbacks/` - Analytics and alerting with Layer 2
 - [x] `examples/memory_custom/` - Full custom implementation (Layer 4)
 
-#### 6.3 Spec Generation
-- [x] Add `planner.short_term_memory` to YAML spec schema (`penguiflow/cli/spec.py`)
-- [x] Wire `planner.short_term_memory` into generated `planner.py` + `config.py` (`penguiflow generate`)
-- [x] Document `planner.short_term_memory` in `penguiflow generate --init` templates
-
-#### 6.4 Migration & Adoption
+#### 6.3 Migration & Adoption
 - [x] Create `docs/migration/MEMORY_ADOPTION.md`
   - Step-by-step migration from stateless to memory-enabled
-  - Migration from iceberg memory templates to built-in memory
+  - Migration from external memory service stubs to built-in memory
   - Common pitfalls and solutions
   - Performance tuning guide
 
-#### 6.5 API Reference
+#### 6.4 API Reference
 - [x] Docstrings for all public classes and methods
 - [x] Type hints complete and verified with mypy
 - [x] API reference documentation (`docs/api/short-term-memory.md`)

@@ -40,7 +40,7 @@ Add the `list` method to the `ArtifactStore` protocol definition, fix the scope 
 ```
 ### ScopedArtifacts Facade
 
-Tool and agent developers interact with artifacts through `ctx.artifacts` -- an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, playground, etc.) use `ctx._artifacts` -- the raw `ArtifactStore` -- which is the **plumbing** API.
+Tool and agent developers interact with artifacts through `ctx.artifacts` -- an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, etc.) use `ctx._artifacts` -- the raw `ArtifactStore` -- which is the **plumbing** API.
 ```
 
 Followed by a Python code block with the `ScopedArtifacts` class definition (see plan section 1.3 for full content), then the "Scope semantics" table and "Immutability" explanation.

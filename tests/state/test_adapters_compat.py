@@ -48,10 +48,10 @@ class _CompatStore:
         _ = (task_id, since_id, limit)
         return [u for u in self.saved_updates if u.session_id == session_id]
 
-    async def save_event(self, trace_id: str, event: PlannerEvent) -> None:
+    async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None:
         self.saved_events.append((trace_id, event))
 
-    async def get_events(self, trace_id: str) -> list[PlannerEvent]:
+    async def list_planner_events(self, trace_id: str) -> list[PlannerEvent]:
         return [event for tid, event in self.saved_events if tid == trace_id]
 
     async def save_task(self, state: TaskState) -> None:
@@ -81,9 +81,8 @@ class _CompatStore:
         self.saved_bindings.append(binding)
 
 
-class _BadLegacyStore:
-    async def save_event(self, event: PlannerEvent) -> None:  # wrong signature
-        _ = event
+class _NoPlannerEventsStore:
+    pass
 
 
 @pytest.mark.asyncio
@@ -98,7 +97,7 @@ async def test_update_compat_uses_legacy_method_names() -> None:
 
 
 @pytest.mark.asyncio
-async def test_planner_event_compat_legacy_fallbacks_and_errors() -> None:
+async def test_planner_event_compat_and_errors() -> None:
     store = _CompatStore()
     event = PlannerEvent(event_type="step_start", ts=0.0, trajectory_step=0)
     await save_planner_event_compat(store, "trace", event)
@@ -106,7 +105,9 @@ async def test_planner_event_compat_legacy_fallbacks_and_errors() -> None:
     assert events == [event]
 
     with pytest.raises(TypeError, match="StateStore missing save_planner_event"):
-        await save_planner_event_compat(_BadLegacyStore(), "trace", event)
+        await save_planner_event_compat(_NoPlannerEventsStore(), "trace", event)
+    with pytest.raises(TypeError, match="StateStore missing list_planner_events"):
+        await list_planner_events_compat(_NoPlannerEventsStore(), "trace")
 
 
 @pytest.mark.asyncio

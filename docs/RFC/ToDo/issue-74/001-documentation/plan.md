@@ -9,7 +9,7 @@ Issue-74 added a `list` method to the `ArtifactStore` protocol and introduced a 
 
 ### mkdocs context
 
-The published docs site (`mkdocs.yml`) **excludes** `spec/**`, `tools/artifacts-guide.md`, and root-level files (`REACT_PLANNER_INTEGRATION_GUIDE.md`, `TEMPLATING_QUICKGUIDE.md`). The **published pages** that mention artifacts are:
+The published docs site (`mkdocs.yml`) **excludes** `spec/**`, `tools/artifacts-guide.md`, and root-level files (`REACT_PLANNER_INTEGRATION_GUIDE.md`). The **published pages** that mention artifacts are:
 
 | Published page | Nav location | Status |
 |---|---|---|
@@ -18,6 +18,8 @@ The published docs site (`mkdocs.yml`) **excludes** `spec/**`, `tools/artifacts-
 | `docs/tools/configuration.md` | Tools > Configuration | In plan (File 6) |
 | `docs/tools/statestore.md` | Tools > State store | In plan (File 8 — new) |
 | `docs/planner/overview.md` | Planner > Overview | Generic mention only, no change needed |
+
+There is no File 7: it covered the project-template quickguide, which is no longer part of the repo.
 
 ### Implementation note
 
@@ -55,7 +57,7 @@ Insert after the updated note from 1.2 (line ~1163) and before `### ArtifactRete
 ````markdown
 ### ScopedArtifacts Facade
 
-Tool and agent developers interact with artifacts through `ctx.artifacts` — an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, playground, etc.) use `ctx._artifacts` — the raw `ArtifactStore` — which is the **plumbing** API.
+Tool and agent developers interact with artifacts through `ctx.artifacts` — an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, etc.) use `ctx._artifacts` — the raw `ArtifactStore` — which is the **plumbing** API.
 
 ```python
 class ScopedArtifacts:
@@ -272,23 +274,6 @@ ref = await ctx.artifacts.upload(
 This describes the internal ToolNode extraction pipeline (plumbing). Add a note **before** the cross-reference link (`See **[Artifacts & resources]...**` at line ~98), after the bullet points. Insert a blank line before and after the blockquote:
 
 > **Note:** The extraction pipeline is an internal (plumbing) mechanism — it uses `ctx._artifacts` (the raw `ArtifactStore`) directly. Tool developers storing artifacts manually should use `ctx.artifacts` (the `ScopedArtifacts` facade) with `upload()`/`download()`/`list()`.
-
----
-
-## File 7: `TEMPLATING_QUICKGUIDE.md`
-
-### 7.1 Add note to "Artifact Store Configuration" section (after line ~2089)
-
-**Current (lines 2085–2089):**
-> **When artifact store is enabled:**
-> - `InMemoryArtifactStore` is created with retention config
-> - Artifacts stored by MCP tools (e.g., Tableau PDFs) are accessible
-> - Playground UI shows artifacts in the sidebar
-> - REST endpoint `/artifacts/{id}` serves binary content
-
-After this block, add a blank line and then the following blockquote (with a blank line after it too):
-
-> **Developer API:** Tool developers access artifacts via `ctx.artifacts` — a `ScopedArtifacts` facade that provides `upload()`/`download()`/`list()` with automatic scope injection. The raw `ArtifactStore` (`ctx._artifacts`) is used internally by the ToolNode extraction pipeline and playground.
 
 ---
 

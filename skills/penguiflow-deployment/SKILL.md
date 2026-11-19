@@ -6,14 +6,14 @@ description: Take a PenguiFlow agent from local dev to a production worker fleet
 # PenguiFlow Deployment
 
 ## When to use
-- Moving from local dev / playground to a long-lived production service.
+- Moving from local dev to a long-lived production service.
 - Building a queue-backed job worker.
 - Sizing concurrency, queues, timeouts, retries.
 - Scaling to multiple workers / machines.
 - Wiring distributed primitives (`StateStore`, `MessageBus`, `RemoteTransport`).
 
 ## When NOT to use
-- Local iteration → use [[penguiflow-quickstart]] (`penguiflow dev`).
+- Local iteration → run flows in-process; see [[penguiflow-core-flows]].
 - Persistence semantics in depth → use [[penguiflow-statestore]].
 - A2A wire contract → use [[penguiflow-a2a-integration]] (this skill points at it for distributed agent calls).
 - Observability dashboards/alerts → use [[penguiflow-observability]].
@@ -105,7 +105,6 @@ On `SIGTERM`: stop accepting new jobs → drain in-flight with a deadline → `f
 - **Logs flood from `node_start`** — sample or filter; high-throughput nodes generate one event per call.
 
 ## Worked examples
-- Templates demonstrate worker scaffolding: `penguiflow new <template> --with-a2a --with-background-tasks --dry-run` shows the lifecycle wiring.
 - `examples/reliability_middleware/flow.py` and `examples/mlflow_metrics/flow.py` show production-shape observability wiring.
 
 ## References (load only as needed)

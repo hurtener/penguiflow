@@ -748,7 +748,7 @@ Each phase is a deliverable unit. Checkboxes are meant to be ticked as implement
 ### Phase 3: Tooling + UX Wiring
 
 - [ ] Meta-tools exposed to foreground agent (spawn/list/get/cancel/prioritize/apply_patch)
-- [ ] Playground or API endpoints aligned with meta-tool surface
+- [ ] API endpoints aligned with meta-tool surface
 - [ ] UI notifications for background results + apply/reject flows
 - [ ] Steering proxy flow from chat (agent-mediated control)
 

@@ -589,7 +589,7 @@ class _StoredArtifact(BaseModel):
 class InMemoryArtifactStore:
     """In-memory artifact store for development and testing.
 
-    Implements LRU eviction and TTL expiration. Suitable for Playground
+    Implements LRU eviction and TTL expiration. Suitable for local development
     and test environments. Not suitable for production (no persistence).
     """
 

@@ -6,7 +6,7 @@ Add comprehensive tests for the `ArtifactStore.list()` method (across all implem
 ## Tasks
 1. Add `TestInMemoryArtifactStoreList` test class
 2. Add `TestNoOpArtifactStoreList` test class
-3. Add `TestPlaygroundArtifactStoreList` test class
+3. Add `TestSessionArtifactStoreList` test class
 4. Add `TestEventEmittingProxyList` test class
 5. Add `TestScopeMatches` test class
 
@@ -19,7 +19,7 @@ import time
 from unittest.mock import AsyncMock
 
 from penguiflow.artifacts import _scope_matches
-from penguiflow.state.in_memory import PlaygroundArtifactStore
+from penguiflow.state.in_memory import SessionArtifactStore
 from penguiflow.planner.artifact_handling import _EventEmittingArtifactStoreProxy
 ```
 
@@ -42,7 +42,7 @@ Place after the existing `TestInMemoryArtifactStoreEviction` class. Tests:
 |---|---|
 | `test_list_always_empty` | `NoOpArtifactStore().list()` returns `[]` regardless of scope. |
 
-### Step 4: Add `TestPlaygroundArtifactStoreList` class
+### Step 4: Add `TestSessionArtifactStoreList` class
 | Test | Description |
 |---|---|
 | `test_list_scoped_to_session` | Store in two sessions. Filter by `session_id="s1"` returns only s1 artifacts. |
@@ -81,7 +81,7 @@ from penguiflow.artifacts import (
     _scope_matches,
     discover_artifact_store,
 )
-from penguiflow.state.in_memory import PlaygroundArtifactStore
+from penguiflow.state.in_memory import SessionArtifactStore
 ```
 
 ```python
@@ -215,13 +215,13 @@ class TestNoOpArtifactStoreList:
         assert await store.list(scope=None) == []
 
 
-class TestPlaygroundArtifactStoreList:
-    """Tests for PlaygroundArtifactStore.list()."""
+class TestSessionArtifactStoreList:
+    """Tests for SessionArtifactStore.list()."""
 
     @pytest.mark.asyncio
     async def test_list_scoped_to_session(self) -> None:
         """list(scope=session_id) returns only that session's artifacts."""
-        store = PlaygroundArtifactStore()
+        store = SessionArtifactStore()
         await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
         await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
 
@@ -232,7 +232,7 @@ class TestPlaygroundArtifactStoreList:
     @pytest.mark.asyncio
     async def test_list_no_scope_aggregates_all_sessions(self) -> None:
         """list(scope=None) returns artifacts from all sessions."""
-        store = PlaygroundArtifactStore()
+        store = SessionArtifactStore()
         await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
         await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
         await store.put_bytes(b"c", namespace="ns3", scope=ArtifactScope(session_id="s1"))
@@ -310,7 +310,7 @@ class TestScopeMatches:
 ## Exit Criteria (Success)
 - [ ] `TestInMemoryArtifactStoreList` class exists with 8 test methods, all passing
 - [ ] `TestNoOpArtifactStoreList` class exists with 1 test method, passing
-- [ ] `TestPlaygroundArtifactStoreList` class exists with 2 test methods, all passing
+- [ ] `TestSessionArtifactStoreList` class exists with 2 test methods, all passing
 - [ ] `TestEventEmittingProxyList` class exists with 1 test method, passing
 - [ ] `TestScopeMatches` class exists with 6 test methods, all passing
 - [ ] `uv run ruff check tests/test_artifacts.py` passes
@@ -321,7 +321,7 @@ class TestScopeMatches:
 - The `_StoredArtifact` import is needed for the TTL expiration test to manipulate `created_at`.
 - The `_EventEmittingArtifactStoreProxy` test requires creating a `Trajectory` instance (from `penguiflow.planner.trajectory`).
 - `_scope_matches` is a module-level function (not a class method), imported directly.
-- The `PlaygroundArtifactStore` import comes from `penguiflow.state.in_memory`.
+- The `SessionArtifactStore` import comes from `penguiflow.state.in_memory`.
 - These tests depend on Phase 000 (the `list` method must exist on all stores).
 
 ## Verification Commands
@@ -341,11 +341,11 @@ uv run pytest tests/test_artifacts.py -x -q -v
 ### Summary of Changes
 - Added `import time` to the top-level imports in `tests/test_artifacts.py`.
 - Added `_scope_matches` to the existing `penguiflow.artifacts` import block.
-- Added `from penguiflow.state.in_memory import PlaygroundArtifactStore` as a new top-level import.
+- Added `from penguiflow.state.in_memory import SessionArtifactStore` as a new top-level import.
 - Appended 5 new test classes (18 test methods total) after the existing `TestNoOpArtifactStoreWarning` class:
   - `TestInMemoryArtifactStoreList` (8 tests): empty store, no-scope returns all, filter by tenant_id, filter by session_id, filter by user_id, multi-dimension filter, unscoped artifact matching, TTL expiration exclusion.
   - `TestNoOpArtifactStoreList` (1 test): always returns empty list.
-  - `TestPlaygroundArtifactStoreList` (2 tests): session-scoped filtering, no-scope aggregation across sessions.
+  - `TestSessionArtifactStoreList` (2 tests): session-scoped filtering, no-scope aggregation across sessions.
   - `TestEventEmittingProxyList` (1 test): delegation to inner store with scope filter and without.
   - `TestScopeMatches` (6 tests): None artifact scope with all-None filter, None scope with non-None filter, exact match, partial filter match, mismatch, None filter field wildcard.
 
@@ -358,7 +358,7 @@ uv run pytest tests/test_artifacts.py -x -q -v
 ### Assumptions
 - The `list` method already exists on all store implementations (Phase 000 dependency is satisfied). Verified by reading `artifacts.py`, `state/in_memory.py`, and `planner/artifact_handling.py`.
 - The `_scope_matches` function is exported (accessible) from `penguiflow.artifacts` even though it is a private function (prefixed with `_`). Verified it is importable.
-- `PlaygroundArtifactStore` is importable from `penguiflow.state.in_memory`. Verified against the module's `__all__`.
+- `SessionArtifactStore` is importable from `penguiflow.state.in_memory`. Verified against the module's `__all__`.
 - The `asyncio_mode = "auto"` setting in pytest means `@pytest.mark.asyncio` decorators are not strictly required, but they are included for explicitness as specified in the phase file code.
 
 ### Deviations from Plan

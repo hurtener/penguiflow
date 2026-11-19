@@ -394,7 +394,7 @@ Mapping from unified action → final payload:
 - `final_response.args.artifacts` → `FinalPayload.artifacts`
 - Unknown keys under `final_response.args` should flow into `FinalPayload.extra` (or be preserved in metadata) to avoid data loss.
 
-This lets us simplify action parsing while keeping the same output contract for callers and the Playground UI.
+This lets us simplify action parsing while keeping the same output contract for callers and UI clients.
 
 ---
 

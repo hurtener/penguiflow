@@ -13,12 +13,12 @@ description: Add structured observability to a PenguiFlow runtime — turn on JS
 
 ## When NOT to use
 - Planner-internal events (`PlannerEvent`, tool-call lifecycle) → use [[penguiflow-reactplanner-config]] for the planner observability surface.
-- AG-UI events to frontend clients → use [[penguiflow-agui-events]].
+- Shipping events to frontend clients → use [[penguiflow-streaming]] (SSE/WebSocket helpers).
 - StateStore-backed audit log → use [[penguiflow-statestore]] (events get persisted via `save_event`).
 - Streaming chunk metrics → use [[penguiflow-streaming]] for time-to-first-chunk instrumentation.
 
 ## Hard boundaries
-This skill is the **runtime observability surface**: logs, `FlowEvent`, middleware-derived metrics, topology export. Planner-side observability (`PlannerEvent`) is the planner skill's job. Frontend event protocols (AG-UI) live in their own skill.
+This skill is the **runtime observability surface**: logs, `FlowEvent`, middleware-derived metrics, topology export. Planner-side observability (`PlannerEvent`) is the planner skill's job. Frontend event delivery (SSE/WebSocket) lives in [[penguiflow-streaming]].
 
 ## Workflow
 

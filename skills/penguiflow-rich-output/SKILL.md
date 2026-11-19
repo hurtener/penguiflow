@@ -70,7 +70,7 @@ payload = {
     "title": "<optional>",
 }
 ```
-This is what the frontend consumes. AG-UI maps it to a `CUSTOM` event (see [[penguiflow-agui-events]]). The bare planner event is identical regardless of the frontend protocol.
+This is what the frontend consumes. The planner event is identical regardless of the protocol your HTTP layer uses to deliver it.
 
 Builders **don't** emit `artifact_chunk`. They register the payload in the in-run artifact registry and return:
 ```python
@@ -111,7 +111,6 @@ When the planner doesn't remember a component's prop schema, it calls `describe_
 - **A2A caller gets empty answer** — UI-only tools were called for a machine consumer; apply visibility policy + textual `llm_context` guidance.
 
 ## Worked examples
-- The runnable template wiring lives under `penguiflow/templates/new/<template>/src/<package>/rich_output.py.jinja` (visible via `penguiflow new <template> --with-rich-output --dry-run`).
 - Integration tests under `tests/test_rich_output*.py` exercise the contract end-to-end.
 
 ## References (load only as needed)

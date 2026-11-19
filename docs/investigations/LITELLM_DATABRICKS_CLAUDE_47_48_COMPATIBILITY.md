@@ -23,7 +23,7 @@ parameters.
 ## Confirmed Reproductions
 
 All probes used PenguiFlow directly with Databricks credentials. No ACR,
-MLflow, AG-UI, or deployment code participated.
+MLflow, UI, or deployment code participated.
 
 | Transport | Revision | Model | Request parameters | Result |
 |---|---|---|---|---|

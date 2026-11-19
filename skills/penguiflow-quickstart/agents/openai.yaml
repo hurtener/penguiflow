@@ -1,4 +1,0 @@
-interface:
-  display_name: "PenguiFlow Quickstart"
-  short_description: "Scaffold a new PenguiFlow agent project end-to-end"
-  default_prompt: "Help me scaffold a new PenguiFlow agent. Walk me through picking the right template (minimal, react, parallel, flow, controller, rag_server, wayfinder, analyst, enterprise) and `--with-*` flags (streaming, hitl, a2a, rich-output, background-tasks, --no-memory), then get me running in the playground via `penguiflow dev`."

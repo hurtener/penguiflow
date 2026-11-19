@@ -152,9 +152,9 @@ planner = ReactPlanner(
 )
 ```
 
-## Retrofitting a scaffolded app
+## Wiring reflection from environment variables
 
-If the app was scaffolded **without** reflection wiring, environment variables alone are not enough. The planner factory must pass `reflection_config=...` into `ReactPlanner(...)`.
+Environment variables alone are not enough. The planner factory must pass `reflection_config=...` into `ReactPlanner(...)`.
 
 ### `config.py`
 
@@ -257,30 +257,9 @@ REFLECTION_MAX_REVISIONS=2
 
 Naming note:
 
-- The scaffold-style config in this repo uses `REFLECTION_MODEL`.
+- The `config.py` example above uses `REFLECTION_MODEL`.
 - The enterprise example uses `REFLECTION_LLM`.
 - The `ReactPlanner(...)` constructor argument is `reflection_llm`.
-
-## Spec-driven generation
-
-If you use PenguiFlow's spec-driven scaffolding, reflection is configured in the spec:
-
-```yaml
-llm:
-  primary:
-    model: openai/gpt-4o
-
-  reflection:
-    enabled: true
-    provider: openai
-    model: openai/gpt-4o-mini
-    quality_threshold: 0.85
-    max_revisions: 2
-    criteria:
-      completeness: "Addresses all parts of the query"
-      accuracy: "Factually correct based on observations"
-      clarity: "Well-structured and easy to follow"
-```
 
 ## What to expect at runtime
 
@@ -369,7 +348,7 @@ This is useful when comparing:
 Most likely causes:
 
 - your app never passes `reflection_config=...` into `ReactPlanner(...)`,
-- the app was scaffolded without reflection wiring and only the env file was updated,
+- the planner factory has no reflection wiring and only the env file was updated,
 - reflection is enabled but the answer is already passing on the first critique, so the only change is latency/cost.
 
 ### `reflection_llm required when use_separate_llm=True`

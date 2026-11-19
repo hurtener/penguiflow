@@ -18,7 +18,7 @@ from penguiflow.artifacts import (
     discover_artifact_store,
     sanitize_artifact_namespace,
 )
-from penguiflow.state.in_memory import PlaygroundArtifactStore
+from penguiflow.state.in_memory import SessionArtifactStore
 
 
 class TestArtifactRef:
@@ -741,13 +741,13 @@ class TestNoOpArtifactStoreList:
         assert await store.list(scope=None) == []
 
 
-class TestPlaygroundArtifactStoreList:
-    """Tests for PlaygroundArtifactStore.list()."""
+class TestSessionArtifactStoreList:
+    """Tests for SessionArtifactStore.list()."""
 
     @pytest.mark.asyncio
     async def test_list_scoped_to_session(self) -> None:
         """list(scope=session_id) returns only that session's artifacts."""
-        store = PlaygroundArtifactStore()
+        store = SessionArtifactStore()
         await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
         await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
 
@@ -758,7 +758,7 @@ class TestPlaygroundArtifactStoreList:
     @pytest.mark.asyncio
     async def test_list_no_scope_aggregates_all_sessions(self) -> None:
         """list(scope=None) returns artifacts from all sessions."""
-        store = PlaygroundArtifactStore()
+        store = SessionArtifactStore()
         await store.put_bytes(b"a", namespace="ns1", scope=ArtifactScope(session_id="s1"))
         await store.put_bytes(b"b", namespace="ns2", scope=ArtifactScope(session_id="s2"))
         await store.put_bytes(b"c", namespace="ns3", scope=ArtifactScope(session_id="s1"))

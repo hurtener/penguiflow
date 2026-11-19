@@ -9,7 +9,7 @@
 
 ## Summary
 
-PenguiFlow has strong execution + debugging surfaces (Playground, trace replay, `FlowEvent` hooks), but it does not yet provide a first-class evaluation workflow:
+PenguiFlow has strong execution + debugging surfaces (trace replay, `FlowEvent` hooks, `PlannerEvent` streaming), but it does not yet provide a first-class evaluation workflow:
 
 - Turn production traces into **repeatable, versioned datasets**.
 - Run **custom, reusable metrics** at orchestration and node/tool level.
@@ -21,7 +21,7 @@ This RFC proposes a capability-detected export + eval system that is:
 
 - **Safe by default** (sensitive data does not leak from tool outputs/contexts).
 - **StateStore-native** (reuses existing persistence contracts; tolerates missing capabilities).
-- **Playground-first for curation** (tagging UX in Playground is the primary workflow).
+- **Tag-based curation** (a library tagging API on trajectories, which any UI client can build on, is the primary workflow).
 - **DSPy/GEPA-compatible by design** (dataset views + metric signature).
 
 ---
@@ -31,7 +31,7 @@ This RFC proposes a capability-detected export + eval system that is:
 Today, quality workflows typically look like:
 
 1. Run the app.
-2. Eyeball a Playground trace.
+2. Eyeball a trace in a UI client or the logs.
 3. Optionally log metrics to a sink (e.g. MLflow) with custom code.
 
 This creates two structural problems:
@@ -53,7 +53,7 @@ PenguiFlow should make “quality” a first-class, trace-derived workflow.
 ### Phase 1 (MVP): Curation + Export + Analyze-only Evals
 
 - Define a stable, versioned trace record schema: **`TraceExampleV1`** (JSONL).
-- **Playground-first tagging UX** for dataset curation (`dataset:*`, `split:*`, etc.).
+- **Trajectory tagging API** for dataset curation (`dataset:*`, `split:*`, etc.), usable from a UI client.
 - Export datasets from a configured `StateStore` using capability detection:
   - Prefer `SupportsTrajectories.get_trajectory(...)`.
   - Else fall back to `SupportsPlannerEvents.list_planner_events(...)`.
@@ -117,7 +117,7 @@ This RFC borrows the *shape* of these systems while keeping PenguiFlow’s core 
 - **Trace**: a single run identifier, `trace_id`.
 - **Session**: a UI/user-scoped grouping identifier, `session_id`.
 - **StoredEvent**: persisted runtime events derived from `FlowEvent` (core audit log).
-- **PlannerEvent**: structured planner/tool execution events (Playground streaming channel).
+- **PlannerEvent**: structured planner/tool execution events (UI streaming channel).
 - **Trajectory**: planner-native structure (query, steps, summary, metadata, contexts).
 
 Artifacts proposed by this RFC:
@@ -392,9 +392,9 @@ This registry enables:
 
 ---
 
-## Curation: Tagging UX (Playground-First)
+## Curation: Tagging (UI-First)
 
-### Why Playground-first
+### Why UI-first
 
 Dataset curation is human-centric:
 
@@ -402,7 +402,7 @@ Dataset curation is human-centric:
 - you decide which traces are representative,
 - you assign dataset + split tags at the same time.
 
-CLI tagging exists, but it should be an additive workflow, not the primary path.
+A UI client built on the tagging API is the primary path; CLI tagging exists, but it should be an additive workflow.
 
 ### Tag conventions (recommended)
 
@@ -424,32 +424,18 @@ Rationale:
 - round-trips today via `Trajectory.serialise()`
 - works with existing `SupportsTrajectories`
 
-### Playground UX (MVP)
+### Tagging API (MVP)
 
-In the trace inspector view:
+Add a library helper that mutates tags for a trace:
 
-- Display current tags as removable chips.
-- Provide an “Add tag…” input with auto-suggest:
-  - recently used tags in this session
-  - common prefixes (`dataset:`, `split:`)
-- Provide one-click buttons:
-  - “Add to dataset…” (prompts for dataset name, adds `dataset:<name>`)
-  - “Set split” (radio `train/val/test`)
-- Provide trace list filters by tag.
-
-### Playground API (MVP)
-
-Add server endpoints that mutate tags for a trace:
-
-- `GET /trajectory/{trace_id}?session_id=...` (exists)
-- `PATCH /trajectory/{trace_id}/metadata?session_id=...` (new)
-  - payload: `{ "tags": ["dataset:foo", "split:val", ...] }`
-  - implementation: read trajectory, update metadata.tags, save trajectory
+- input: `trace_id`, `session_id`, `tags` (e.g. `["dataset:foo", "split:val", ...]`)
+- implementation: `get_trajectory(...)`, update `metadata.tags`, `save_trajectory(...)`
+- your HTTP layer can expose it to a UI client (e.g. `PATCH /trajectory/{trace_id}/metadata?session_id=...`)
 
 Capability constraints:
 
 - Tag editing requires `SupportsTrajectories` (read + write).
-- For stores without trajectories, UI MUST disable tagging and explain why.
+- For stores without trajectories, the helper MUST fail with a clear error, and UI clients should disable tagging and explain why.
 
 ### Future: indexed tagging
 
@@ -579,18 +565,18 @@ Views enable:
 - one trace record format, many tasks/signatures
 - stable optimization loops without changing trace schema
 
-### View authoring UX (Playground-first, incremental)
+### View authoring (incremental)
 
 MVP:
 
-- a simple “Export as view…” modal:
+- a simple “export as view” entry point:
   - choose a built-in view template (e.g., `query -> answer`)
   - optionally map `outputs.final` to `answer`
   - preview first N rows
 
 Future:
 
-- a view builder UI:
+- a view builder in a UI client:
   - pick signature (or import path in template repos)
   - map trace paths to fields
   - validate rows and show warnings (missing fields, too large, status != ok)
@@ -775,9 +761,9 @@ penguiflow/evals/
   patches.py           # patch point registry + patch application
 ```
 
-Playground additions:
+HTTP layer / UI client additions (downstream):
 
-- API endpoints to mutate trajectory tags/metadata
+- endpoints that call the tagging helper to mutate trajectory tags/metadata
 - UI components to edit tags + trigger export
 
 CLI additions (optional early, not primary):
@@ -790,18 +776,18 @@ CLI additions (optional early, not primary):
 
 ## Phased Roadmap (TODO)
 
-### Phase 1A: Playground Tagging + Trace Export
+### Phase 1A: Trajectory Tagging + Trace Export
 
 Deliverables:
 
-- Tag editor in Playground (trajectory metadata tags)
+- Tagging API for trajectory metadata tags
 - Export `trace.jsonl` + `manifest.json`
 - Analyze-only metrics runner
 - Docs + example workflow
 
 Success criteria:
 
-- A team can curate a dataset in Playground and export it safely.
+- A team can curate a dataset (from a UI client or a script) and export it safely.
 - A team can compute deterministic regression metrics locally and in CI.
 
 ### Phase 1B: Dataset Views + Manifest
@@ -854,11 +840,10 @@ Success criteria:
 - [ ] Specify `PatchBundleV1` + compat hashing.
 - [ ] Specify eval result + report schemas.
 
-### Playground (Primary UX)
+### Tagging (Primary Curation Path)
 
-- [ ] Add tag editing UI (chips + add/remove + split selector).
-- [ ] Add backend endpoint to update trajectory metadata tags.
-- [ ] Add dataset export action (modal + profile selection + view template selection).
+- [ ] Add a library helper to update trajectory metadata tags.
+- [ ] Add a dataset export entry point (profile selection + view template selection).
 
 ### Exporter
 

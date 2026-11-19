@@ -10,13 +10,12 @@ This RFC proposes a production-ready scheduled task system for PenguiFlow that e
 - **StateStore-aligned storage**: Scheduling is an *optional capability* implemented by downstream `StateStore` adapters (Postgres, KV, etc.)
 - **Distributed safety**: At-least-once execution with idempotent run records + claim/lease semantics
 - **Reliability**: Configurable retry policies with user alerting on failures
-- **Playground showcase**: Reference implementation in CLI playground
 
 Key v1 decisions (captured in this RFC):
 - **Catch-up policy**: dev-configurable, default `run_once` (do not replay a backlog).
 - **Execution semantics**: at-least-once; scheduled payloads must be idempotent (especially for side-effect tools).
 - **Approval**: `HUMAN_GATED` is disabled for scheduled tasks; scheduled outputs are auto-merged (`APPEND`) into a delivery session/inbox.
-- **Delivery/alerting**: pluggable `DeliverySink`/`AlertSink`; Playground delivers to a notification pane targeting `owner_user_id`, with “open” creating a new session.
+- **Delivery/alerting**: pluggable `DeliverySink`/`AlertSink`; a UI client can deliver to a notification pane targeting `owner_user_id`, with “open” creating a new session.
 - **Distributed safety**: claim creates a run record; reclaim is possible after lease expiry to prevent permanent hangs.
 
 ---
@@ -33,8 +32,7 @@ Key v1 decisions (captured in this RFC):
 8. [Retry and Failure Handling](#retry-and-failure-handling)
 9. [Agent Meta-Tools](#agent-meta-tools)
 10. [Configuration](#configuration)
-11. [Playground Integration](#playground-integration)
-12. [Implementation Plan](#implementation-plan)
+11. [Implementation Plan](#implementation-plan)
 
 ---
 
@@ -211,7 +209,7 @@ When jobs fail:
 |-----------|---------------|-------------|
 | `JobDefinition` | Data model for scheduled jobs | PenguiFlow (core) |
 | `SupportsScheduledTasks` | Storage capability interface | PenguiFlow (protocol) |
-| In-memory scheduled store | Reference impl for Playground/tests | PenguiFlow (dev) |
+| In-memory scheduled store | Reference impl for local dev/tests | PenguiFlow (dev) |
 | `JobScheduler` | Poll and trigger logic | PenguiFlow (core) |
 | Run lease/claim logic | Claim + reclaim behavior | PenguiFlow (core) |
 | `tasks.schedule` | Agent meta-tool | PenguiFlow (core) |
@@ -828,7 +826,7 @@ class AlertSink(Protocol):
     ) -> None: ...
 ```
 
-Playground default:
+Example UI client default:
 - `DeliverySink` writes to the notification pane (inbox) scoped to `owner_user_id`.
 - Opening a notification creates (or navigates to) a new session with the run’s summary appended.
 
@@ -863,83 +861,13 @@ SCHEDULED_TASKS_ALLOWED_SCHEDULED_TOOLS="http.get,openapi.call"
 
 ---
 
-## Playground Integration
-
-### Showcase Features
-
-The CLI playground should demonstrate:
-
-1. **Schedule creation UI**: Button to create schedule from conversation
-2. **Schedule list view**: Table of user's scheduled jobs
-3. **Run history**: View past executions and results
-4. **Manual trigger**: "Run now" button for testing
-5. **Pause/resume/delete**: Management controls
-
-### Implementation
-
-```python
-# In playground.py
-
-@app.post("/api/schedules")
-async def create_schedule(request: CreateScheduleRequest):
-    """Create a scheduled job (mirrors tasks.schedule meta-tool)."""
-    ...
-
-@app.get("/api/schedules")
-async def list_schedules(user_id: str):
-    """List scheduled jobs for user."""
-    ...
-
-@app.post("/api/schedules/{job_id}/trigger")
-async def trigger_schedule(job_id: str):
-    """Manually trigger a scheduled job."""
-    ...
-
-@app.patch("/api/schedules/{job_id}")
-async def update_schedule(job_id: str, request: UpdateScheduleRequest):
-    """Pause, resume, or modify a scheduled job."""
-    ...
-```
-
-### UI Components
-
-```svelte
-<!-- ScheduleList.svelte -->
-<script>
-  let schedules = [];
-
-  async function loadSchedules() {
-    schedules = await api.listSchedules();
-  }
-</script>
-
-<div class="schedule-list">
-  {#each schedules as job}
-    <div class="schedule-item">
-      <span class="query">{job.query}</span>
-      <span class="schedule">{job.cron || `Every ${job.interval_s}s`}</span>
-      <span class="next-run">{formatDate(job.next_run_at)}</span>
-      <span class="status" class:enabled={job.enabled}>
-        {job.enabled ? 'Active' : 'Paused'}
-      </span>
-      <button on:click={() => togglePause(job)}>
-        {job.enabled ? 'Pause' : 'Resume'}
-      </button>
-      <button on:click={() => triggerNow(job)}>Run Now</button>
-    </div>
-  {/each}
-</div>
-```
-
----
-
 ## Implementation Plan
 
 ### Phase 0: Storage Capability + Semantics
 
 - Define `SupportsScheduledTasks` protocol (capability-based, StateStore-aligned)
 - Update scheduler contracts to use **run records + leases** (at-least-once)
-- Add minimal in-memory implementation for Playground/testing
+- Add minimal in-memory implementation for local dev/testing
 - Add reclaim logic for abandoned/expired runs (safety net)
 
 ### Phase 1: Core Models and Scheduling Math
@@ -972,16 +900,8 @@ async def update_schedule(job_id: str, request: UpdateScheduleRequest):
 - Implement user alerting via `AlertSink` protocol
 - Implement result delivery via `DeliverySink` protocol (default: inbox → create/open session)
 
-### Phase 5: Playground Integration
+### Phase 5: Documentation and Examples
 
-- Add schedule management endpoints
-- Build schedule list UI component
-- Add manual trigger support
-- Add run history view
-
-### Phase 6: Documentation and Templates
-
-- Update template `config.py.jinja` files
 - Add a scheduling skill under `.agents/skills/`
 - Create example scheduled job flows
 - Write integration tests
@@ -1000,7 +920,7 @@ async def update_schedule(job_id: str, request: UpdateScheduleRequest):
 
 4. **Approval/merge:** Disable `HUMAN_GATED` for scheduled tasks. Scheduled outputs are auto-merged (`APPEND`) into the delivery surface/session.
 
-5. **Result delivery:** Define `DeliverySink`/`AlertSink` protocols. Default delivery is user inbox/notification surface (Playground: notification pane targeting `owner_user_id`, opening creates a new session).
+5. **Result delivery:** Define `DeliverySink`/`AlertSink` protocols. Default delivery is user inbox/notification surface (e.g. a UI client's notification pane targeting `owner_user_id`, opening creates a new session).
 
 6. **Security/permissions:** Dev-configured via policy hooks (outside core library scope). Downstream controls who can schedule, what tools are allowed, and quotas.
 

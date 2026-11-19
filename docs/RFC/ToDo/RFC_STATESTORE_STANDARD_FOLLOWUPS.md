@@ -187,4 +187,4 @@ This RFC tracks StateStore follow-ups that are independent of the A2A redesign, 
 - Should we make “must not throw” a hard requirement, or should runtime wrap everything to enforce best-effort semantics?
 - Do we want `StoredEvent` to become a Pydantic model (easier migration + schema evolution) instead of a dataclass?
 - Is it worth introducing a “StateStore version handshake” to let stores advertise supported capabilities/features?
-- How do we best bound storage for high-volume streaming events (`PlannerEvent` stream chunks) without losing usability for the Playground UI?
+- How do we best bound storage for high-volume streaming events (`PlannerEvent` stream chunks) without losing usability for UI clients that replay them?

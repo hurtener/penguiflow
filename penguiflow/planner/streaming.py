@@ -234,8 +234,8 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
 class _StreamingThoughtExtractor(_JsonStringBufferExtractor):
     """Extracts the 'thought' field content from streaming JSON chunks.
 
-    The thought field is intended to be short, factual execution status. The Playground
-    UI renders it in a collapsible "Thinking…" panel (not as a user-facing answer).
+    The thought field is intended to be short, factual execution status. UI clients should
+    render it as progress (for example a collapsible "Thinking…" panel), not as a user-facing answer.
     """
 
     # Pre-compiled regex pattern for thought extraction (RFC alignment)

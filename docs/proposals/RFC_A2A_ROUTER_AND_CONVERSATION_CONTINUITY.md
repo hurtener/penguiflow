@@ -70,7 +70,6 @@ Key limitations in the current implementation (verified against the codebase):
 - The built-in A2A *client* surface does not expose `get_task`, `list_tasks`, `subscribe_task`, or push notification config APIs. Those operations exist only on the server side (`penguiflow_a2a/bindings/http.py:620-799`).
 - `InMemoryTaskStore` (A2A-side) and `InMemoryStateStore.SupportsTasks` (runtime-side) are two independent in-memory task persistence surfaces with no reconciliation — a production deployment cannot durably recover without solving both.
 - There is no first-class agent registry or skill-scored routing layer.
-- The generated A2A template (`penguiflow/templates/new/rag_server/src/__package_name__/a2a.py.jinja:67-82`) reads `session_id` from payload, but does **not** consume `a2a_context_id` from `flow_message.meta`, so the documented "stock A2AService injects `a2a_context_id`" pathway is not actually exercised by the default scaffold.
 
 ### Why this matters
 
@@ -147,7 +146,6 @@ The codebase already has the core ingredients for continuity, and the RFC propos
 - `StateStore.SupportsPlannerState` already backs planner pause/resume via `save_planner_state` / `load_planner_state` — the mechanism that Phase 3 must build on.
 - PenguiFlow application persistence already keys memory and artifacts on `session_id`.
 - `A2AAgentToolset` already propagates `session_id` in metadata/tool context.
-- The generated A2A template reads `session_id` from payload, but not `a2a_context_id` — this gap is addressed in Phase 0.
 - The stock `A2AService` already injects `a2a_context_id` and `a2a_task_id` into `flow_message.meta`.
 
 ---
@@ -660,7 +658,7 @@ Recommended specialist-side boundary rule:
 - and `a2a_context_id` is present in meta,
 - set `session_id = a2a_context_id`.
 
-Phase 0 updates the generated template to implement this rule (`templates/new/rag_server/src/__package_name__/a2a.py.jinja`).
+Phase 0 documents this rule for specialist entry adapters.
 
 ### 4. Server-side resume semantics
 
@@ -700,12 +698,11 @@ Deliverables:
 - document the three-identity rule (`router_session_id`, `remote_context_id`, optional `remote_session_id`),
 - document "fresh task, stable context" as the required rule,
 - document shared artifact refs for cross-agent handoff (router-mediated),
-- update the `rag_server` jinja template (`templates/new/rag_server/src/__package_name__/a2a.py.jinja`) so the adapter prefers `a2a_context_id` from `flow_message.meta` over payload `session_id`,
+- document the specialist-side ingress rule so entry adapters prefer `a2a_context_id` from `flow_message.meta` over payload `session_id`,
 - add a Phase 0 test that exercises this precedence.
 
 Expected outcome:
-- teams can build safe v1 router agents using the current tool-style remote invocation path,
-- the shipped template reflects the RFC.
+- teams can build safe v1 router agents using the current tool-style remote invocation path.
 
 ### Phase 1: Client continuity support
 
@@ -808,7 +805,7 @@ Expected outcome:
 
 - Existing `A2AAgentToolset` usage should continue working without explicit continuity options (defaults to `context_strategy="fresh"`, `session_bridge=False`).
 - Existing `A2AHttpTransport` usage should continue working for one-shot bounded remote calls.
-- Existing template-based orchestrators that rely on `session_id` in payload should keep working; Phase 0 additively prefers `a2a_context_id` when present.
+- Existing orchestrators that rely on `session_id` in payload should keep working; the Phase 0 ingress rule additively prefers `a2a_context_id` when present.
 - `RemoteBinding` additions are additive and default-safe; existing `StateStore` implementations continue to satisfy the Protocol.
 - `SupportsConversationBindings` is *optional*; missing it degrades gracefully to "no binding reuse, fresh context every turn."
 

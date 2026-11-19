@@ -125,9 +125,9 @@ Done when:
 
 - operators can answer: “why is it slow”, “why is it stuck”, “what broke”, “can I replay”
 
-## Phase 5 — CLI + templates + contributor workflows (1 PR)
+## Phase 5 — CLI + contributor workflows (1 PR)
 
-Goal: scaffolding and day-2 usage is obvious and correct.
+Goal: CLI and day-2 usage is obvious and correct.
 
 Tier A targets:
 
@@ -136,7 +136,7 @@ Tier A targets:
 
 Done when:
 
-- a team can bootstrap an agent project and use the playground/tools without tribal knowledge
+- a team can validate ToolNode presets and inspect trace history with the CLI without tribal knowledge
 
 ## Phase 6 — Legacy/manual consolidation (ongoing)
 

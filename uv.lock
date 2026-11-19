@@ -11,18 +11,6 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "ag-ui-protocol"
-version = "0.1.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/67/bb/5a5ec893eea5805fb9a3db76a9888c3429710dfb6f24bbb37568f2cf7320/ag_ui_protocol-0.1.10.tar.gz", hash = "sha256:3213991c6b2eb24bb1a8c362ee270c16705a07a4c5962267a083d0959ed894f4", size = 6945, upload-time = "2025-11-06T15:17:17.068Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/78/eb55fabaab41abc53f52c0918a9a8c0f747807e5306273f51120fd695957/ag_ui_protocol-0.1.10-py3-none-any.whl", hash = "sha256:c81e6981f30aabdf97a7ee312bfd4df0cd38e718d9fc10019c7d438128b93ab5", size = 7889, upload-time = "2025-11-06T15:17:15.325Z" },
-]
-
-[[package]]
 name = "aiofile"
 version = "3.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3113,7 +3101,7 @@ wheels = [
 
 [[package]]
 name = "penguiflow-lite"
-version = "3.11.4"
+version = "4.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -3122,7 +3110,6 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -3143,14 +3130,7 @@ a2a-grpc = [
 a2a-server = [
     { name = "fastapi" },
 ]
-cli = [
-    { name = "ag-ui-protocol" },
-    { name = "fastapi" },
-    { name = "jinja2" },
-    { name = "uvicorn" },
-]
 dev = [
-    { name = "ag-ui-protocol" },
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "boto3" },
@@ -3164,7 +3144,6 @@ dev = [
     { name = "grpcio-tools" },
     { name = "httpx" },
     { name = "hypothesis" },
-    { name = "jinja2" },
     { name = "jsonschema" },
     { name = "markitdown" },
     { name = "mypy" },
@@ -3177,7 +3156,6 @@ dev = [
     { name = "pyyaml" },
     { name = "ruff" },
     { name = "tenacity" },
-    { name = "uvicorn" },
 ]
 docs = [
     { name = "mkdocs" },
@@ -3221,7 +3199,6 @@ web = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "ag-ui-protocol" },
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "boto3" },
@@ -3235,7 +3212,6 @@ dev = [
     { name = "grpcio-tools" },
     { name = "httpx" },
     { name = "hypothesis" },
-    { name = "jinja2" },
     { name = "jsonschema" },
     { name = "markitdown" },
     { name = "mypy" },
@@ -3252,8 +3228,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ag-ui-protocol", marker = "extra == 'cli'", specifier = ">=0.0.42" },
-    { name = "ag-ui-protocol", marker = "extra == 'dev'", specifier = ">=0.0.42" },
     { name = "aiohttp", marker = "extra == 'dev'", specifier = ">=3.9.0" },
     { name = "aiohttp", marker = "extra == 'planner'", specifier = ">=3.9.0" },
     { name = "aiohttp", marker = "extra == 'web'", specifier = ">=3.9.0" },
@@ -3270,7 +3244,6 @@ requires-dist = [
     { name = "dspy", marker = "extra == 'planner'", specifier = ">=3.0.3" },
     { name = "fastapi", specifier = ">=0.118" },
     { name = "fastapi", marker = "extra == 'a2a-server'", specifier = ">=0.118" },
-    { name = "fastapi", marker = "extra == 'cli'", specifier = ">=0.118" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.118" },
     { name = "fastmcp", marker = "extra == 'planner'", specifier = ">=3.0" },
     { name = "genai-prices", marker = "extra == 'dev'", specifier = ">=0.0.66,<1" },
@@ -3290,8 +3263,6 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'a2a-client'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.103" },
-    { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1" },
-    { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "jsonschema", marker = "extra == 'planner'", specifier = ">=4.23" },
     { name = "litellm", marker = "extra == 'planner'", specifier = ">=1.94.0" },
@@ -3322,15 +3293,11 @@ requires-dist = [
     { name = "utcp-cli", marker = "extra == 'tools-cli'", specifier = ">=1.0.0" },
     { name = "utcp-http", marker = "extra == 'planner'", specifier = ">=1.0.0" },
     { name = "utcp-websocket", marker = "extra == 'tools-websocket'", specifier = ">=1.0.0" },
-    { name = "uvicorn", specifier = ">=0.32" },
-    { name = "uvicorn", marker = "extra == 'cli'", specifier = ">=0.32" },
-    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.32" },
 ]
-provides-extras = ["dev", "docs", "cli", "a2a-server", "a2a-grpc", "a2a-client", "planner", "web", "llm", "tools-cli", "tools-websocket", "pricing", "pydantic-ai"]
+provides-extras = ["dev", "docs", "a2a-server", "a2a-grpc", "a2a-client", "planner", "web", "llm", "tools-cli", "tools-websocket", "pricing", "pydantic-ai"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "ag-ui-protocol", specifier = ">=0.0.42" },
     { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "anthropic", specifier = ">=0.75.0" },
     { name = "boto3", specifier = ">=1.42.0" },
@@ -3344,7 +3311,6 @@ dev = [
     { name = "grpcio-tools", specifier = ">=1.70.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hypothesis", specifier = ">=6.103" },
-    { name = "jinja2", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "markitdown", specifier = ">=0.1.5" },
     { name = "mypy", specifier = ">=1.8" },

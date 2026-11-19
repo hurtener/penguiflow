@@ -1,4 +1,0 @@
-interface:
-  display_name: "PenguiFlow Agent Reset"
-  short_description: "Clone and reset a PenguiFlow test agent"
-  default_prompt: "Use this skill to duplicate an existing PenguiFlow test agent, clean copied state, rewire MCP integrations, update agent.yaml metadata for Playground accuracy, and validate startup/tests."

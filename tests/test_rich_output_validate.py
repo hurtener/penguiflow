@@ -12,7 +12,6 @@ from penguiflow.rich_output.validate import (
     _iter_report_sections,
     _iter_tab_items,
     validate_component_payload,
-    validate_interaction_result,
 )
 
 
@@ -84,17 +83,6 @@ def test_validate_component_payload_recurses_into_grid() -> None:
     )
 
 
-def test_validate_interaction_result_shapes() -> None:
-    validate_interaction_result("confirm", True)
-    validate_interaction_result("select_option", "line")
-    validate_interaction_result("select_option", ["line", "bar"])
-    validate_interaction_result("select_option", {"selection": None, "cancelled": True})
-    validate_interaction_result("form", {"field": "value"})
-
-    with pytest.raises(RichOutputValidationError):
-        validate_interaction_result("confirm", "yes")
-
-
 def test_validate_component_payload_budget_and_default_limits() -> None:
     registry = get_registry()
     with pytest.raises(RichOutputValidationError, match="budget exceeded"):
@@ -158,15 +146,3 @@ def test_nested_component_iterators_cover_invalid_and_valid_shapes() -> None:
     ]
     assert list(_iter_tab_items(tabs)) == [("markdown", {"content": "A"})]
     assert list(_iter_accordion_items(accordion)) == [("json", {"data": {"a": 1}})]
-
-
-def test_validate_interaction_result_additional_paths() -> None:
-    validate_interaction_result("confirm", {"confirmed": False})
-    validate_interaction_result("select_option", {"selection": "line"})
-    validate_interaction_result("select_option", {"selection": ["line", "bar"]})
-    validate_interaction_result("form", None)
-
-    with pytest.raises(RichOutputValidationError):
-        validate_interaction_result("select_option", 123)
-    with pytest.raises(RichOutputValidationError):
-        validate_interaction_result("form", 123)

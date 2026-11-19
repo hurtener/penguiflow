@@ -16,9 +16,8 @@
 | **Conversation continuity across all agents (Migrated from Reporting Agent)** | Users carry context across agent interactions without restating goals → feels like a single intelligent assistant, not disjoint sessions. | Without it: users re-explain context constantly, creating friction. | ● | ● | ● | | | | | | | | | | | ✅ |
 | **Unified State Store (Single source of truth for agent state)** | Single durable source of truth for all agent state → enables pause/resume, crash recovery, audit trails. | Without it: agent state lives in-memory, lost on restart — no production reliability. | | ● | ● | | | | | | | | | | | ✅ |
 | **Control memory costs per agent** | Configurable memory budgets and rolling summarization → predictable token/spend per agent, no unbounded context growth. | Without it: memory costs spiral out of control with long-running agents. | | ● | ● | ● | | | | | | | | | | ✅ |
-| **Development Playground (Interactive environment to build agents faster)** | Interactive web UI to build and test agents visually → cuts development cycle from hours to minutes. | Without it: developers must write code, run CLI, check logs — slow iteration. | ● | ● | ● | | | | | | | | | | | ✅ |
-| **Fast-Scaffolding with skills and documentation** | Common patterns ready in seconds. 19 ready-to-use skills to accelerate time to deployment. | Without it: every project starts from scratch, inconsistent architecture. | ● | ● | ● | | | | | | | | | | | ✅ |
-| **Playground: See agent thinking in real-time (debugging)** | Live streaming of agent reasoning + tool calls → instant debugging, no more reading raw logs. | Without it: developers debug blindly with post-hoc log analysis. | | ● | ● | | | | | | | | | | | ✅ |
+| **Skills and documentation** | Common patterns documented as 16 ready-to-use skills to accelerate time to deployment. | Without it: every project starts from scratch, inconsistent architecture. | ● | ● | ● | | | | | | | | | | | ✅ |
+| **See agent thinking in real-time (debugging)** | Live streaming of agent reasoning + tool calls to a UI client → instant debugging, no more reading raw logs. | Without it: developers debug blindly with post-hoc log analysis. | | ● | ● | | | | | | | | | | | ✅ |
 | **Background tasks** | Launch analysis, close laptop, get notified when done → agents work async, users stay productive. | Without it: users stare at progress spinners for long-running tasks. | | ● | ● | ● | ● | | | | | | | | | ✅ |
 | **Concurrent execution control (Prevent system overload)** | Throttle simultaneous tool/agent executions → prevents API rate limits, OOM crashes, runaway costs. | Without it: a single heavy task can degrade the entire system. | | | | ● | ● | | | | | | | | | ✅ |
 | **Task groups** | Correlate related background tasks into unified reports → users get consolidated results instead of scattered notifications. | Without it: users manually piece together outputs from parallel tasks. | | ● | ● | ● | ● | | | | | | | | | ✅ |
@@ -75,9 +74,9 @@
 
 | Subtask | Hours | Date |
 |---|---|---|
-| ReactPlanner pause/resume extension for Playground intervention | 8h | Apr 14–15 (Tue–Wed) |
+| ReactPlanner pause/resume extension for human intervention | 8h | Apr 14–15 (Tue–Wed) |
 | State persistence + conversation rehydration on resume | 8h | Apr 16–17 (Thu–Fri) |
-| Stream cancel propagation + Playground manual resume UI | 8h | May 4–5 (Mon–Tue) |
+| Stream cancel propagation + manual resume flow | 8h | May 4–5 (Mon–Tue) |
 
 ---
 
@@ -87,7 +86,7 @@
 | Subtask | Hours | Date |
 |---|---|---|
 | Steering hooks + guard inbox for approval workflows | 12h | Feb 23–25 (Mon–Wed) |
-| Playground approval UI (review, approve, reject, modify) | 12h | Mar 9–11 (Mon–Wed) |
+| Approval decision flow (review, approve, reject, modify) | 12h | Mar 9–11 (Mon–Wed) |
 | A2A input-required / auth-required lifecycle mapping | 8h | Apr 20–21 (Mon–Tue) |
 | Test coverage + edge case hardening for all approval paths | 8h | May 18–19 (Mon–Tue) |
 
@@ -156,7 +155,7 @@
 | Subtask | Hours | Date |
 |---|---|---|
 | Multi-agent FlowEvent types (remote_binding_reuse, remote_task_poll, a2a_pause, remote_failover) | 8h | Apr 14–15 (Tue–Wed) |
-| Playground trajectory view for cross-agent timelines | 8h | May 18–19 (Mon–Tue) |
+| Trajectory aggregation for cross-agent timelines | 8h | May 18–19 (Mon–Tue) |
 | Remote binding event logging + failover trace aggregation | 8h | Jun 15–16 (Mon–Tue) |
 
 ---
@@ -186,7 +185,7 @@
 | Subtask | Hours | Date |
 |---|---|---|
 | Multi-agent delegation approval workflow (select → pause → confirm → execute) | 8h | Apr 30–May 1 (Thu–Fri) |
-| A2A router HITL integration + Playground review prompt | 8h | May 25–26 (Mon–Tue) |
+| A2A router HITL integration + review prompt | 8h | May 25–26 (Mon–Tue) |
 | Test coverage: multi-agent rejection, timeout, delegate-failover | 8h | Jun 3–4 (Wed–Thu) |
 
 ---
@@ -208,7 +207,7 @@
 
 | Subtask | Hours | Date |
 |---|---|---|
-| Active reporting in Playground + artifact return from background jobs | 8h | Feb 16–17 (Mon–Tue) |
+| Active reporting + artifact return from background jobs | 8h | Feb 16–17 (Mon–Tue) |
 | retain_turn config + proactive emission de-duplication | 8h | Mar 30–31 (Mon–Tue) |
 | Background result prompt-bloat protection (extract/remove pattern) | 8h | Apr 20–21 (Mon–Tue) |
 
@@ -220,7 +219,7 @@
 | Subtask | Hours | Date |
 |---|---|---|
 | Task group correlation ID propagation across background jobs | 8h | Feb 23–24 (Mon–Tue) |
-| Consolidated report delivery in Playground notification pane | 8h | Apr 22–23 (Wed–Thu) |
+| Consolidated report delivery to the active session | 8h | Apr 22–23 (Wed–Thu) |
 
 ---
 
@@ -266,7 +265,7 @@
 | Subtask | Hours | Date |
 |---|---|---|
 | Agent metadata schema + CRUD API — initial work | 8h | Apr 15–16 (Wed–Thu) |
-| Health check protocol + Playground browse UI | 8h | Jun 29–30 (Mon–Tue) |
+| Health check protocol + registry browse API | 8h | Jun 29–30 (Mon–Tue) |
 
 ---
 
@@ -336,7 +335,7 @@
 | Subtask | Hours | Date |
 |---|---|---|
 | Session modality toggle + context continuity across modes | 8h | Jul 6–7 (Mon–Tue) |
-| Playground UI for mode indicator + manual switch | 8h | Jul 8–9 (Wed–Thu) |
+| Mode indicator events + manual switch for UI clients | 8h | Jul 8–9 (Wed–Thu) |
 
 ---
 
@@ -391,7 +390,7 @@ June 2026 (21 working days, ~160h projected)
 ├── PF-016: Proactive Report Back (Jun 10–11, 22–23)
 ├── PF-017: Notification System (Jun 17–24)
 ├── PF-018: Rate Limiting circuit breaker (Jun 25–26)
-├── PF-019: Agent Registry browse UI (Jun 29–30)
+├── PF-019: Agent Registry browse API (Jun 29–30)
 ├── PF-020: LiveKit Infrastructure (Jun 8–11)
 ├── PF-021: Voice Integration (Jun 15–18)
 ├── PF-022: STT Integration (Jun 22–25)
@@ -431,7 +430,7 @@ June 2026 (21 working days, ~160h projected)
 | **Automatic dataset generation for Prompt Optimization** | Extract trajectory traces, score them, auto-generate labeled datasets for prompt tuning. Aligns with `docs/proposals/RFC_TRACE_DERIVED_DATASETS_AND_EVALS.md`. | Without it: prompt optimization depends on manually curated examples — slow, biased, doesn't scale. | ● | ● | ● | ● | | | | | | | | | | ✅ |
 | **Prompt Optimization (Improve agent instructions automatically)** | Automated prompt refinement using eval feedback. System proposes prompt changes, validates against dataset, deploys if scores improve. | Without it: prompt engineering is manual trial and error — fragile, time-consuming, and person-dependent. | | | | ● | ● | ● | ● | ● | | | | | | 🔲 |
 | **Pre-built quality templates by use case** | Ready-to-use eval templates per domain: reports, analysis, code review, summarization, customer response. Each includes scoring criteria, complexity presets, and judge prompts. | Without it: every team builds evaluation from scratch — inconsistent, slow, and missing edge cases. | | | | | | | ● | ● | ● | ● | | | | 🔲 |
-| **Quality dashboards (pass rates, common failures)** | Visual analytics: pass rates over time, failure distribution by category, model comparison, cost-per-quality-point. Built into Playground. | Without it: quality is invisible — you can't demonstrate improvement to stakeholders or catch regressions early. | | | | | | | | | | | ● | ● | ● | 🔲 |
+| **Quality dashboards (pass rates, common failures)** | Visual analytics: pass rates over time, failure distribution by category, model comparison, cost-per-quality-point. | Without it: quality is invisible — you can't demonstrate improvement to stakeholders or catch regressions early. | | | | | | | | | | | ● | ● | ● | 🔲 |
 | **Agents generation/optimization MCP** | MCP server that exposes agent generation and optimization as a tool. Agents can create, evaluate, and improve other agents programmatically. | Without it: agent creation and tuning are manual dev tasks — can't scale to hundreds of specialized agents. | | | | | | | ● | ● | ● | ● | ● | ● | | 🔲 |
 | **System learns quality standards per use case** | ML-based quality standard learning: system observes eval outcomes and human feedback, builds a model of "good enough" per use case, auto-adjusts scoring thresholds. | Without it: quality thresholds are static — they don't adapt to evolving user expectations or domain shifts. | | | | | | | | | | | ● | ● | ● | 🔲 |
 
@@ -500,7 +499,7 @@ June 2026 (21 working days, ~160h projected)
 | **Active** | Jul–Aug |
 | **Description** | Per-tool success/failure rates, decision-path analysis, and common failure pattern mining. Each tool call records outcome (success/error/timeout), latency, and the reasoning context. Aggregated into observability dashboards. |
 | **Impact if not done** | You don't know which tools or reasoning patterns cause failures — improvements are guesswork. Buggy tools hide in plain sight. |
-| **Sample tools** | `ToolTelemetry(tool_name, success, latency, error_type, decision_path)` published as FlowEvents. Playground "Tool Health" tab showing top-10 failing tools, failure distribution, and trend lines. |
+| **Sample tools** | `ToolTelemetry(tool_name, success, latency, error_type, decision_path)` published as FlowEvents. A "Tool Health" dashboard view showing top-10 failing tools, failure distribution, and trend lines. |
 | **Other tasks** | QE-012 (Quality dashboards surface tool health metrics), PF-009 (A2A observability shares event infrastructure) |
 
 ---
@@ -513,7 +512,7 @@ June 2026 (21 working days, ~160h projected)
 | **Active** | Aug |
 | **Description** | Workflow for subject matter experts to review, approve, or modify scoring rubrics per domain (finance, healthcare, engineering, legal). Includes diff view, change requests, sign-off, and audit trail. |
 | **Impact if not done** | Scoring criteria lack domain authority — agents may pass generic checks but fail domain-specific needs. A finance rubric without a CFO's input will miss critical nuances. |
-| **Sample tools** | Playground "Rubric Editor" with review workflow: `RubricReview.submit(domain="finance")` → `RubricReview.approve(expert="cfo@corp.com")` → `RubricReview.activate()`. Audit log of who changed what and when. |
+| **Sample tools** | "Rubric Editor" UI with review workflow: `RubricReview.submit(domain="finance")` → `RubricReview.approve(expert="cfo@corp.com")` → `RubricReview.activate()`. Audit log of who changed what and when. |
 | **Other tasks** | QE-002 (Scoring criteria are what experts validate), QE-011 (Quality templates are pre-validated starting points) |
 
 ---
@@ -539,7 +538,7 @@ June 2026 (21 working days, ~160h projected)
 | **Active** | Sep |
 | **Description** | When judge agent and primary agent disagree on quality (score gap > threshold), or confidence is below minimum, the system pauses and surfaces both outputs to a human for final decision. The human can pick one, merge, or request a new attempt. |
 | **Impact if not done** | The system makes final quality calls autonomously — high-risk for regulated or client-facing outputs. A bad output reaches the user with no human safety net. |
-| **Sample tools** | Extends PF-003 (HITL Approval) with `DisagreementEscalation(judge_score=0.6, agent_confidence=0.9, gap_threshold=0.3)`. Playground shows side-by-side comparison with "Accept A", "Accept B", "Modify", "Retry" buttons. |
+| **Sample tools** | Extends PF-003 (HITL Approval) with `DisagreementEscalation(judge_score=0.6, agent_confidence=0.9, gap_threshold=0.3)`. A UI client shows side-by-side comparison with "Accept A", "Accept B", "Modify", "Retry" buttons. |
 | **Other tasks** | PF-003 (HITL approval infrastructure is the foundation), PF-012 (Multi-agent HITL shares escalation patterns) |
 
 ---
@@ -598,8 +597,8 @@ June 2026 (21 working days, ~160h projected)
 | **Active** | Jul–Oct |
 | **Description** | Ready-to-use eval templates per domain: reports, analysis, code review, summarization, customer response, data extraction. Each includes scoring criteria, complexity presets, judge prompts, and pass thresholds. Shipped as skill packs. |
 | **Impact if not done** | Every team builds evaluation from scratch — inconsistent, slow, and missing edge cases. Adoption of the quality framework stalls because of upfront effort. |
-| **Sample tools** | `QualityTemplate.use_case("financial_report")` → loads rubric, judge prompt, complexity taxonomy, and thresholds. Ships as `penguiflow-quickstart-financial` skill pack. Users customize via Playground "Templates" gallery. |
-| **Other tasks** | QE-002 (Scoring criteria are the core of each template), QE-006 (Complexity presets per template), PF-015 (Fast-scaffolding patterns) |
+| **Sample tools** | `QualityTemplate.use_case("financial_report")` → loads rubric, judge prompt, complexity taxonomy, and thresholds. Ships as `penguiflow-quality-financial` skill pack. Users customize via a "Templates" gallery. |
+| **Other tasks** | QE-002 (Scoring criteria are the core of each template), QE-006 (Complexity presets per template) |
 
 ---
 
@@ -609,9 +608,9 @@ June 2026 (21 working days, ~160h projected)
 | **Domain** | 🏗️ Platform |
 | **Status** | 🔲 Not started |
 | **Active** | Oct–Dec |
-| **Description** | Visual analytics in Playground: pass/fail rates over time, failure distribution by category, model comparison, cost-per-quality-point, tool health rankings, regression alerts. Filterable by agent, use case, date range, model. |
+| **Description** | Visual analytics: pass/fail rates over time, failure distribution by category, model comparison, cost-per-quality-point, tool health rankings, regression alerts. Filterable by agent, use case, date range, model. |
 | **Impact if not done** | Quality is invisible — you can't demonstrate improvement to stakeholders, catch regressions early, or make data-driven decisions about model selection. |
-| **Sample tools** | Playground "Quality" tab: line charts of pass rate over time, stacked bar of failure categories, heatmap of model×complexity pass rates, tool failure leaderboard. Exportable to PNG/CSV. |
+| **Sample tools** | Dashboard "Quality" tab: line charts of pass rate over time, stacked bar of failure categories, heatmap of model×complexity pass rates, tool failure leaderboard. Exportable to PNG/CSV. |
 | **Other tasks** | QE-003 (Eval history is the data source), QE-004 (Tool health feeds into dashboards), PF-009 (Observability infrastructure) |
 
 ---

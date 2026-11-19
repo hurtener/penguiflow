@@ -21,7 +21,7 @@ Create a new test file `tests/planner/test_persistence.py` with integration test
 Since persistence is fire-and-forget (`asyncio.create_task`), tests must drain the event loop after `run()`/`resume()` to let background tasks complete before asserting. Do NOT use `await asyncio.sleep(0)` -- a single yield is insufficient because background tasks have multiple await points (e.g., `InMemoryStateStore` methods use `async with self._lock:`). Instead, gather the named tasks explicitly.
 
 **Test scaffolding -- basic planner setup:**
-Use the `ReactPlanner` constructor directly with a scripted `llm_client`. Import `InMemoryStateStore` from `penguiflow.state.in_memory` (the canonical location), NOT from `penguiflow.cli.playground_state`.
+Use the `ReactPlanner` constructor directly with a scripted `llm_client`. Import `InMemoryStateStore` from `penguiflow.state.in_memory` (the canonical location).
 
 **Test cases (9 total):**
 
@@ -338,13 +338,13 @@ async def test_events_persisted_on_run_loop_error(monkeypatch: pytest.MonkeyPatc
 - [ ] `uv run pytest tests/planner/test_persistence.py -v` -- all 9 tests pass.
 
 ## Implementation Notes
-- Import `InMemoryStateStore` from `penguiflow.state.in_memory` (the canonical location), NOT from `penguiflow.cli.playground_state`.
+- Import `InMemoryStateStore` from `penguiflow.state.in_memory` (the canonical location).
 - `pytest-asyncio` with `asyncio_mode = "auto"` means async test functions run automatically without `@pytest.mark.asyncio`.
 - `InMemoryStateStore.save_trajectory` uses `self._trajectories[trace_id] = ...` (dict keyed by `trace_id`), so calling it twice with the same `(trace_id, session_id)` overwrites. The `len(traj_after.steps) > len(traj.steps)` assertion in the resume test is valid because the resumed trajectory accumulates steps from both phases.
 - For the "missing methods" test, use a bare class with neither `save_trajectory` nor `save_planner_event` -- the duck-typing (`getattr`) in the helpers will return `None` and skip silently.
 - For the "error" test, monkeypatch `run_loop` at `penguiflow.planner.react_runtime.run_loop`. The stub must call `planner._emit_event()` before raising so the event buffer is populated.
 - Depends on Phases 0-1 (the planner persistence infrastructure must exist).
-- These tests verify the planner's behavior independent of the playground wrapper.
+- These tests verify the planner's behavior independent of any HTTP layer.
 
 ## Verification Commands
 ```bash

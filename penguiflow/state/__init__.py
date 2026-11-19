@@ -62,8 +62,8 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:  # pragma: no cover - exercised indirectly
-    if name in {"InMemoryStateStore", "PlaygroundArtifactStore"}:
-        from .in_memory import InMemoryStateStore, PlaygroundArtifactStore
+    if name in {"InMemoryStateStore", "SessionArtifactStore"}:
+        from .in_memory import InMemoryStateStore, SessionArtifactStore
 
-        return {"InMemoryStateStore": InMemoryStateStore, "PlaygroundArtifactStore": PlaygroundArtifactStore}[name]
+        return {"InMemoryStateStore": InMemoryStateStore, "SessionArtifactStore": SessionArtifactStore}[name]
     raise AttributeError(name)

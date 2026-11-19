@@ -1,13 +1,13 @@
 # Phase 000: Add `list` Method to ArtifactStore Protocol and All Implementations
 
 ## Objective
-Add a `list(scope)` method to the `ArtifactStore` protocol and implement it across all store implementations: `NoOpArtifactStore`, `InMemoryArtifactStore`, `PlaygroundArtifactStore`, and `_EventEmittingArtifactStoreProxy`. Also add the `_scope_matches` module-level helper function used by filtering implementations. This is Enhancement 1 from the plan.
+Add a `list(scope)` method to the `ArtifactStore` protocol and implement it across all store implementations: `NoOpArtifactStore`, `InMemoryArtifactStore`, `SessionArtifactStore`, and `_EventEmittingArtifactStoreProxy`. Also add the `_scope_matches` module-level helper function used by filtering implementations. This is Enhancement 1 from the plan.
 
 ## Tasks
 1. Add `list` method signature to the `ArtifactStore` protocol in `penguiflow/artifacts.py`
 2. Add `_scope_matches` helper function in `penguiflow/artifacts.py`
 3. Implement `list` on `NoOpArtifactStore` and `InMemoryArtifactStore` in `penguiflow/artifacts.py`
-4. Implement `list` on `PlaygroundArtifactStore` in `penguiflow/state/in_memory.py`
+4. Implement `list` on `SessionArtifactStore` in `penguiflow/state/in_memory.py`
 5. Implement `list` delegation on `_EventEmittingArtifactStoreProxy` in `penguiflow/planner/artifact_handling.py`
 
 ## Detailed Steps
@@ -27,7 +27,7 @@ Add a `list(scope)` method to the `ArtifactStore` protocol and implement it acro
 
 ### Step 2: Add `_scope_matches` helper — `penguiflow/artifacts.py`
 - Add a module-level helper function near `_generate_artifact_id` (around line 257), outside any class, in the Implementations section.
-- This function is reusable by `InMemoryArtifactStore` and `PlaygroundArtifactStore`.
+- This function is reusable by `InMemoryArtifactStore` and `SessionArtifactStore`.
 
 ### Step 3: Implement `list` on `NoOpArtifactStore` — `penguiflow/artifacts.py`
 - Add `async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:` to `NoOpArtifactStore`.
@@ -39,8 +39,8 @@ Add a `list(scope)` method to the `ArtifactStore` protocol and implement it acro
 - If `scope` is `None`, return all refs: `[stored.ref for stored in self._artifacts.values()]`.
 - If `scope` is provided, filter using `_scope_matches`: `[stored.ref for stored in self._artifacts.values() if _scope_matches(stored.ref.scope, scope)]`.
 
-### Step 5: Implement `list` on `PlaygroundArtifactStore` — `penguiflow/state/in_memory.py`
-- Add `list` method to `PlaygroundArtifactStore` (after the `exists` method, before `clear_session`).
+### Step 5: Implement `list` on `SessionArtifactStore` — `penguiflow/state/in_memory.py`
+- Add `list` method to `SessionArtifactStore` (after the `exists` method, before `clear_session`).
 - Import `_scope_matches` is NOT needed here -- delegate to the inner `InMemoryArtifactStore.list()`.
 - Lock strategy: snapshot the stores dict under the lock, then iterate and call `list()` on each store outside the lock.
 - If `scope` is not `None` and `scope.session_id` is set, query only that session's inner store.
@@ -113,7 +113,7 @@ def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactS
 
 ```python
 # Target file: penguiflow/state/in_memory.py
-# Add to PlaygroundArtifactStore class, after exists() method (after line 181), before clear_session():
+# Add to SessionArtifactStore class, after exists() method (after line 181), before clear_session():
 
     async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
         """List artifacts, optionally filtered by scope."""
@@ -146,7 +146,7 @@ def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactS
 - [ ] Module-level `_scope_matches(artifact_scope, filter_scope)` function exists in `penguiflow/artifacts.py`
 - [ ] `NoOpArtifactStore.list()` returns `[]` always
 - [ ] `InMemoryArtifactStore.list()` filters by scope using `_scope_matches` and expires old artifacts first
-- [ ] `PlaygroundArtifactStore.list()` delegates to inner stores with correct lock strategy
+- [ ] `SessionArtifactStore.list()` delegates to inner stores with correct lock strategy
 - [ ] `_EventEmittingArtifactStoreProxy.list()` delegates to `self._store.list(scope=scope)`
 - [ ] `uv run ruff check .` passes with zero errors
 - [ ] `uv run mypy` passes with zero new errors
@@ -154,7 +154,7 @@ def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactS
 
 ## Implementation Notes
 - The `_scope_matches` function and the `_check_scope` method (added in Phase 003) have intentionally different semantics for `None` artifact fields. Do NOT confuse them.
-- `PlaygroundArtifactStore.list()` does NOT need to import `_scope_matches` -- it delegates to the inner `InMemoryArtifactStore.list()` which handles filtering.
+- `SessionArtifactStore.list()` does NOT need to import `_scope_matches` -- it delegates to the inner `InMemoryArtifactStore.list()` which handles filtering.
 - The `ArtifactRef` import is already present in `penguiflow/state/in_memory.py`.
 - The `_EventEmittingArtifactStoreProxy` import of `ArtifactRef` and `ArtifactScope` is already present in `penguiflow/planner/artifact_handling.py`.
 
@@ -178,13 +178,13 @@ uv run pytest tests/test_artifacts.py -x -q
 - **`penguiflow/artifacts.py`**: Added module-level `_scope_matches(artifact_scope, filter_scope)` helper function after `_generate_artifact_id`, implementing wildcard-style matching on `ArtifactScope` fields.
 - **`penguiflow/artifacts.py`**: Added `list()` method to `NoOpArtifactStore` that always returns `[]`.
 - **`penguiflow/artifacts.py`**: Added `list()` method to `InMemoryArtifactStore` that expires old artifacts first, then returns all refs (if scope is None) or filters using `_scope_matches`.
-- **`penguiflow/state/in_memory.py`**: Added `list()` method to `PlaygroundArtifactStore` with session-scoped optimization (queries only the relevant inner store when `scope.session_id` is set) and full-scan fallback (snapshots all stores under lock, then iterates outside lock).
+- **`penguiflow/state/in_memory.py`**: Added `list()` method to `SessionArtifactStore` with session-scoped optimization (queries only the relevant inner store when `scope.session_id` is set) and full-scan fallback (snapshots all stores under lock, then iterates outside lock).
 - **`penguiflow/planner/artifact_handling.py`**: Added `list()` method to `_EventEmittingArtifactStoreProxy` that delegates directly to `self._store.list(scope=scope)` with no event emission.
 
 ### Key Considerations
 - The `_scope_matches` function uses a wildcard approach: `None` filter fields match anything, while non-None filter fields require an exact match. This is intentionally different from `_check_scope` (planned for Phase 003) which has different semantics for `None` artifact fields.
-- `PlaygroundArtifactStore.list()` delegates to inner `InMemoryArtifactStore.list()` instances, which handle the `_scope_matches` filtering internally. No direct import of `_scope_matches` was needed in `penguiflow/state/in_memory.py`.
-- The lock strategy in `PlaygroundArtifactStore.list()` follows the same pattern as existing methods: acquire lock only to snapshot/access store references, then release it before calling async methods on the stores.
+- `SessionArtifactStore.list()` delegates to inner `InMemoryArtifactStore.list()` instances, which handle the `_scope_matches` filtering internally. No direct import of `_scope_matches` was needed in `penguiflow/state/in_memory.py`.
+- The lock strategy in `SessionArtifactStore.list()` follows the same pattern as existing methods: acquire lock only to snapshot/access store references, then release it before calling async methods on the stores.
 
 ### Assumptions
 - The `ArtifactRef` and `ArtifactScope` imports already present in `penguiflow/state/in_memory.py` and `penguiflow/planner/artifact_handling.py` were sufficient -- no new imports were needed. This was confirmed by reading the existing import statements.
@@ -195,10 +195,10 @@ None. The implementation matches the plan exactly as specified in all six steps.
 
 ### Potential Risks & Reviewer Attention Points
 - The `_scope_matches` helper iterates over a hardcoded tuple of field names `("tenant_id", "user_id", "session_id", "trace_id")`. If `ArtifactScope` gains new fields in the future, this function must be updated to include them.
-- `PlaygroundArtifactStore.list()` with no scope filter iterates all session stores. For deployments with many sessions, this could be slow. This is acceptable for Playground/testing use cases but worth noting for production scenarios.
+- `SessionArtifactStore.list()` with no scope filter iterates all session stores. For deployments with many sessions, this could be slow. This is acceptable for development/testing use cases but worth noting for production scenarios.
 - The `_EventEmittingArtifactStoreProxy` does not emit events for `list()` calls (consistent with the plan's note that reads don't need event emission). This is consistent with `get()`, `get_ref()`, and `exists()` which also do not emit events.
 
 ### Files Modified
 - `penguiflow/artifacts.py` -- Added `list` to protocol, `_scope_matches` helper, and `list` implementations on `NoOpArtifactStore` and `InMemoryArtifactStore`
-- `penguiflow/state/in_memory.py` -- Added `list` to `PlaygroundArtifactStore`
+- `penguiflow/state/in_memory.py` -- Added `list` to `SessionArtifactStore`
 - `penguiflow/planner/artifact_handling.py` -- Added `list` delegation to `_EventEmittingArtifactStoreProxy`

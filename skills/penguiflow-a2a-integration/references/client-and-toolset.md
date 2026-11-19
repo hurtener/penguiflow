@@ -70,7 +70,7 @@ Add `node_spec` to your planner's catalog (the planner config skill explains cat
 | `stream` | Long answers with progressive content | Subscribes to SSE; emits chunks via the planner's chunk channel. |
 | `task` | Long-running work, possible HITL | Submits as a task; polls or subscribes for updates. |
 
-Streaming chunks are routed to `chunk_channel` (default `"answer"`). For UI-facing chunk streams, see [[penguiflow-streaming]] and [[penguiflow-agui-events]].
+Streaming chunks are routed to `chunk_channel` (default `"answer"`). For UI-facing chunk streams, see [[penguiflow-streaming]].
 
 ## Custom payload and metadata builders
 

@@ -156,7 +156,7 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check tests
 - For `test_ref_serialization`, the namespace assertion on `model_dump()` output was placed right after the `size_bytes` check, and the round-trip assertion right after the `id` equality check, keeping related assertions together.
 
 ### Assumptions
-- Phase 000 has already been implemented, meaning the `namespace: str | None = None` field exists on `ArtifactRef` and all store implementations (`InMemoryArtifactStore`, `NoOpArtifactStore`, `PlaygroundArtifactStore`) pass `namespace` through to the constructed `ArtifactRef`. This was confirmed by inspecting `penguiflow/artifacts.py` which shows the field at line 81 and namespace propagation throughout the store methods.
+- Phase 000 has already been implemented, meaning the `namespace: str | None = None` field exists on `ArtifactRef` and all store implementations (`InMemoryArtifactStore`, `NoOpArtifactStore`, `SessionArtifactStore`) pass `namespace` through to the constructed `ArtifactRef`. This was confirmed by inspecting `penguiflow/artifacts.py` which shows the field at line 81 and namespace propagation throughout the store methods.
 
 ### Deviations from Plan
 None.

@@ -187,5 +187,4 @@ See `examples/roadmap_status_updates/flow.py` for a complete, tested implementat
 
 ## Further reading (internal notes)
 
-- `docs/agui/flow-tool-calls.md` (tool-call event mapping)
 - `docs/patterns/roadmap_status_updates.md` (status + roadmap streaming pattern)

@@ -133,11 +133,10 @@ Run a streaming example (chunks + final answer):
 uv run python examples/roadmap_status_updates/flow.py
 ```
 
-If you’re building an LLM agent, start with the planner template:
+If you’re building an LLM agent, start with the minimal planner example:
 
 ```bash
-uv run penguiflow new my-agent --template react
-uv run penguiflow dev --project-root my-agent
+uv run python examples/react_minimal/main.py
 ```
 
 ## Troubleshooting checklist

@@ -33,7 +33,6 @@ Checks enforced before merge:
 - docs gates:
   - `mkdocs build --strict`
   - `python scripts/check_md_links.py`
-- frontend validation for playground UI assets (`./scripts/validate_frontend.sh`)
 
 See `.github/workflows/ci.yml`.
 
@@ -65,18 +64,11 @@ uv run python scripts/check_md_links.py
 uv run mkdocs build --strict
 ```
 
-### Playground UI validation (repo checkout)
-
-```bash
-./scripts/validate_frontend.sh
-```
-
 ## Failure modes & recovery
 
 - **Flaky tests**: isolate the failing test, remove timing assumptions, and ensure no external network calls.
 - **Coverage regression**: add at least one negative/error-path test for new behavior (policy target is ≥85%).
 - **Docs build fails under `--strict`**: fix broken links or missing pages; avoid linking from curated docs to excluded/internal docs.
-- **Frontend validation fails**: rebuild UI assets under `penguiflow/cli/playground_ui` and re-run.
 
 ## Observability
 

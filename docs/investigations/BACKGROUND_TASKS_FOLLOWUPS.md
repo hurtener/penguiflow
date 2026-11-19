@@ -2,8 +2,6 @@
 
 ## Context / Symptoms Observed
 - Background tasks run (some succeed/fail), but terminal is silent during background execution.
-- Playground Tasks card only shows foreground tasks.
-- No notifications for individual tasks or task groups.
 - Some background tasks fail when they produce artifacts (e.g., `gather_data_from_genie`).
 - `tasks.apply_group` reports applying `0` patches even when group shows pending patches; subsequent patch flows appear broken.
 
@@ -73,7 +71,7 @@
 ## Issue 3 — No terminal visibility into background execution (telemetry is NoOp)
 **What you see**
 - Background tasks appear to “do nothing” from the terminal/logging perspective.
-- Failures happen “silently” unless surfaced into UI state (and even that can be missing, see Issue 4).
+- Failures happen “silently” unless surfaced into UI state.
 
 **Root cause (confirmed in code)**
 - `StreamingSession` emits `TaskTelemetryEvent` for spawn/complete/failure, but default `TaskTelemetrySink` is `NoOpTaskTelemetrySink`.
@@ -85,51 +83,14 @@
 **Target files**
 - `penguiflow/sessions/telemetry.py`
 - `penguiflow/sessions/session.py`
-- Template/spec orchestrator fallbacks (to opt-in to logging sink):
-  - `penguiflow/templates/new/*/src/__package_name__/orchestrator.py.jinja`
-  - `test_generation/background-tasks-agent/src/background_tasks_agent/orchestrator.py`
 
 **Direction of fix**
 - Implement a `LoggingTaskTelemetrySink` (or similar) in `penguiflow/sessions/telemetry.py`:
   - Log `task_spawned`, `task_completed`, `task_failed`, group completion/failure.
   - Include `session_id`, `task_id`, `group_id` (if available), `trace_id`, and `error`.
-- In fallback `SessionManager(...)` creation, pass `telemetry_sink=LoggingTaskTelemetrySink(logger=...)`.
+- Wherever a host or orchestrator creates a `SessionManager(...)`, pass `telemetry_sink=LoggingTaskTelemetrySink(logger=...)`.
 - Additionally log exceptions in `StreamingSession._execute_task` failure path (at least `logger.exception(...)`).
 - Add tests for telemetry sink invocation (unit test with a fake sink capturing events).
-
----
-
-## Issue 4 — Tasks card + notifications show only foreground (split SessionManager instances)
-**What you see**
-- Playground `/session/stream` and `/tasks` endpoints show only foreground tasks.
-- Notifications about background completion/patch approval do not appear.
-
-**Likely root cause (from wiring)**
-- Playground UI reads tasks via `/tasks?session_id=...` and listens via `/session/stream` to the Playground server’s **SessionManager** instance.
-  - Source: `penguiflow/cli/playground.py` creates `session_manager = SessionManager(...)` and serves `/tasks` and `/session/stream`.
-  - Source: `penguiflow/cli/playground_ui/src/lib/services/session-stream.ts`.
-- Generated agents now create an in-process fallback `SessionManager` inside the orchestrator when none is provided.
-  - If the Playground host does not provide a shared `session_manager` into the agent/orchestrator, the agent’s background tasks run on a **different SessionManager**, so UI endpoints never see them.
-
-**Target files**
-- Runtime/host integration:
-  - `penguiflow/cli/playground.py`
-  - `penguiflow/agui_adapter/penguiflow.py`
-  - Agent wrapper loading path (where orchestrator gets constructed)
-- Agent/orchestrator side:
-  - template orchestrators already accept `session_manager`/`task_service` but need host to pass them.
-
-**Direction of fix**
-- Ensure there is exactly **one** SessionManager per process, shared by:
-  - UI endpoints (`/tasks`, `/session/stream`)
-  - AG-UI adapter (foreground registration)
-  - Orchestrator background task service (spawn/list/apply/notifications)
-- Prefer dependency injection over “UI injection”:
-  - If running under Playground server, pass its `session_manager` into the orchestrator constructor if supported.
-  - Alternatively (if constructor injection isn’t feasible), standardize a tool_context key (e.g. `session_manager`) and have orchestrator prefer it over creating a fallback.
-- Acceptance criteria:
-  - Starting background tasks makes them appear in Tasks card immediately.
-  - Completion triggers NOTIFICATION updates and (for HUMAN_GATED) context-patch checkpoints.
 
 ---
 
@@ -138,11 +99,8 @@
 2. Fix group tool wrapper/schema mismatch (`penguiflow/sessions/task_tools.py` + `penguiflow/sessions/task_service.py`) and add tests.
 3. Add background task logging:
    - Introduce `LoggingTaskTelemetrySink`
-   - Wire it into fallback `SessionManager` creation
+   - Wire it into host/orchestrator `SessionManager` creation
    - Add failure-path logging in `StreamingSession._execute_task`.
-4. Unify SessionManager usage so UI + agent share the same instance in Playground/AG-UI contexts:
-   - Prefer DI: pass `session_manager` into orchestrator when hosted.
-   - Add an integration test that verifies background task appears via `/tasks` and emits `/session/stream` updates.
 
 ## Notes / Quick Checks
 - If you see artifact-related failures, check for errors originating in `ContextPatch(...)` creation during background completion.

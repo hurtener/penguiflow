@@ -86,7 +86,7 @@ Native tools in penguiflow already receive a `ToolContext`, but binary artifact 
 
 **Today:**
 - `tool_context` can hold arbitrary Python objects, but it is not guaranteed to be JSON-serialisable (and is dropped during trajectory serialisation if it can't be encoded).
-- `emit_artifact()` emits JSON-serialisable chunks into the planner event stream (useful for Playground/UI), but it is not a byte store.
+- `emit_artifact()` emits JSON-serialisable chunks into the planner event stream (useful for UI clients), but it is not a byte store.
 
 **Target (this RFC):** introduce a dedicated `ArtifactStore` (bytes + large text) surfaced to *all* tools via `ToolContext` (e.g. `ctx.artifacts`), returning a small, JSON-safe `ArtifactRef` that can be included in observations.
 
@@ -826,7 +826,7 @@ def _truncate_observation(self, observation: Any) -> Any:
 Penguiflow has multiple artifact-like mechanisms, and they serve different purposes:
 
 1. **Planner artifacts (structured)**: small JSON values collected into `trajectory.artifacts` via `json_schema_extra={"artifact": True}` and redacted from LLM context.
-2. **Streaming artifact chunks**: `ctx.emit_artifact()` emits JSON-serialisable chunks into the planner event stream (Playground/UI).
+2. **Streaming artifact chunks**: `ctx.emit_artifact()` emits JSON-serialisable chunks into the planner event stream (UI clients).
 3. **Binary artifacts (this RFC)**: bytes and large text stored out-of-band in an `ArtifactStore`, referenced by a compact `ArtifactRef` included in tool observations.
 
 This RFC is primarily about (3), while remaining compatible with (1) and (2).
@@ -1006,7 +1006,7 @@ summary_template = "Downloaded {content_type} '{filename}' ({size_human}). Artif
 ### 5.6 How Does Frontend Access Artifacts?
 
 **Options:**
-1. **Separate endpoint**: `/artifacts/{artifact_id}` (Playground, backed by `ArtifactStore`)
+1. **Separate endpoint**: `/artifacts/{artifact_id}` (served by your HTTP layer, backed by `ArtifactStore`)
 2. **Signed URLs**: Generate temporary download URLs (production stores)
 3. **Inline metadata only**: Include `ArtifactRef` in observations/metadata (never bytes)
 4. **SSE for refs/metadata**: Emit `ArtifactRef` notifications/chunks (never raw bytes)
@@ -1042,7 +1042,7 @@ summary_template = "Downloaded {content_type} '{filename}' ({size_human}). Artif
 
 ### Overview
 
-The implementation is split into 5 phases, each independently shippable. Phases 0-2 form the **core functionality**; Phases 3-4 add **polish and hardening**.
+The implementation is split into 4 phases, each independently shippable. Phases 0-2 form the **core functionality**; Phase 3 adds **polish and hardening**.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -1055,14 +1055,11 @@ The implementation is split into 5 phases, each independently shippable. Phases 
 │ Phase 2: MCP Resources (5-8 days)                                       │
 │ resources/list, resources/read, subscribe, cache, generated tools       │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ Phase 3: Playground Integration (3-5 days)                              │
-│ /artifacts endpoint, session scoping, UI downloads, resource browser    │
-├─────────────────────────────────────────────────────────────────────────┤
-│ Phase 4: Hardening & Documentation (3-5 days)                           │
+│ Phase 3: Hardening & Documentation (3-5 days)                           │
 │ Presets, negative tests, retention cleanup, docs                        │
 └─────────────────────────────────────────────────────────────────────────┘
 
-Total estimated: 17-27 days (3-5 weeks)
+Total estimated: 14-22 days (3-5 weeks)
 ```
 
 ---
@@ -1080,7 +1077,7 @@ Total estimated: 17-27 days (3-5 weeks)
    - `ArtifactRetentionConfig` model (ttl, size limits, cleanup strategy)
    - `NoOpArtifactStore` implementation (warnings + truncation fallback)
    - `discover_artifact_store()` function for duck-typing from StateStore
-   - `InMemoryArtifactStore` implementation (for Playground)
+   - `InMemoryArtifactStore` implementation (for local dev and tests)
 
 2. **Modify `penguiflow/planner/context.py`:**
    - Add `artifacts: ArtifactStore` property to `ToolContext` protocol
@@ -1090,14 +1087,14 @@ Total estimated: 17-27 days (3-5 weeks)
    - Implement hybrid discovery (explicit > discovered > NoOp)
    - Wire `ctx.artifacts` in `_PlannerContext`
 
-4. **Modify `penguiflow/cli/playground_state.py`:**
-   - Add `PlaygroundArtifactStore` with session-scoped in-memory storage
+4. **Modify `penguiflow/state/in_memory.py`:**
+   - Add `SessionArtifactStore` with session-scoped in-memory storage
 
 **Files to modify/add:**
 - `penguiflow/artifacts.py` (new)
 - `penguiflow/planner/context.py`
 - `penguiflow/planner/react.py`
-- `penguiflow/cli/playground_state.py`
+- `penguiflow/state/in_memory.py`
 
 **Acceptance criteria:**
 - `await ctx.artifacts.put_bytes(data)` returns `ArtifactRef` in any tool
@@ -1196,46 +1193,7 @@ Total estimated: 17-27 days (3-5 weeks)
 
 ---
 
-### Phase 3: Playground Integration
-
-**Goal:** Enable artifact downloads and resource browsing in Playground UI.
-
-**Scope:**
-
-1. **REST endpoints (`penguiflow/cli/playground.py`):**
-   - `GET /artifacts/{artifact_id}` → binary download
-   - `GET /artifacts/{artifact_id}/meta` → ArtifactRef metadata
-   - `GET /resources/{namespace}` → list resources for a ToolNode
-   - `GET /resources/{namespace}/{uri}` → read resource (with caching)
-   - Session-scoped access control
-
-2. **SSE events:**
-   - `artifact_stored` event with ArtifactRef
-   - `resource_updated` event for cache invalidation
-   - No binary data over SSE (refs only)
-
-3. **UI updates (`penguiflow/cli/playground_ui/`):**
-   - Render ArtifactRef as download button/link
-   - Resource browser panel (list + read on demand)
-   - Preview for images, PDF viewer for PDFs
-   - Size/type indicators
-
-**Files to modify/add:**
-- `penguiflow/cli/playground.py`
-- `penguiflow/cli/playground_sse.py`
-- `penguiflow/cli/playground_ui/` (various components)
-
-**Acceptance criteria:**
-- Artifacts downloadable via UI button
-- Resources browseable without leaving Playground
-- Session isolation enforced (can't access other sessions' artifacts)
-- Works with large files (streaming download)
-
-**Estimated effort:** 3-5 days
-
----
-
-### Phase 4: Hardening, Documentation, and Presets
+### Phase 3: Hardening, Documentation, and Presets
 
 **Goal:** Production-ready quality with comprehensive docs and tests.
 
@@ -1258,13 +1216,11 @@ Total estimated: 17-27 days (3-5 weeks)
    - TTL expiration hook
    - Size-based eviction (LRU)
    - Cleanup on session end
-   - Playground garbage collection
 
 4. **Documentation:**
    - `docs/artifacts-guide.md` — ArtifactStore protocol, implementations, configuration
    - `docs/mcp-resources-guide.md` — resources support, caching, generated tools
    - Update `docs/tools/statestore-guide.md` with artifact extension patterns
-   - API reference for new endpoints
 
 **Files to modify/add:**
 - `penguiflow/tools/presets/` (new directory)
@@ -1292,19 +1248,17 @@ Phase 0 ────────────────────────
          ▼
 Phase 1 ─────────────────────────────────────────────────────────▶
          │
-         ├──────────────────────┐
-         ▼                      ▼
-Phase 2 ──────────────▶   Phase 3 ──────────────▶
-         │                      │
-         └──────────┬───────────┘
-                    ▼
-              Phase 4 ──────────────▶
+         ▼
+Phase 2 ──────────────▶
+         │
+         ▼
+Phase 3 ──────────────▶
 ```
 
 - Phase 0 is prerequisite for all others
 - Phase 1 depends on Phase 0
-- Phases 2 and 3 can run in parallel after Phase 1
-- Phase 4 depends on Phases 2 and 3
+- Phase 2 depends on Phase 1
+- Phase 3 depends on Phase 2
 
 ---
 
@@ -1313,8 +1267,8 @@ Phase 2 ──────────────▶   Phase 3 ─────�
 | Risk | Mitigation |
 |------|------------|
 | MCP servers don't use typed content | Heuristic detection (L3) catches base64 regardless |
-| ArtifactStore adds latency | In-memory store for Playground; async writes |
-| Large files overwhelm memory | Streaming support in Phase 3; size limits |
+| ArtifactStore adds latency | In-memory store for local dev; async writes |
+| Large files overwhelm memory | Streaming downloads; size limits |
 | Breaking change for existing tools | All changes additive; NoOp fallback preserves behavior |
 
 ---
@@ -1323,7 +1277,7 @@ Phase 2 ──────────────▶   Phase 3 ─────�
 
 ### 7.1 Default Retention and Limits
 
-**Decision:** Use conservative defaults suitable for Playground development sessions.
+**Decision:** Use conservative defaults suitable for local development sessions.
 
 ```python
 class ArtifactRetentionConfig(BaseModel):
@@ -1346,7 +1300,7 @@ class ArtifactRetentionConfig(BaseModel):
 ```
 
 **Rationale:**
-- 1-hour TTL covers typical Playground dev sessions
+- 1-hour TTL covers typical dev sessions
 - 50MB per artifact handles most PDFs/images
 - 500MB session limit prevents runaway storage
 - LRU cleanup evicts least-used when limits hit

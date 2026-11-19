@@ -74,7 +74,7 @@ result = await foreground_planner.run(
 )
 ```
 
-This works for: dev playground, single-process production, low-volume agents. It doesn't work for: multi-worker deployments, anything needing task recovery after restart.
+This works for: local development, single-process production, low-volume agents. It doesn't work for: multi-worker deployments, anything needing task recovery after restart.
 
 ## Production patterns
 

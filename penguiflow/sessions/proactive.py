@@ -261,9 +261,9 @@ def _collect_ui_component_chunks(metadata: Any) -> list[dict[str, Any]]:
     When proactive reporting runs a planner loop, rich UI tools emit `artifact_chunk`
     events that end up stored under trajectory steps as `streams`.
 
-    The Playground session stream doesn't follow planner event streams for these
-    proactive runs, so we include the ui_component chunks in the proactive RESULT
-    payload for the frontend to render.
+    Session stream consumers don't follow planner event streams for these proactive
+    runs, so we include the ui_component chunks in the proactive RESULT payload for
+    the frontend to render.
     """
 
     if not isinstance(metadata, Mapping):

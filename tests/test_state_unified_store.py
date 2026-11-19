@@ -20,9 +20,7 @@ from penguiflow.state import (
     require_capabilities,
 )
 from penguiflow.state.adapters import (
-    list_planner_events_compat,
     list_updates_compat,
-    save_planner_event_compat,
     save_update_compat,
 )
 
@@ -267,12 +265,11 @@ async def test_inmemory_statestore_trajectory_isolation_and_traces() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inmemory_statestore_planner_events_and_alias() -> None:
+async def test_inmemory_statestore_planner_events() -> None:
     store = InMemoryStateStore()
     event = PlannerEvent(event_type="step_start", ts=time.time(), trajectory_step=0)
     await store.save_planner_event("trace", event)
     assert await store.list_planner_events("trace") == [event]
-    assert await store.get_events("trace") == [event]
 
 
 def test_require_capabilities_raises() -> None:
@@ -309,22 +306,3 @@ async def test_adapters_update_compat_uses_legacy_names() -> None:
 
     updates = await list_updates_compat(store, "s", since_id=update1.update_id)
     assert [u.update_id for u in updates] == [update2.update_id]
-
-
-class _LegacyPlaygroundStore:
-    def __init__(self) -> None:
-        self.events: dict[str, list[PlannerEvent]] = {}
-
-    async def save_event(self, trace_id: str, event: PlannerEvent) -> None:
-        self.events.setdefault(trace_id, []).append(event)
-
-    async def get_events(self, trace_id: str) -> list[PlannerEvent]:
-        return list(self.events.get(trace_id, []))
-
-
-@pytest.mark.asyncio
-async def test_adapters_planner_event_compat_uses_legacy_playground_names() -> None:
-    store = _LegacyPlaygroundStore()
-    event = PlannerEvent(event_type="finish", ts=time.time(), trajectory_step=1)
-    await save_planner_event_compat(store, "trace", event)
-    assert await list_planner_events_compat(store, "trace") == [event]

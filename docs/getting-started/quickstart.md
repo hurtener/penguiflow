@@ -8,7 +8,7 @@ Use it when you want:
 
 - a minimal typed flow you can run in minutes,
 - pointers to the next “enterprise” concepts (envelopes, streaming, cancellation),
-- the fastest path to a ReactPlanner project via the CLI.
+- the fastest path to a runnable ReactPlanner example.
 
 For deeper explanations, see **[Concepts](concepts.md)**.
 
@@ -83,11 +83,10 @@ See:
 
 ## 2) ReactPlanner (LLM-driven orchestration)
 
-If you’re starting from scratch, the fastest path is using the CLI template:
+If you’re starting from scratch, the fastest path is the minimal planner example (it uses a stubbed LLM, so no API key is needed):
 
 ```bash
-uv run penguiflow new my-agent --template react
-uv run penguiflow dev --project-root my-agent
+uv run python examples/react_minimal/main.py
 ```
 
 Planner docs:
@@ -129,4 +128,4 @@ The runtime emits structured `FlowEvent`. In production, attach middleware and/o
 ## Troubleshooting checklist
 
 - **`RuntimeError: PenguiFlow is not running`**: call `flow.run(...)` before emitting.
-- **CLI templates fail**: verify `uv` and the required extras are installed (`penguiflow-lite[planner]`).
+- **Planner examples fail to import**: verify `uv` and the required extras are installed (`penguiflow-lite[planner]`).

@@ -163,7 +163,7 @@ scope = ArtifactScope(
 ref = await store.put_bytes(data, scope=scope)
 ```
 
-**Important:** The `ArtifactStore` stores scope metadata but doesn't enforce access control. Enforcement happens at the HTTP layer (e.g., Playground `/artifacts` endpoint validates session_id from cookies).
+**Important:** The `ArtifactStore` stores scope metadata but doesn't enforce access control. Enforcement happens at your HTTP layer (e.g., an `/artifacts` endpoint in your app validates session_id from cookies).
 
 ---
 
@@ -367,7 +367,7 @@ Extract specific fields based on configuration (see [ToolNode Integration](#inte
 
 ### InMemoryArtifactStore
 
-For development, testing, and Playground environments:
+For development and testing environments:
 
 ```python
 from penguiflow.artifacts import InMemoryArtifactStore, ArtifactRetentionConfig

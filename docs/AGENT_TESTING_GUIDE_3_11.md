@@ -4,9 +4,6 @@
 > currently `3.11.0a1`) on a real agent before the Phase 6 parity gate.
 > Everything below is **opt-in** — an agent that changes nothing behaves
 > byte-identically to 3.10.
->
-> Reference deployment: `test_generation/youtube-download` has all of this
-> wired (env-driven) and a live-check harness (`phase5_live_check.py`).
 
 ## 0. Point the agent at the 3.11 library
 
@@ -14,7 +11,7 @@ In the agent's `pyproject.toml` (path dep, as the test agents already use):
 
 ```toml
 dependencies = [
-    "penguiflow-lite[planner,cli] @ file:///absolute/path/to/penguiflow-lite",
+    "penguiflow-lite[planner] @ file:///absolute/path/to/penguiflow-lite",
 ]
 ```
 

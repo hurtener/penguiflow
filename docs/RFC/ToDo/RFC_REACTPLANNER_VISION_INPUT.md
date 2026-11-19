@@ -234,20 +234,6 @@ Exit criteria:
 - Approved tool-produced images flow into subsequent LLM calls without manual wiring.
 - Policy/limits prevent runaway context.
 
-### Phase 5 (Follow-up): Playground UI upload-to-`images=` plumbing
-
-Goal: add a stable UX in Playground that uploads an image, stores it as an artifact, and passes a reference into `ReactPlanner.run(images=[...])`.
-
-Notes:
-
-- UI should show thumbnail previews (already supported by `ArtifactRegistry` for `image/*`).
-- UI should not inline base64 into planner calls; it should create/resolve artifacts via the existing artifacts endpoint/contract.
-
-Exit criteria:
-
-- Playground supports attaching one or more images to a planner run.
-- Uploaded images survive pause/resume when artifact store is configured.
-
 ## Risks and Mitigations
 
 - Risk: accidental logging of raw image bytes/base64.

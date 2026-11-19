@@ -24,7 +24,7 @@ The roadmap uses a table with columns:
 Theme | Description | Impact if not accomplished | Jan | Feb | Mar | Apr | May | Jun | Jul | Aug | Sep | Oct | Nov | Dec | Ongoing | Done
 ```
 
-38 items in the main roadmap (PF-001 to PF-027 in the Jira section) + 14 items in the Q&E pipeline (QE-001 to QE-014).
+37 items in the main roadmap (PF-001 to PF-027 in the Jira section) + 14 items in the Q&E pipeline (QE-001 to QE-014).
 
 ### Main roadmap — Done items (✅)
 - Migration to dynamic agents (Jan–Feb)
@@ -35,9 +35,8 @@ Theme | Description | Impact if not accomplished | Jan | Feb | Mar | Apr | May |
 - Conversation continuity across agents (Jan–Mar)
 - Unified State Store (Feb–Mar)
 - Control memory costs per agent (Feb–Apr)
-- Development Playground (Jan–Mar)
-- Fast-scaffolding with skills and documentation (Jan–Mar)
-- Playground: See agent thinking in real-time (Feb–Mar)
+- Skills and documentation (Jan–Mar)
+- See agent thinking in real-time (Feb–Mar)
 - Background tasks (Feb–May)
 - Concurrent execution control (Apr–May)
 - Task groups (Feb–May)

@@ -234,7 +234,7 @@ Important: `kind` values are an **open set**. StateStore backends MUST accept no
 
 4) **Planner/tool streaming events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
 
-> **Callout (important):** If you want to persist tool/LLM streaming events for the Playground UI or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
+> **Callout (important):** If you want to persist tool/LLM streaming events for a UI client or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
 
 #### Payload Structure
 
@@ -806,7 +806,7 @@ async def list_steering(
 
 **Location (integration):** `penguiflow/planner/react_runtime.py`
 
-> **Note:** The `ReactPlanner` now persists trajectories directly after `run()` / `resume()` returns (`PlannerFinish` or `PlannerPause`), as fire-and-forget background tasks. The playground wrapper no longer handles trajectory persistence.
+> **Note:** The `ReactPlanner` now persists trajectories directly after `run()` / `resume()` returns (`PlannerFinish` or `PlannerPause`), as fire-and-forget background tasks.
 
 **Contracts:**
 - `get_trajectory()` MUST return `None` when not found or when session_id does not match.
@@ -825,7 +825,7 @@ async def list_traces(self, session_id: str, limit: int = 50) -> list[str]: ...
 
 **Location (integration):** `penguiflow/planner/react_runtime.py`
 
-> **Note:** Planner events are now persisted by the `ReactPlanner` itself. Events are buffered during execution and flushed as a fire-and-forget background task in the `finally` block on every exit path (finish, pause, error, cancellation). The playground wrapper no longer handles event persistence.
+> **Note:** Planner events are now persisted by the `ReactPlanner` itself. Events are buffered during execution and flushed as a fire-and-forget background task in the `finally` block on every exit path (finish, pause, error, cancellation).
 
 **Contract:**
 - Planner events are append-only.
@@ -1177,7 +1177,7 @@ class ArtifactScope(BaseModel):
 
 ### ScopedArtifacts Facade
 
-Tool and agent developers interact with artifacts through `ctx.artifacts` — an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, playground, etc.) use `ctx._artifacts` — the raw `ArtifactStore` — which is the **plumbing** API.
+Tool and agent developers interact with artifacts through `ctx.artifacts` — an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, etc.) use `ctx._artifacts` — the raw `ArtifactStore` — which is the **plumbing** API.
 
 ```python
 class ScopedArtifacts:
@@ -1597,8 +1597,6 @@ PenguiFlow provides compatibility adapters to bridge legacy method names during 
 |------------|-------------------|---------|
 | `save_update()` | `save_task_update()` | Task service |
 | `list_updates()` | `list_task_updates()` | Task service |
-| `save_planner_event()` | `save_event(trace_id, event)` | Playground |
-| `list_planner_events()` | `get_events()` | Playground |
 
 ### Using Compatibility Functions
 

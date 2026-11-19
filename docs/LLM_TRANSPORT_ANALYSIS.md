@@ -556,7 +556,7 @@ to keep the native Databricks provider.
 - Deviation from Decision 5 noted: `FinalPayload.structured` is the
   **json-mode dict dump** of the validated instance, not the instance —
   `result.payload` is already a serialized dict on every delivery path
-  (sessions, A2A, AG-UI); carrying instances would break serialization.
+  (sessions, A2A); carrying instances would break serialization.
 - Streaming unchanged: answer streams first (prompt orders args keys);
   `structured` validates on the assembled result.
 - Live-verified on Databricks `gpt-5-5` through BOTH transports (identical
@@ -694,11 +694,11 @@ Implementation decisions (settled 2026-06-12, before code):
   answer channel vs 19 in the prompted control; zero superseded events
   across runs) — the earlier flush-only design (v1 of this decision) was
   rejected as a UX regression. Reasoning deltas render on the `thinking`
-  channel (prompted-mode parity; the playground UI has no `reasoning`
-  channel case). Three wiring fixes from the playground live check:
-  chunk `action_seq` must equal the runtime's `step_start` seq (the UI
-  answer gate silently drops mismatches — the off-by-one made SSE mode a
-  wall of text while AG-UI, which doesn't gate, streamed fine); emissions
+  channel (prompted-mode parity; a UI client may have no `reasoning`
+  channel case). Three wiring fixes from a UI live check:
+  chunk `action_seq` must equal the runtime's `step_start` seq (a UI
+  answer gate silently drops mismatches — the off-by-one made gated SSE
+  consumers show a wall of text while ungated ones streamed fine); emissions
   go through `_enqueue_llm_stream_chunk` (guardrail redaction parity with
   prompted mode); and reasoning uses channel `thinking`. SSE wire
   verified post-fix: 36/36 answer chunks matching the gate.

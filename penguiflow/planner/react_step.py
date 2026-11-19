@@ -89,7 +89,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
 
         # Native LLM adapter supports the same callback-based streaming contract
         # as the LiteLLM client (and the fallback wrappers that delegate to either).
-        # Keep the gating here so templates can enable/disable streaming consistently
+        # Keep the gating here so callers can enable/disable streaming consistently
         # via `stream_final_response`.
         stream_allowed = (
             planner._stream_final_response

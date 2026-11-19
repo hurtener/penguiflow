@@ -30,7 +30,7 @@ async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]
 
 ### 1.1b `_scope_matches` helper — `penguiflow/artifacts.py`
 
-Add a module-level helper function (outside any class, e.g. near `_generate_artifact_id`) reusable by InMemory and Playground stores:
+Add a module-level helper function (outside any class, e.g. near `_generate_artifact_id`) reusable by the InMemory and session artifact stores:
 
 ```python
 def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactScope) -> bool:
@@ -62,7 +62,7 @@ Add `async def list(...)` that returns `[]` always.
 
 Add `async def list(...)`. Calls `_expire_old_artifacts()`, then filters `_artifacts` values using `_scope_matches` on each stored artifact's `ref.scope`. Returns `[stored.ref for stored in self._artifacts.values() if _scope_matches(stored.ref.scope, scope)]` when scope is provided, or all refs when scope is None.
 
-### 1.4 PlaygroundArtifactStore — `penguiflow/state/in_memory.py`
+### 1.4 SessionArtifactStore — `penguiflow/state/in_memory.py`
 
 Add `async def list(...)`. If `scope` is not None and `scope.session_id` is set, query only that session's inner `InMemoryArtifactStore.list(scope=scope)`. Otherwise iterate all session stores and aggregate results.
 
@@ -97,7 +97,7 @@ Simple delegation: `return await self._store.list(scope=scope)` (no event needed
 
 This step is a pure mechanical rename. After this step, all existing code continues to work identically — `_artifacts` returns the same raw `ArtifactStore`/proxy it always did. Run `pytest`, `ruff check`, and `mypy` after this step to confirm nothing broke before moving on.
 
-> **ATOMICITY:** All sub-steps §2.1 through §2.10 must be applied together before running the checkpoint. Applying §2.1 alone (renaming the protocol property) without updating all implementations and call sites will break tests and type checks. Do NOT run `pytest`/`ruff`/`mypy` until every §2.x sub-step is complete.
+> **ATOMICITY:** All sub-steps §2.1 through §2.9 must be applied together before running the checkpoint. Applying §2.1 alone (renaming the protocol property) without updating all implementations and call sites will break tests and type checks. Do NOT run `pytest`/`ruff`/`mypy` until every §2.x sub-step is complete.
 
 ### 2.1 Update `ToolContext` Protocol — `penguiflow/planner/context.py`
 
@@ -187,15 +187,6 @@ The `_FakeCtx` class (line 166) satisfies the `ToolContext` protocol:
 
 - Rename `artifacts` property (line 185) → `_artifacts`
 - Change the return value from `None` to `NoOpArtifactStore()` for protocol correctness (`_artifacts` must return `ArtifactStore`, not `None`). Import `NoOpArtifactStore` from `penguiflow.artifacts`.
-
-### 2.10 Update `MinimalCtx` in `penguiflow/cli/playground.py`
-
-**CRITICAL:** `MinimalCtx` (line 2122) creates a minimal context passed to `tool_node.read_resource(uri, ctx)`. Inside `read_resource`, line 1615 of `node.py` accesses `ctx.artifacts` (which becomes `ctx._artifacts` after this rename). If `MinimalCtx` is not updated, playground resource reads will break at runtime.
-
-- Rename `self._artifacts` attribute (in `__init__`, line 2124) → `self._artifacts_store` (to avoid collision with new `_artifacts` property — same pattern as §2.3 and §2.5). Update the `__init__` assignment:
-  - **Before:** `self._artifacts = artifacts`
-  - **After:** `self._artifacts_store = artifacts`
-- Rename `artifacts` property (line 2127) → `_artifacts` (returns `self._artifacts_store`)
 
 **Checkpoint:** After completing Enhancement 2, run `uv run pytest tests/`, `uv run ruff check .`, and `uv run mypy`. All must pass with no new failures before proceeding to Enhancement 3.
 
@@ -480,49 +471,7 @@ Recommended: Build a `ScopedArtifacts` wrapping `NoOpArtifactStore` with all-Non
 
 - Add `artifacts` property. Same situation as §3.8 — currently returns `None` and is never called. Build a `ScopedArtifacts` wrapping `NoOpArtifactStore` with all-None scope fields.
 
-### 3.10 Update `MinimalCtx` in `penguiflow/cli/playground.py`
-
-- The `MinimalCtx` is only used to pass to `read_resource()`, which accesses `ctx._artifacts` (after Enhancement 2). It does NOT need a `ScopedArtifacts` facade because it is only used for internal framework calls, not exposed to tool developers.
-- **No `artifacts` property needed here** — only `_artifacts` (already renamed in §2.10) is accessed.
-- **mypy note:** `read_resource()` types its `ctx` parameter as `ToolContext` (line 1586 of `node.py`). `MinimalCtx` does NOT satisfy the full `ToolContext` protocol (it is missing `llm_context`, `tool_context`, `meta`, `artifacts`, `pause`, `emit_chunk`, `emit_artifact`). This is a **pre-existing** protocol violation — it already fails to satisfy `ToolContext` before this plan's changes, and mypy currently passes because the local class definition inside a function body receives lenient checking. This plan does NOT introduce a new mypy violation here; it preserves the existing behavior.
-
-### 3.11 Update Jinja templates for `penguiflow new`
-
-Two template files have `DummyToolContext` that should be updated for protocol compliance:
-
-**`penguiflow/cli/templates/conftest.py.jinja`** and **`penguiflow/templates/new/react/tests/conftest.py.jinja`**:
-
-Both templates have identical `DummyToolContext` dataclass. Neither currently has an `artifacts` property or `emit_artifact` method. Add simple `None`-returning stubs for `_artifacts`, `artifacts`, and `emit_artifact`. Generated projects may not have `penguiflow` importable at test time, so avoid importing `ScopedArtifacts` or `NoOpArtifactStore`.
-
-**Note:** The `emit_artifact` stub is a **pre-existing gap** — the templates were already missing this method from the `ToolContext` protocol before this plan. It is bundled here for convenience since we are already touching these templates to add `_artifacts` and `artifacts`:
-
-```python
-# Add to DummyToolContext (after the existing fields/methods):
-
-@property
-def _artifacts(self) -> Any:
-    """Raw artifact store stub — not used in generated project tests."""
-    return None
-
-@property
-def artifacts(self) -> Any:
-    """Scoped artifacts stub — not used in generated project tests."""
-    return None
-
-async def emit_artifact(
-    self,
-    stream_id: str,
-    chunk: Any,
-    *,
-    done: bool = False,
-    artifact_type: str | None = None,
-    meta: dict[str, Any] | None = None,
-) -> None:
-    """Artifact streaming stub — not used in generated project tests."""
-    del stream_id, chunk, done, artifact_type, meta
-```
-
-### 3.12 Update exports
+### 3.10 Update exports
 
 - `penguiflow/artifacts.py` `__all__` — add `"ScopedArtifacts"`
 - `penguiflow/__init__.py` — artifacts are NOT currently re-exported there, so no change needed
@@ -576,7 +525,7 @@ All new tests go in the existing `tests/test_artifacts.py` file alongside the cu
 |---|---|
 | `test_list_always_empty` | `NoOpArtifactStore().list()` returns `[]` regardless of scope. |
 
-**Class: `TestPlaygroundArtifactStoreList`** (in `tests/test_artifacts.py` alongside other artifact store tests)
+**Class: `TestSessionArtifactStoreList`** (in `tests/test_artifacts.py` alongside other artifact store tests)
 
 | Test | Description |
 |---|---|
@@ -679,20 +628,17 @@ All new tests go in the existing `tests/test_artifacts.py` file alongside the cu
 | File | Enhancement | Changes |
 |---|---|---|
 | `penguiflow/artifacts.py` | 1, 3 | Add `list` to protocol; `_scope_matches` helper; impl in NoOp + InMemory; `ScopedArtifacts` class; update `__all__` |
-| `penguiflow/state/in_memory.py` | 1 | Add `list` to `PlaygroundArtifactStore` |
+| `penguiflow/state/in_memory.py` | 1 | Add `list` to `SessionArtifactStore` |
 | `penguiflow/planner/artifact_handling.py` | 1 | Add `list` delegation to `_EventEmittingArtifactStoreProxy` |
 | `penguiflow/planner/context.py` | 2, 3 | Rename `artifacts` → `_artifacts`; later add new `artifacts` property returning `ScopedArtifacts`; add imports |
 | `penguiflow/planner/planner_context.py` | 2, 3 | Rename `artifacts` → `_artifacts`; update `kv` property (line 102) `self.artifacts` → `self._artifact_proxy`; later add `_scoped_artifacts` slot + facade + new `artifacts` property |
 | `penguiflow/sessions/tool_jobs.py` | 2, 3 | Rename `artifacts` → `_artifacts` + attribute rename (`self._artifacts` → `self._artifacts_store`); later add `ScopedArtifacts` facade + new `artifacts` property; 1 call-site migration (line 275) |
 | `penguiflow/tools/node.py` | 2 | 9 sites: `ctx.artifacts` → `ctx._artifacts` |
-| `penguiflow/cli/playground.py` | 2 | Rename `artifacts` → `_artifacts` + attribute rename (`self._artifacts` → `self._artifacts_store`) in `MinimalCtx`. **Critical:** without this, playground resource reads break at runtime. |
 | `tests/test_rich_output_nodes.py` | 2, 3 | Rename attribute + property in `DummyContext`; `ctx.artifacts.put_text` → `ctx._artifacts.put_text`; later add `ScopedArtifacts` facade |
 | `tests/test_toolnode_phase1.py` | 2, 3 | Rename attribute (`self._artifacts` → `self._artifacts_store`) + property (`artifacts` → `_artifacts`) in `DummyCtx`; later add `artifacts` property returning `ScopedArtifacts` |
 | `tests/test_toolnode_phase2.py` | 2, 3 | Rename attribute (`self._artifacts` → `self._artifacts_store`) + property (`artifacts` → `_artifacts`) in `DummyCtx`; later add `artifacts` property returning `ScopedArtifacts` |
 | `tests/test_task_tools.py` | 2, 3 | Rename `artifacts` → `_artifacts` in `DummyContext` (line 27); later add `artifacts` property returning `ScopedArtifacts` |
 | `tests/a2a/test_a2a_planner_tools.py` | 2, 3 | Rename `artifacts` → `_artifacts` in `_FakeCtx` (line 185), change return from `None` to `NoOpArtifactStore()`; later add `artifacts` property returning `ScopedArtifacts` |
-| `penguiflow/cli/templates/conftest.py.jinja` | 3 | Add `_artifacts` and `artifacts` `None`-stub properties to `DummyToolContext` |
-| `penguiflow/templates/new/react/tests/conftest.py.jinja` | 3 | Add `_artifacts` and `artifacts` `None`-stub properties to `DummyToolContext` |
 | `docs/tools/artifacts-guide.md` | 4 | Update tool-developer code example (line 274) to `ctx.artifacts.upload()`. Leave internal pipeline table row (line 829) unchanged. |
 | `docs/tools/artifacts-and-resources.md` | 4 | **No changes needed** — lines 70-71 describe internal pipeline, not tool-developer API. |
 | `docs/planner/tool-design.md` | 4 | **No changes needed** — line 80 `ctx.artifacts` reference is correct as-is (optionally expand to `ctx.artifacts.upload()` for clarity). |

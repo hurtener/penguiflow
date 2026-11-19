@@ -125,7 +125,7 @@ If you persist planner events, you can replay/debug from stored telemetry.
 
 ## Runnable example: development store
 
-For local development and the playground, the repo includes an in-memory store:
+For local development and tests, the repo includes an in-memory store:
 
 ```python
 from penguiflow.state import InMemoryStateStore

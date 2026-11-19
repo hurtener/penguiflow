@@ -48,7 +48,6 @@ Docs are built and deployed from `main` via `.github/workflows/docs.yml`.
 3. Run the CI-equivalent checks locally:
 
 ```bash
-./scripts/validate_frontend.sh
 uv run ruff check .
 uv run mypy
 uv run pytest --cov=penguiflow --cov-report=term --cov-report=xml --cov-fail-under=84.5
@@ -67,7 +66,7 @@ uv build
 ## Failure modes & recovery
 
 - **Publish job ran but PyPI has old version**: confirm the version bump was merged to `main` and that the publish job succeeded for that commit.
-- **Publish job failed**: check `.github/workflows/ci.yml` logs; most failures are packaging issues (missing files, frontend validation).
+- **Publish job failed**: check `.github/workflows/ci.yml` logs; most failures are packaging issues (missing files).
 - **Version mismatch**: CI won’t catch this automatically unless tests assert it; verify both version sources match before merging.
 - **Docs deploy failed**: run `mkdocs build --strict` locally; check `.github/workflows/docs.yml` logs.
 
@@ -89,4 +88,4 @@ uv build
 - Confirm the commit on `main` contains:
   - version bump in both places,
   - updated changelog,
-  - passing CI (including frontend + docs).
+  - passing CI (including docs).

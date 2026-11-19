@@ -92,7 +92,6 @@ You could pause directly in any tool. The interactive HITL tools have advantages
 - **Structured payload schema.** The frontend can render any `ui_form` / `ui_confirm` / `ui_select_option` consistently.
 - **Validation.** Form schemas are JSON-validated server-side.
 - **Tool-call lifecycle events.** Tool-call telemetry tracks the pause as a tool invocation, not a freeform raise.
-- **AG-UI compatibility.** AG-UI maps these to standard interactive events.
 
 Use `ctx.pause(...)` directly for ad-hoc / non-standard pauses. Use the interactive tools for any UI gating.
 

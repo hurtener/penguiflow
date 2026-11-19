@@ -1159,7 +1159,7 @@ Provider implementations map SDK exceptions → `LLMError` subclasses (including
 
 PenguiFlow already depends on a JSON-only client protocol in planner code. The native layer must provide a compatibility adapter that preserves:
 
-- **Inputs**: OpenAI-style `list[{"role": ..., "content": ...}]` messages (existing templates)
+- **Inputs**: OpenAI-style `list[{"role": ..., "content": ...}]` messages (existing callers)
 - **Streaming**: a callback that receives incremental assistant text (best-effort across providers)
 - **Cancellation**: cancel propagation from PenguiFlow runtime into provider calls
 - **Outputs**: parsed Pydantic model + accumulated cost across attempts
@@ -2282,7 +2282,7 @@ class LLMClient:
         response_model: type[BaseModel],
         **kwargs: Any,
     ) -> tuple[BaseModel, float]:
-        """Convenience wrapper for OpenAI-style dict messages (for templates/back-compat)."""
+        """Convenience wrapper for OpenAI-style dict messages (for back-compat)."""
         typed = adapt_openai_dict_messages(messages)
         return await self.call(typed, response_model, **kwargs)
 
@@ -2608,10 +2608,9 @@ def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 |------|-------------|-------|
 | **5.1** | Implement `JSONLLMClient` protocol compatibility | `protocol.py` |
 | **5.2** | Update `_LiteLLMJSONClient` → `LLMClient` adapter | `planner/llm.py` |
-| **5.3** | Update templates | `templates/*.jinja` |
-| **5.4** | Update tests | `tests/test_llm_*.py` |
-| **5.5** | Remove LiteLLM dependency | `pyproject.toml` |
-| **5.6** | Migration documentation | `docs/MIGRATION_LLM.md` |
+| **5.3** | Update tests | `tests/test_llm_*.py` |
+| **5.4** | Remove LiteLLM dependency | `pyproject.toml` |
+| **5.5** | Migration documentation | `docs/MIGRATION_LLM.md` |
 
 ### Phase 6: Additional Providers (Future)
 
@@ -2754,13 +2753,9 @@ client = create_client(
     temperature=0.0,
 )
 
-# Calls from templates/back-compat can keep OpenAI-style dict messages:
+# Back-compat callers can keep OpenAI-style dict messages:
 # result, cost = await client.call_dict([...], ResponseModel)
 ```
-
-### For Templates
-
-Templates using `config.py.jinja` will be updated to import from `penguiflow.llm` instead of `penguiflow.planner.llm`.
 
 ## Alternatives Considered
 

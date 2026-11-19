@@ -849,7 +849,6 @@ without yielding to the user.
 
 ### Phase 4: Configuration & Polish
 - Add config fields to `BackgroundTasksConfig`
-- Update templates
 - Add comprehensive tests
 - Documentation
 - Add observability hooks (structured events/telemetry)

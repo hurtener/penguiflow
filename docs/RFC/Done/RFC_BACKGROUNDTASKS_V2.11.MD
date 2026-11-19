@@ -7,7 +7,6 @@ Background Tasks v2.11 - Design Document
   | Proactive generator   | Full planner loop         | Agent needs full toolbox access                |
   | Group task reporting  | Combined single message   | Grouped = used together                        |
   | Cleanup timing        | After agent uses results  | APPEND is default; must be used before cleanup |
-  | AG-UI first-class     | Deferred                  | /session/stream sufficient for now             |
   | Storage location      | Trajectory (new field)    | Reuses compression, ephemeral by design        |
   | Proactive default     | Explicit opt-in required  | Backward compatibility with tests              |
   | LLM context handling  | Extract + remove pattern  | Prevents double-rendering, consistent design   |
@@ -146,7 +145,7 @@ Background Tasks v2.11 - Design Document
       - `max_hops` (default 2)
     - Extend `_enqueue_proactive_report(...)` to include the memory snapshot and tool_context snapshot if/when
       the request model is extended (Phase 2). For Phase 1, keep current request shape and pass only what exists.
-  - `penguiflow/cli/playground.py` (or orchestrator template wiring)
+  - `penguiflow/sessions/proactive.py` (or orchestrator wiring)
     - Add a `setup_proactive_reporting(...)` helper to opt-in to default generator.
     - Ensure this is only called when background tasks are enabled AND proactive reporting is enabled.
 
@@ -452,7 +451,7 @@ Background Tasks v2.11 - Design Document
   Proactive hop guard:
   - Each proactive run decrements `_proactive_hops_remaining`
   - When it reaches 0, disable background task spawning and proactive reporting
-  - Default 2, configurable via template/spec generation
+  - Default 2, configurable via `configure_proactive_reporting(max_hops=...)`
 
 
   def _format_single_result(request: ProactiveReportRequest) -> str:
@@ -500,7 +499,7 @@ Background Tasks v2.11 - Design Document
           # ... existing ...
 
           # NOTE: Keep disabled by default for backward compatibility with tests.
-          # Consumers (playground, orchestrators) must explicitly call
+          # Consumers (HTTP layers, orchestrators) must explicitly call
           # configure_proactive_reporting(enabled=True) to enable.
           self._proactive_config = {
               "enabled": False,  # ← UNCHANGED - explicit opt-in required
@@ -633,7 +632,7 @@ Background Tasks v2.11 - Design Document
 
   Consumers must explicitly enable proactive reporting. This is NOT automatic.
 
-  File: penguiflow/cli/playground.py (or orchestrator setup)
+  File: penguiflow/sessions/proactive.py (or orchestrator setup)
 
   async def setup_proactive_reporting(
       session: StreamingSession,
@@ -648,11 +647,8 @@ Background Tasks v2.11 - Design Document
           max_hops=2,  # Safety net against recursive proactive loops
       )
 
-  # Called during playground/orchestrator initialization:
+  # Called during host/orchestrator initialization:
   await setup_proactive_reporting(session, planner_factory)
-
-  NOTE: Expose max_hops in template/spec generation so downstream apps can tune
-  proactive recursion limits (default: 2).
 
   ---
   Component 8: LLM Context Handling
@@ -774,9 +770,6 @@ Background Tasks v2.11 - Design Document
   | sessions/task_tools.py    | Add acknowledge_background tool                                       |
   | planner/llm.py            | Extract+remove background_results from llm_context                    |
   | planner/prompts.py        | Add render_background_results() helper (optional)                     |
-  | cli/playground.py         | Call setup_proactive_reporting() during initialization                |
-  | cli/spec.py               | Add proactive max_hops config surfaced in templates/specs             |
-  | cli/generate.py           | Wire max_hops into generated configs/templates                         |
   | tests/test_context_merge.py | Update assertions to check trajectory.background_results            |
   | tests/test_task_service.py  | Update assertions to check trajectory.background_results            |
 

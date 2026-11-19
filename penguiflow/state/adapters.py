@@ -76,15 +76,6 @@ async def save_planner_event_compat(store: object, trace_id: str, event: Planner
     if method is not None:
         await method(trace_id, event)
         return
-
-    # Legacy PlaygroundStateStore interface used save_event(trace_id, event)
-    legacy = getattr(store, "save_event", None)
-    if legacy is not None:
-        try:
-            await legacy(trace_id, event)
-            return
-        except TypeError as exc:
-            raise TypeError("StateStore missing save_planner_event") from exc
     raise TypeError("StateStore missing save_planner_event")
 
 
@@ -92,13 +83,7 @@ async def list_planner_events_compat(store: object, trace_id: str) -> list[Plann
     method = getattr(store, "list_planner_events", None)
     if method is not None:
         return list(await method(trace_id))
-
-    # Legacy PlaygroundStateStore interface used get_events(trace_id)
-    legacy = getattr(store, "get_events", None)
-    if legacy is not None:
-        return list(await legacy(trace_id))
-
-    raise TypeError("StateStore missing list_planner_events/get_events")
+    raise TypeError("StateStore missing list_planner_events")
 
 
 async def maybe_save_remote_binding(store: StateStore | None, binding: Any) -> None:

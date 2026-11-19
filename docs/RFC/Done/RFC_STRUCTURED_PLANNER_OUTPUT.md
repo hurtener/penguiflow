@@ -23,7 +23,7 @@ This RFC proposes a standardized output structure for the ReactPlanner that:
 
 1. **Unpredictable payload structure**: The planner returns `action.args` or `last_observation` as-is, with no guaranteed schema. Downstream code must guess which keys contain the answer (`answer`, `text`, `result`, etc.).
 
-2. **Type mismatch**: Generated orchestrators expect `FinalAnswer` Pydantic objects, but the planner serializes everything to dicts via `model_dump(mode="json")`.
+2. **Type mismatch**: Orchestrators expect `FinalAnswer` Pydantic objects, but the planner serializes everything to dicts via `model_dump(mode="json")`.
 
 3. **Context pollution**: Heavy data (charts, CSVs, images) is passed to the LLM, wasting tokens, increasing latency, and risking hallucination.
 
@@ -584,18 +584,9 @@ if (confidence !== null) {
 ### Phase 4: Streaming Artifacts ✅ COMPLETED
 - [x] Add `emit_artifact()` to `ToolContext`
 - [x] Add `artifact_chunk` event type to `PlannerEvent`
-- [x] Update SSE endpoints in playground
-- [x] Update Svelte UI for artifact streaming
 
-### Phase 5: Template Updates ✅ COMPLETED
-- [x] Update `penguiflow/templates/new/*/orchestrator.py.jinja`
-- [x] Update `penguiflow/cli/templates/` for generate command
-- [x] Remove `FinalAnswer` checks from orchestrators
-- [x] Update tool templates with artifact examples
-
-### Phase 6: Documentation & Testing
+### Phase 5: Documentation & Testing
 - [x] Update `REACT_PLANNER_INTEGRATION_GUIDE.md`
-- [x] Update `TEMPLATING_QUICKGUIDE.md`
 - [ ] Add artifact examples to `examples/`
 - [ ] Add tests for artifact redaction
 - [ ] Add tests for source collection
@@ -616,7 +607,7 @@ if (confidence !== null) {
 
 In v2.6.x, add deprecation warnings:
 ```python
-# In orchestrator templates
+# In orchestrator code
 import warnings
 if isinstance(payload, dict) and "raw_answer" not in payload:
     warnings.warn(
