@@ -19,7 +19,7 @@ from .native_policy import StructuredMode, next_mode, resolve_policy
 from .pricing import calculate_cost, get_pricing
 from .profiles import get_profile
 from .providers import create_provider
-from .tracing import LLMCallSpan, LLMTraceSink, resolve_trace_sink_from_env
+from .tracing import LLMCallSpan, LLMTraceSink, MlflowLLMTraceSink, resolve_trace_sink_from_env, trace_llm_call
 from .types import (
     AudioPart,
     ContentPart,
@@ -402,7 +402,9 @@ class NativeLLMAdapter:
             stream=stream,
             response_format_kind=_requested_mode(response_format),
         )
-        with self._trace_sink.span(call):
+        if isinstance(self._trace_sink, MlflowLLMTraceSink):
+            await self._trace_sink.prepare()
+        async with trace_llm_call(self._trace_sink, call):
             content, cost = await self._complete_inner(
                 messages=messages,
                 response_format=response_format,
@@ -739,7 +741,9 @@ class NativeLLMAdapter:
             stream=stream,
             response_format_kind="native_tools",
         )
-        with self._trace_sink.span(call):
+        if isinstance(self._trace_sink, MlflowLLMTraceSink):
+            await self._trace_sink.prepare()
+        async with trace_llm_call(self._trace_sink, call):
             result = await self._complete_with_tools_inner(
                 messages=messages,
                 tools=tools,

@@ -146,7 +146,9 @@ def test_extract_user_friendly_error_truncates_long_messages():
 def test_create_graceful_failure_action():
     """Test creating graceful failure action."""
     exc = Exception("Test error message")
-    action = _create_graceful_failure_action(exc, LLMErrorType.BAD_REQUEST_OTHER)
+    trajectory = Trajectory(query="test")
+    action = _create_graceful_failure_action(exc, LLMErrorType.BAD_REQUEST_OTHER, trajectory)
+    assert trajectory.metadata["execution_outcome"] == "error"
 
     assert action.next_node == "final_response"  # finish action
     assert "raw_answer" in action.args
@@ -159,7 +161,9 @@ def test_create_graceful_failure_action():
 def test_create_graceful_failure_action_context_length():
     """Test creating graceful failure action for context length error."""
     exc = Exception("Context too long")
-    action = _create_graceful_failure_action(exc, LLMErrorType.CONTEXT_LENGTH_EXCEEDED)
+    trajectory = Trajectory(query="test")
+    action = _create_graceful_failure_action(exc, LLMErrorType.CONTEXT_LENGTH_EXCEEDED, trajectory)
+    assert trajectory.metadata["execution_outcome"] == "error"
 
     assert action.next_node == "final_response"
     assert action.args["_recovery"]["error_type"] == "context_length_exceeded"
@@ -404,6 +408,7 @@ async def test_step_with_recovery_bad_request_graceful_failure():
 
     assert result.next_node == "final_response"  # finish action
     assert "sorry" in result.args["raw_answer"].lower()
+    assert trajectory.metadata["execution_outcome"] == "error"
 
 
 @pytest.mark.asyncio

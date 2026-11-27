@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ValidationError
@@ -15,6 +16,7 @@ from ..catalog import NodeSpec, build_catalog
 from ..llm.types import ContentPart, ReasoningDisplay
 from ..node import Node
 from ..registry import ModelRegistry
+from ..telemetry import MlflowTelemetry
 from . import prompts
 from .artifact_handling import (  # noqa: F401
     _ArtifactCollector,
@@ -317,6 +319,7 @@ class ReactPlanner:
     _cost_tracker: _CostTracker
     _deadline_s: float | None
     _event_callback: PlannerEventCallback | None
+    _mlflow_telemetry: MlflowTelemetry | None
     _event_buffer: list[PlannerEvent]
     _hop_budget: int | None
     _llm_context_hooks: list[LLMContextHook]
@@ -754,21 +757,31 @@ class ReactPlanner:
 
         # Fallback: serialize when no session_id is provided to avoid corrupting shared mutable state.
         async with self._fallback_run_lock:
-            previous = getattr(self, "_steering", None)
-            self._steering = steering
-            try:
-                return await _run_impl(
-                    self,
-                    query,
-                    input_parts=input_parts,
-                    llm_context=llm_context,
-                    context_meta=context_meta,
-                    tool_context=tool_context,
-                    memory_key=memory_key,
-                    tool_visibility=tool_visibility,
-                )
-            finally:
-                self._steering = previous
+            if self._mlflow_telemetry is not None:
+                await self._mlflow_telemetry.prepare()
+            async with (
+                self._mlflow_telemetry.atrace_agent_run(operation="run", trace_id=(tool_context or {}).get("trace_id"))
+                if self._mlflow_telemetry is not None
+                else nullcontext()
+            ) as trace_run:
+                previous = getattr(self, "_steering", None)
+                self._steering = steering
+                try:
+                    result = await _run_impl(
+                        self,
+                        query,
+                        input_parts=input_parts,
+                        llm_context=llm_context,
+                        context_meta=context_meta,
+                        tool_context=tool_context,
+                        memory_key=memory_key,
+                        tool_visibility=tool_visibility,
+                    )
+                    if trace_run is not None:
+                        trace_run.result = result
+                    return result
+                finally:
+                    self._steering = previous
 
     async def resume(
         self,
@@ -823,19 +836,31 @@ class ReactPlanner:
                 session_planner._event_callback = previous_callback
 
         async with self._fallback_run_lock:
-            previous = getattr(self, "_steering", None)
-            self._steering = steering
-            try:
-                return await _resume_impl(
-                    self,
-                    token,
-                    user_input=user_input,
-                    tool_context=tool_context,
-                    memory_key=memory_key,
-                    tool_visibility=tool_visibility,
+            if self._mlflow_telemetry is not None:
+                await self._mlflow_telemetry.prepare()
+            async with (
+                self._mlflow_telemetry.atrace_agent_run(
+                    operation="resume", trace_id=(tool_context or {}).get("trace_id")
                 )
-            finally:
-                self._steering = previous
+                if self._mlflow_telemetry is not None
+                else nullcontext()
+            ) as trace_run:
+                previous = getattr(self, "_steering", None)
+                self._steering = steering
+                try:
+                    result = await _resume_impl(
+                        self,
+                        token,
+                        user_input=user_input,
+                        tool_context=tool_context,
+                        memory_key=memory_key,
+                        tool_visibility=tool_visibility,
+                    )
+                    if trace_run is not None:
+                        trace_run.result = result
+                    return result
+                finally:
+                    self._steering = previous
 
     def _resolve_memory_key(
         self,

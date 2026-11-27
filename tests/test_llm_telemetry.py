@@ -261,10 +261,13 @@ class TestGetTelemetryHooksInitialization:
 class TestMlflowCallback:
     """Tests for create_mlflow_callback."""
 
-    def test_mlflow_callback_without_mlflow(self) -> None:
+    def test_mlflow_callback_without_mlflow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test mlflow callback gracefully handles missing mlflow."""
+        import sys
+
         from penguiflow.llm.telemetry import create_mlflow_callback
 
+        monkeypatch.setitem(sys.modules, "mlflow", None)
         callback = create_mlflow_callback()
 
         # Should not raise even without mlflow

@@ -128,11 +128,14 @@ class TestLiteLLMJSONClient:
 
     @pytest.mark.asyncio
     async def test_complete_success(self, mock_litellm: MagicMock) -> None:
+        mock_litellm.acompletion.return_value["usage"].update(prompt_tokens=8, completion_tokens=3)
+        sink = MagicMock()
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "gpt-4o",
                 temperature=0.0,
                 json_schema_mode=False,
+                trace_sink=sink,
             )
             content, cost = await client.complete(
                 messages=[{"role": "user", "content": "test"}],
@@ -140,6 +143,8 @@ class TestLiteLLMJSONClient:
             assert '{"thought"' in content
             assert cost == 0.001
             mock_litellm.acompletion.assert_called_once()
+        call = sink.span.call_args.args[0]
+        assert (call.input_tokens, call.output_tokens, call.cost_usd) == (8, 3, cost)
 
     @pytest.mark.asyncio
     async def test_complete_with_json_schema_mode(self, mock_litellm: MagicMock) -> None:
@@ -411,15 +416,18 @@ class TestLiteLLMJSONClient:
     @pytest.mark.asyncio
     async def test_complete_raises_non_retryable_error(self, mock_litellm: MagicMock) -> None:
         mock_litellm.acompletion = AsyncMock(side_effect=ValueError("Invalid request"))
+        sink = MagicMock()
 
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
                 "gpt-4o",
                 temperature=0.0,
                 json_schema_mode=False,
+                trace_sink=sink,
             )
             with pytest.raises(ValueError, match="Invalid request"):
                 await client.complete(messages=[{"role": "user", "content": "test"}])
+        sink.span.return_value.__exit__.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_streaming_with_usage_and_chunks(self, mock_litellm: MagicMock) -> None:
@@ -465,6 +473,8 @@ class TestLiteLLMJSONClient:
         def on_chunk(text: str, done: bool) -> None:
             chunks.append((text, done))
 
+        sink = MagicMock()
+
         patched_modules = {
             "litellm": mock_litellm,
             "litellm.types": mock_types,
@@ -476,6 +486,7 @@ class TestLiteLLMJSONClient:
                 temperature=0.0,
                 json_schema_mode=False,
                 streaming_enabled=True,
+                trace_sink=sink,
             )
             content, cost = await client.complete(
                 messages=[{"role": "user", "content": "hello"}],
@@ -490,6 +501,8 @@ class TestLiteLLMJSONClient:
             ("", True),
         ]
         assert cost == pytest.approx(0.123)
+        call = sink.span.call_args.args[0]
+        assert (call.input_tokens, call.output_tokens) == (10, 5)
 
     @pytest.mark.asyncio
     async def test_non_streaming_emits_reasoning_content_when_available(self, mock_litellm: MagicMock) -> None:
