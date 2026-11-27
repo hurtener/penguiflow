@@ -1522,6 +1522,7 @@ async def _handle_finish_action(
                 critique,
                 on_stream_chunk=_emit_revision_chunk if planner._stream_final_response else None,
             )
+            trajectory.metadata.pop("execution_outcome", None)
             candidate_answer = revision_action.args or revision_action.model_dump()
             trajectory.steps.append(
                 TrajectoryStep(
@@ -1669,6 +1670,7 @@ async def run_loop(
                                 )
                             )
 
+                trajectory.metadata.pop("execution_outcome", None)
                 if selected_action is None:
                     action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
                 else:

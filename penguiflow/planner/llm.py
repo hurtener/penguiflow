@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ..llm.errors import LLMRateLimitError
 from ..llm.profiles import get_profile
-from ..llm.tracing import LLMCallSpan, LLMTraceSink, resolve_trace_sink_from_env
+from ..llm.tracing import LLMCallSpan, LLMTraceSink, MlflowLLMTraceSink, resolve_trace_sink_from_env, trace_llm_call
 from ..llm.types import TextPart
 from . import prompts
 from .models import (
@@ -618,7 +618,9 @@ class _LiteLLMJSONClient:
             stream=stream,
             response_format_kind=(response_format or {}).get("type"),
         )
-        with self._trace_sink.span(call):
+        if isinstance(self._trace_sink, MlflowLLMTraceSink):
+            await self._trace_sink.prepare()
+        async with trace_llm_call(self._trace_sink, call):
             content, cost = await self._complete_inner(
                 messages=messages,
                 response_format=response_format,
@@ -954,11 +956,12 @@ class _LiteLLMJSONClient:
                         except Exception:
                             logger.exception("llm_reasoning_chunk_callback_error")
 
-                    cost = (
-                        float(response.get("_hidden_params", {}).get("response_cost", 0.0) or 0.0)
+                    hidden_params = (
+                        response.get("_hidden_params", {})
                         if isinstance(response, Mapping)
-                        else 0.0
+                        else getattr(response, "_hidden_params", {})
                     )
+                    cost = float(hidden_params.get("response_cost", 0.0) or 0.0)
                     logger.debug(
                         "llm_call_success",
                         extra={

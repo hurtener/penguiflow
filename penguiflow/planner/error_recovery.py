@@ -153,7 +153,7 @@ async def step_with_recovery(
                         reason="max_compress_retries_exceeded",
                     )
                     # Fall through to graceful failure
-                    return _create_graceful_failure_action(exc, error_type)
+                    return _create_graceful_failure_action(exc, error_type, trajectory)
 
                 # Compress trajectory and retry
                 compress_attempts += 1
@@ -184,7 +184,7 @@ async def step_with_recovery(
                         reason="compression_failed",
                         compression_error=str(compress_exc)[:200],
                     )
-                    return _create_graceful_failure_action(exc, error_type)
+                    return _create_graceful_failure_action(exc, error_type, trajectory)
 
                 if result.compressed:
                     _emit_recovery_event(
@@ -211,7 +211,7 @@ async def step_with_recovery(
                     "compression_ineffective",
                     extra={"steps_compressed": 0},
                 )
-                return _create_graceful_failure_action(exc, error_type)
+                return _create_graceful_failure_action(exc, error_type, trajectory)
 
             elif error_type == LLMErrorType.BAD_REQUEST_OTHER:
                 logger.info(
@@ -225,7 +225,7 @@ async def step_with_recovery(
                     error_type=error_type.value,
                     strategy="graceful_failure",
                 )
-                return _create_graceful_failure_action(exc, error_type)
+                return _create_graceful_failure_action(exc, error_type, trajectory)
 
             elif error_type in (
                 LLMErrorType.RATE_LIMIT,
@@ -256,16 +256,19 @@ async def step_with_recovery(
 def _create_graceful_failure_action(
     exc: Exception,
     error_type: LLMErrorType,
+    trajectory: Trajectory,
 ) -> PlannerAction:
     """Create a graceful failure action that lets the LLM apologize.
 
     Args:
         exc: The original exception.
         error_type: The classified error type.
+        trajectory: Execution state recording the terminal failure.
 
     Returns:
         A PlannerAction with finish signal and error context.
     """
+    trajectory.metadata["execution_outcome"] = "error"
     user_msg = _extract_user_friendly_error(exc)
 
     thought = (

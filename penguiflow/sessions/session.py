@@ -18,6 +18,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel
 
+from penguiflow._tracing_context import detached_trace_context
 from penguiflow.planner.models import BackgroundTasksConfig
 from penguiflow.planner.trajectory import BackgroundTaskResult, extract_background_results
 from penguiflow.state import StateStore
@@ -956,6 +957,7 @@ class StreamingSession:
                 group_id=group_id,
             ),
             name=f"task:{task_id}",
+            context=detached_trace_context(),
         )
         self._task_handles[task_id] = handle
         return task_id

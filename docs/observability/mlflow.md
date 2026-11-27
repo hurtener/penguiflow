@@ -15,6 +15,8 @@ uv add "penguiflow[mlflow]"
 If your project already declares other PenguiFlow extras, add `mlflow` to that
 list, for example `penguiflow[planner,mlflow]`.
 
+This integration requires MLflow **3.18.0 or newer**.
+
 Configure the tracking destination before starting your agent:
 
 ```bash
@@ -56,13 +58,36 @@ also nest under an existing MLflow trace in your application.
 
 | Span | Information recorded |
 | --- | --- |
-| Agent | Operation (`run` or `resume`), planner class, status, and `trace_id` when supplied in `tool_context` |
+| Agent | Operation (`run` or `resume`), planner class, status, outcome, finish reason, and `trace_id` when supplied in `tool_context` |
 | Tool | Tool name, call ID, trajectory step, and outcome |
 | LLM | Provider, model, latency, cost, and available input/output token counts |
 
 MLflow aggregates token counts across the LLM spans in a trace. Token totals
 depend on the usage data available from your LLM client. Parallel tools appear
 as separate spans under the agent. A resumed operation gets its own agent span.
+LLM calls and custom spans made inside a tool nest under that tool. Tool status
+reflects execution, so a successful result containing an `error` or `failure`
+field remains successful. Paused tools and agents have an outcome of `paused`;
+an agent that finishes with `no_path` or `budget_exhausted` has an error status.
+A terminal error-recovery response also has an error status, even when the
+planner returns `answer_complete` with a user-facing explanation. A successful
+retry after recovery retains an OK status.
+
+Memory summarization and spawned background subagents get separate traces because
+they can outlive the requesting operation. Their tokens belong to those traces,
+not to the requesting agent's totals.
+
+Remote experiment setup runs off the event loop, with at most a 100 ms wait.
+Calls continue without tracing while setup is pending; later calls use the
+resolved experiment once it is ready. Failed lookups are cached until the
+configuration changes or the process restarts. Remote trace export also runs
+off the event loop. Up to 32 remote roots can be running or awaiting export per
+configuration; additional roots are skipped until capacity is available.
+Remote child spans close on the same background worker as their root, in order,
+so incremental SDK exports cannot block the event loop or omit child token usage.
+If your application creates its own enclosing MLflow root, planner and built-in
+LLM calls await their child exports before returning to it. The enclosing root's
+network timeouts and export policy remain controlled by your MLflow SDK settings.
 
 Built-in native LLM adapters and the LiteLLM planner client support LLM tracing.
 Custom LLM clients need their own instrumentation to contribute LLM spans and

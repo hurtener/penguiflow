@@ -216,6 +216,9 @@ class _FakeMlflowSpan:
     def set_attribute(self, key: str, value: Any) -> None:
         self.attributes[key] = value
 
+    def set_status(self, status: str) -> None:
+        self.attributes["status"] = status
+
 
 def _make_fake_mlflow(spans: list[_FakeMlflowSpan]) -> types.ModuleType:
     module = types.ModuleType("mlflow")
@@ -227,11 +230,20 @@ def _make_fake_mlflow(spans: list[_FakeMlflowSpan]) -> types.ModuleType:
         yield span
 
     module.start_span = start_span  # type: ignore[attr-defined]
+    module.start_span_no_context = start_span  # type: ignore[attr-defined]
     module.__version__ = "3.0.0-fake"
     return module
 
 
 class TestMlflowSink:
+    @pytest.fixture(autouse=True)
+    def metadata_sink(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # SDK lifecycle and resilience are checked separately against the real SDK.
+        monkeypatch.setattr("penguiflow.llm.tracing.prepare_mlflow", AsyncMock())
+        monkeypatch.setattr(
+            "penguiflow.llm.tracing.safe_mlflow_span", lambda mlflow, **kwargs: mlflow.start_span(**kwargs)
+        )
+
     @pytest.mark.asyncio
     async def test_emits_mlflow_span(self, monkeypatch: pytest.MonkeyPatch) -> None:
         spans: list[_FakeMlflowSpan] = []

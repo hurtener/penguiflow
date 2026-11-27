@@ -25,17 +25,207 @@ sensitive data.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import sys
 import time
-from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import Future
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
+from contextvars import ContextVar, copy_context
+from dataclasses import dataclass, field
+from queue import SimpleQueue
+from threading import BoundedSemaphore, Lock, Thread
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 logger = logging.getLogger("penguiflow.llm.tracing")
 
 TRACING_ENV_VAR = "PENGUIFLOW_LLM_TRACING"
+
+
+@dataclass
+class _MlflowResolution:
+    future: Future[Any]
+    wait_timed_out: bool = False
+    remote: bool = False
+    slots: BoundedSemaphore = field(default_factory=lambda: BoundedSemaphore(32))
+
+
+@dataclass
+class _RemoteTraceCloser:
+    trace_id: str
+    resolution: _MlflowResolution
+    pending: SimpleQueue[tuple[Any, bool, int]] = field(default_factory=SimpleQueue)
+    finished: Future[None] = field(default_factory=Future)
+
+    def run(self) -> None:
+        while True:
+            span, last, end_time_ns = self.pending.get()
+            try:
+                span.end(end_time_ns=end_time_ns)
+            except Exception:
+                logger.debug("MLflow span close failed", exc_info=True)
+            finally:
+                if last:
+                    self.resolution.slots.release()
+                    self.finished.set_result(None)
+            if last:
+                return
+
+
+_remote_closer: ContextVar[_RemoteTraceCloser | None] = ContextVar("penguiflow_mlflow_closer", default=None)
+_last_remote_closer: ContextVar[_RemoteTraceCloser | None] = ContextVar("penguiflow_mlflow_last_closer", default=None)
+_mlflow_resolutions: dict[tuple[Any, ...], _MlflowResolution] = {}
+_mlflow_resolution_lock = Lock()
+
+
+def _mlflow_resolution(mlflow: Any) -> _MlflowResolution:
+    fluent = sys.modules.get("mlflow.tracking.fluent")
+    provider = sys.modules.get("mlflow.tracing.provider")
+    destinations = getattr(provider, "_MLFLOW_TRACE_USER_DESTINATION", None)
+    destination = destinations.get() if destinations is not None else None
+    run = getattr(fluent, "_get_latest_active_run", lambda: None)()
+    key = (
+        id(mlflow),
+        mlflow.get_tracking_uri(),
+        os.environ.get("MLFLOW_EXPERIMENT_NAME"),
+        os.environ.get("MLFLOW_EXPERIMENT_ID"),
+        getattr(fluent, "_active_experiment_id", None),
+        repr(destination),
+        run.info.experiment_id if run is not None else None,
+    )
+    with _mlflow_resolution_lock:
+        resolution = _mlflow_resolutions.get(key)
+        if resolution is not None:
+            return resolution
+        resolution = _MlflowResolution(Future(), remote=urlparse(key[1]).scheme not in {"", "file", "sqlite"})
+        _mlflow_resolutions[key] = resolution
+
+    def resolve() -> None:
+        try:
+            from mlflow.entities import MlflowExperimentLocation
+            from mlflow.tracing.provider import _get_tracer
+            from mlflow.tracking.fluent import _get_experiment_id
+
+            experiment_id = getattr(destination, "experiment_id", None)
+            if experiment_id is None:
+                experiment_id = run.info.experiment_id if run is not None else _get_experiment_id()
+            if experiment_id is None:
+                raise ValueError("MLflow experiment is not configured")
+            resolved_destination = MlflowExperimentLocation(experiment_id=experiment_id)
+            _get_tracer(__name__)
+        except Exception:
+            logger.warning("MLflow tracing disabled: experiment initialization failed", exc_info=True)
+            resolution.future.set_result(None)
+        else:
+            resolution.future.set_result(resolved_destination)
+
+    # SDK retries can last minutes; a stuck lookup must not hold up process shutdown.
+    Thread(target=copy_context().run, args=(resolve,), name="penguiflow-mlflow-init", daemon=True).start()
+    return resolution
+
+
+async def prepare_mlflow(mlflow: Any) -> None:
+    """Resolve the configured experiment once, off the event loop, with a bounded wait."""
+    try:
+        if mlflow.get_current_active_span() is not None:
+            return
+        resolution = _mlflow_resolution(mlflow)
+        if resolution.wait_timed_out or resolution.future.done():
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(resolution.future)),
+                timeout=0.1 if resolution.remote else None,
+            )
+        except TimeoutError:
+            resolution.wait_timed_out = True
+            logger.warning("MLflow experiment initialization is still pending; continuing without tracing")
+    except Exception:
+        logger.warning("MLflow tracing initialization failed", exc_info=True)
+
+
+@contextmanager
+def safe_mlflow_span(mlflow: Any, *, name: str, span_type: str) -> Iterator[Any | None]:
+    """Start only prepared roots; tracing failures never replace application results."""
+    span = None
+    resolution = None
+    reserved = False
+    closer = None
+    closer_token = None
+    try:
+        from mlflow.tracing.provider import safe_set_span_in_context
+
+        parent = mlflow.get_current_active_span()
+        kwargs: dict[str, Any] = {"name": name, "span_type": span_type, "parent_span": parent}
+        if parent is not None:
+            closer = _remote_closer.get()
+            if closer is not None and closer.trace_id != parent.trace_id:
+                closer = None
+        if parent is None:
+            resolution = _mlflow_resolution(mlflow)
+            if resolution.future.done() and resolution.future.result() is not None:
+                # Bound pending remote exports when the SDK's retry loop stalls.
+                reserved = resolution.remote and resolution.slots.acquire(blocking=False)
+                if not resolution.remote or reserved:
+                    kwargs["experiment_id"] = resolution.future.result().experiment_id
+                    span = mlflow.start_span_no_context(**kwargs)
+        elif closer is None and urlparse(mlflow.get_tracking_uri()).scheme not in {"", "file", "sqlite"}:
+            resolution = _mlflow_resolution(mlflow)
+            reserved = resolution.slots.acquire(blocking=False)
+            if reserved:
+                span = mlflow.start_span_no_context(**kwargs)
+        else:
+            span = mlflow.start_span_no_context(**kwargs)
+        if span is not None and reserved and resolution is not None:
+            closer = _RemoteTraceCloser(span.trace_id, resolution)
+            Thread(target=closer.run, name="penguiflow-mlflow-export", daemon=True).start()
+            closer_token = _remote_closer.set(closer)
+    except Exception:
+        logger.debug("MLflow span start failed", exc_info=True)
+
+    if span is None:
+        if reserved and resolution is not None:
+            resolution.slots.release()
+        yield None
+        return
+
+    try:
+        with safe_set_span_in_context(span):
+            try:
+                yield span
+            except BaseException:
+                try:
+                    span.set_status("ERROR")
+                except Exception:
+                    logger.debug("MLflow span status failed", exc_info=True)
+                raise
+    finally:
+        if closer_token is not None:
+            _remote_closer.reset(closer_token)
+        if closer is not None:
+            # Child spans must finish before the root computes its final token totals.
+            closer.pending.put((span, reserved, time.time_ns()))
+            if reserved:
+                _last_remote_closer.set(closer)
+        else:
+            try:
+                span.end()
+            except Exception:
+                logger.debug("MLflow span close failed", exc_info=True)
+
+
+async def finish_mlflow_spans(mlflow: Any | None) -> None:
+    """Complete children before returning control to an application-owned root."""
+    closer = _last_remote_closer.get()
+    if closer is None or mlflow is None:
+        return
+    parent = mlflow.get_current_active_span()
+    if parent is not None and parent.trace_id == closer.trace_id:
+        _last_remote_closer.set(None)
+        await asyncio.shield(asyncio.wrap_future(closer.finished))
 
 
 @dataclass(slots=True)
@@ -130,8 +320,7 @@ class LoggingLLMTraceSink:
 class MlflowLLMTraceSink:
     """Sink emitting MLflow Tracing spans (``span_type="LLM"``).
 
-    Requires ``mlflow>=2.14`` for spans and ``mlflow>=3.2`` for trace-level
-    token aggregation (install ``penguiflow[mlflow]``). mlflow is imported
+    Requires ``mlflow>=3.18.0`` (install ``penguiflow[mlflow]``). mlflow is imported
     lazily on first use; if it is missing or too old the sink degrades to a
     no-op with a single warning — it never fails the LLM call. Spans nest
     under any active MLflow trace (e.g. an autologged agent run) or start a
@@ -156,15 +345,22 @@ class MlflowLLMTraceSink:
                     exc,
                 )
                 return None
-            if not hasattr(mlflow, "start_span"):
+            if not hasattr(mlflow, "start_span_no_context"):
                 self._unavailable = True
                 logger.warning(
-                    "MlflowLLMTraceSink disabled: mlflow %s lacks the tracing API (need >= 2.14)",
+                    "MlflowLLMTraceSink disabled: mlflow %s lacks the tracing API (need >= 3.18.0)",
                     getattr(mlflow, "__version__", "unknown"),
                 )
                 return None
             self._mlflow = mlflow
         return self._mlflow
+
+    async def prepare(self) -> None:
+        mlflow = self._mlflow
+        if mlflow is None and not self._unavailable:
+            mlflow = await asyncio.to_thread(self._module)
+        if mlflow is not None:
+            await prepare_mlflow(mlflow)
 
     @contextmanager
     def span(self, call: LLMCallSpan) -> Iterator[Any]:
@@ -174,7 +370,11 @@ class MlflowLLMTraceSink:
                 yield None
             return
 
-        with mlflow.start_span(name=self._span_name, span_type="LLM") as span:
+        with safe_mlflow_span(mlflow, name=self._span_name, span_type="LLM") as span:
+            if span is None:
+                with _measured(call):
+                    yield None
+                return
             try:
                 attributes: dict[str, Any] = {
                     "provider": call.provider,
@@ -192,6 +392,8 @@ class MlflowLLMTraceSink:
             finally:
                 try:
                     span.set_attributes(call.outcome_attributes())
+                    if call.error_type is not None:
+                        span.set_status("ERROR")
                     if call.input_tokens is not None and call.output_tokens is not None:
                         token_usage = {
                             "input_tokens": call.input_tokens,
@@ -201,6 +403,16 @@ class MlflowLLMTraceSink:
                         span.set_attribute("mlflow.chat.tokenUsage", token_usage)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug("mlflow span attribute error", exc_info=True)
+
+
+@asynccontextmanager
+async def trace_llm_call(sink: LLMTraceSink, call: LLMCallSpan) -> AsyncIterator[Any]:
+    try:
+        with sink.span(call) as span:
+            yield span
+    finally:
+        if isinstance(sink, MlflowLLMTraceSink):
+            await finish_mlflow_spans(sink._mlflow)
 
 
 def resolve_trace_sink_from_env() -> LLMTraceSink | None:

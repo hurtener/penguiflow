@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Protocol
 
+from .._tracing_context import detached_trace_context
+
 
 class MemoryBudgetExceeded(RuntimeError):
     """Raised when memory exceeds configured token budgets and overflow_policy="error"."""
@@ -528,7 +530,7 @@ class DefaultShortTermMemory:
             return
         if not self._pending:
             return
-        self._summarize_task = asyncio.create_task(self._run_summarization())
+        self._summarize_task = asyncio.create_task(self._run_summarization(), context=detached_trace_context())
 
     def _maybe_schedule_degraded_recovery_locked(self) -> None:
         if not self._backlog:
@@ -539,7 +541,7 @@ class DefaultShortTermMemory:
         if self._summarize_task is not None and not self._summarize_task.done():
             return
         self._last_degraded_attempt_ts = now
-        self._summarize_task = asyncio.create_task(self._run_recovery())
+        self._summarize_task = asyncio.create_task(self._run_recovery(), context=detached_trace_context())
 
     async def _run_summarization(self) -> None:
         await self._run_summarization_impl(recovering=False)
@@ -630,7 +632,9 @@ class DefaultShortTermMemory:
                 if not self._pending:
                     return
                 if self._summarize_task is None or self._summarize_task.done():
-                    self._summarize_task = asyncio.create_task(self._run_summarization())
+                    self._summarize_task = asyncio.create_task(
+                        self._run_summarization(), context=detached_trace_context()
+                    )
 
     def _truncate_summary_to_budget_locked(self) -> None:
         budget = self._config.budget

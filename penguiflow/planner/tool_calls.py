@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping, MutableMapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,57 @@ class ToolCallOutcome:
 
 
 async def execute_tool_call(
+    planner: Any,
+    *,
+    trajectory: Trajectory,
+    spec: Any,
+    parsed_args: BaseModel,
+    tool_call_id: str,
+    action_seq: int,
+    step_index: int,
+    artifact_collector: Any | None,
+    source_collector: Any | None,
+    tool_context_update: Mapping[str, Any] | None = None,
+    artifact_metadata_extra: Mapping[str, Any] | None = None,
+    steering: SteeringInbox | None = None,
+) -> ToolCallOutcome:
+    """Execute a tool call and emit tool_call_* events.
+
+    This intentionally does not mutate trajectory.steps; callers decide how the
+    outcome is recorded (single-step runtime vs. parallel plan aggregation).
+    """
+
+    telemetry = getattr(planner, "_mlflow_telemetry", None)
+    with (
+        telemetry.trace_tool_call(
+            tool_name=spec.name,
+            tool_call_id=tool_call_id,
+            trajectory_step=len(trajectory.steps),
+            action_seq=action_seq,
+        )
+        if telemetry is not None
+        else nullcontext()
+    ) as trace:
+        outcome = await _execute_tool_call(
+            planner,
+            trajectory=trajectory,
+            spec=spec,
+            parsed_args=parsed_args,
+            tool_call_id=tool_call_id,
+            action_seq=action_seq,
+            step_index=step_index,
+            artifact_collector=artifact_collector,
+            source_collector=source_collector,
+            tool_context_update=tool_context_update,
+            artifact_metadata_extra=artifact_metadata_extra,
+            steering=steering,
+        )
+        if trace is not None:
+            trace.result = outcome
+        return outcome
+
+
+async def _execute_tool_call(
     planner: Any,
     *,
     trajectory: Trajectory,

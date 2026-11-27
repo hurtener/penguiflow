@@ -60,8 +60,28 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
+  mlflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v2
+      - name: Create virtual environment
+        run: uv venv
+      - name: Install tracing dependencies
+        run: uv pip install -e ".[dev,mlflow]" "mlflow==3.18.0" "litellm==1.108.0"
+      - name: Test real MLflow and LiteLLM SDKs
+        run: >-
+          .venv/bin/pytest tests/test_mlflow_telemetry.py
+          tests/test_mlflow_tracing_integration.py tests/test_llm_tracing.py
+          tests/test_mlflow_sink_resilience.py tests/test_background_trace_context.py
+          tests/test_mlflow_http_e2e.py tests/test_mlflow_lifecycle_e2e.py
+          tests/test_mlflow_background_e2e.py
+
   publish:
-    needs: test
+    needs: [test, mlflow]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

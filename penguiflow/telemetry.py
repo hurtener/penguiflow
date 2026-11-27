@@ -2,34 +2,39 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .llm.tracing import finish_mlflow_spans, prepare_mlflow, safe_mlflow_span
+
 if TYPE_CHECKING:
-    from .planner.models import PlannerEvent
+    from .planner.models import PlannerFinish, PlannerPause
+    from .planner.tool_calls import ToolCallOutcome
 
 _LOGGER = logging.getLogger("penguiflow.telemetry")
 
 
 @dataclass
 class _Run:
-    span: Any
-    tools: dict[str, Any] = field(default_factory=dict)
+    result: PlannerFinish | PlannerPause | None = None
+
+
+@dataclass
+class _ToolRun:
+    result: ToolCallOutcome | None = None
 
 
 class MlflowTelemetry:
-    """Record agent/tool spans with MLflow >=3.8.1, without capturing payloads."""
+    """Record agent/tool spans with MLflow >=3.18.0, without capturing payloads."""
 
     def __init__(self, *, flow_name: str) -> None:
         self._flow_name = flow_name
         self._mlflow: Any = None
         self._unavailable = False
-        self._run: ContextVar[_Run | None] = ContextVar("penguiflow_mlflow_run", default=None)
 
     def _module(self) -> Any | None:
         if not self._unavailable and self._mlflow is None:
@@ -42,73 +47,103 @@ class MlflowTelemetry:
                 self._mlflow = mlflow
         return self._mlflow
 
+    async def prepare(self) -> None:
+        mlflow = self._mlflow
+        if mlflow is None and not self._unavailable:
+            mlflow = await asyncio.to_thread(self._module)
+        if mlflow is not None:
+            await prepare_mlflow(mlflow)
+
     @contextmanager
-    def trace_agent_run(self, *, operation: str, trace_id: str | None = None) -> Iterator[None]:
+    def trace_agent_run(self, *, operation: str, trace_id: str | None = None) -> Iterator[_Run | None]:
         mlflow = self._module()
         if mlflow is None:
-            yield
+            yield None
             return
-        with mlflow.start_span(name=f"agent.{operation}", span_type="AGENT") as span:
+        with safe_mlflow_span(mlflow, name=f"agent.{operation}", span_type="AGENT") as span:
+            if span is None:
+                yield None
+                return
             attributes = {"flow.name": self._flow_name, "operation": operation}
             if trace_id is not None:
                 attributes["trace_id"] = trace_id
             span.set_attributes(attributes)
-            run = _Run(span=span)
-            token = self._run.set(run)
+            run = _Run()
             outcome = "ok"
             try:
-                yield
+                yield run
             except BaseException:
                 outcome = "error"
                 raise
             finally:
-                self._run.reset(token)
-                for tool in run.tools.values():
-                    self._end(tool, "ERROR", "unfinished")
-                span.set_attributes({"outcome": outcome})
-                span.set_status("OK" if outcome == "ok" else "ERROR")
+                from .planner.models import PlannerPause
 
-    def record_planner_event(self, event: PlannerEvent) -> None:
-        run = self._run.get()
-        if run is None or event.event_type not in {"tool_call_start", "tool_call_result"}:
+                finish_reason = run.result.reason if run.result is not None else None
+                if outcome != "error" and run.result is not None:
+                    if isinstance(run.result, PlannerPause):
+                        outcome = "paused"
+                    elif (
+                        finish_reason != "answer_complete"
+                        or run.result.metadata.get("trajectory_metadata", {}).get("execution_outcome") == "error"
+                    ):
+                        outcome = "error"
+                self._finish(span, outcome, finish_reason=finish_reason)
+
+    @asynccontextmanager
+    async def atrace_agent_run(self, *, operation: str, trace_id: str | None = None) -> AsyncIterator[_Run | None]:
+        try:
+            with self.trace_agent_run(operation=operation, trace_id=trace_id) as run:
+                yield run
+        finally:
+            await finish_mlflow_spans(self._mlflow)
+
+    @contextmanager
+    def trace_tool_call(
+        self, *, tool_name: str, tool_call_id: str, trajectory_step: int, action_seq: int
+    ) -> Iterator[_ToolRun | None]:
+        mlflow = self._module()
+        if mlflow is None:
+            yield None
             return
-        call_id = event.extra["tool_call_id"]
-        if event.event_type == "tool_call_start":
-            if call_id in run.tools:
+        with safe_mlflow_span(mlflow, name=tool_name, span_type="TOOL") as span:
+            if span is None:
+                yield None
                 return
-            tool = self._mlflow.start_span_no_context(
-                name=event.extra["tool_name"], span_type="TOOL", parent_span=run.span
-            )
-            run.tools[call_id] = tool
-            tool.set_attributes(
+            span.set_attributes(
                 {
-                    "tool.call_id": call_id,
-                    "tool.name": event.extra["tool_name"],
-                    "trajectory.step": event.trajectory_step,
-                    "action.sequence": event.extra.get("action_seq", 0),
+                    "tool.call_id": tool_call_id,
+                    "tool.name": tool_name,
+                    "trajectory.step": trajectory_step,
+                    "action.sequence": action_seq,
                 }
             )
-        else:
-            tool = run.tools.pop(call_id, None)
-            if tool is None:
-                return
-            result = event.extra.get("result_json")
-            if isinstance(result, str):
-                try:
-                    result = json.loads(result)
-                except json.JSONDecodeError:
-                    result = None
-            failed = isinstance(result, dict) and (result.get("error") is not None or result.get("failure") is not None)
-            self._end(tool, "ERROR" if failed else "OK", "error" if failed else "success")
+            run = _ToolRun()
+            outcome = "unfinished"
+            try:
+                yield run
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                if outcome != "error" and run.result is not None:
+                    if run.result.pause is not None:
+                        outcome = "paused"
+                    elif run.result.error is not None or run.result.failure is not None:
+                        outcome = "error"
+                    else:
+                        outcome = "success"
+                self._finish(span, outcome)
 
     @staticmethod
-    def _end(span: Any, status: str, outcome: str) -> None:
-        # Cleanup must preserve application exceptions and close the remaining spans.
+    def _finish(span: Any, outcome: str, *, finish_reason: str | None = None) -> None:
         try:
-            span.set_attributes({"outcome": outcome})
-            span.end(status=status)
+            attributes = {"outcome": outcome}
+            if finish_reason is not None:
+                attributes["finish_reason"] = finish_reason
+            span.set_attributes(attributes)
+            span.set_status("OK" if outcome in {"ok", "success"} else "ERROR")
         except Exception:
-            _LOGGER.warning("MLflow tool span close failed", exc_info=True)
+            _LOGGER.warning("MLflow span close failed", exc_info=True)
 
 
 __all__ = ["MlflowTelemetry"]

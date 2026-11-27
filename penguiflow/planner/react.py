@@ -757,15 +757,17 @@ class ReactPlanner:
 
         # Fallback: serialize when no session_id is provided to avoid corrupting shared mutable state.
         async with self._fallback_run_lock:
-            with (
-                self._mlflow_telemetry.trace_agent_run(operation="run", trace_id=(tool_context or {}).get("trace_id"))
+            if self._mlflow_telemetry is not None:
+                await self._mlflow_telemetry.prepare()
+            async with (
+                self._mlflow_telemetry.atrace_agent_run(operation="run", trace_id=(tool_context or {}).get("trace_id"))
                 if self._mlflow_telemetry is not None
                 else nullcontext()
-            ):
+            ) as trace_run:
                 previous = getattr(self, "_steering", None)
                 self._steering = steering
                 try:
-                    return await _run_impl(
+                    result = await _run_impl(
                         self,
                         query,
                         input_parts=input_parts,
@@ -775,6 +777,9 @@ class ReactPlanner:
                         memory_key=memory_key,
                         tool_visibility=tool_visibility,
                     )
+                    if trace_run is not None:
+                        trace_run.result = result
+                    return result
                 finally:
                     self._steering = previous
 
@@ -831,17 +836,19 @@ class ReactPlanner:
                 session_planner._event_callback = previous_callback
 
         async with self._fallback_run_lock:
-            with (
-                self._mlflow_telemetry.trace_agent_run(
+            if self._mlflow_telemetry is not None:
+                await self._mlflow_telemetry.prepare()
+            async with (
+                self._mlflow_telemetry.atrace_agent_run(
                     operation="resume", trace_id=(tool_context or {}).get("trace_id")
                 )
                 if self._mlflow_telemetry is not None
                 else nullcontext()
-            ):
+            ) as trace_run:
                 previous = getattr(self, "_steering", None)
                 self._steering = steering
                 try:
-                    return await _resume_impl(
+                    result = await _resume_impl(
                         self,
                         token,
                         user_input=user_input,
@@ -849,6 +856,9 @@ class ReactPlanner:
                         memory_key=memory_key,
                         tool_visibility=tool_visibility,
                     )
+                    if trace_run is not None:
+                        trace_run.result = result
+                    return result
                 finally:
                     self._steering = previous
 
@@ -1222,11 +1232,6 @@ class ReactPlanner:
         log_fn(event.event_type, extra=payload)
 
         # Invoke callback if provided
-        if self._mlflow_telemetry is not None:
-            try:
-                self._mlflow_telemetry.record_planner_event(event)
-            except Exception:
-                logger.exception("mlflow_telemetry_error")
         if self._event_callback is not None:
             try:
                 self._event_callback(event)
